@@ -24,6 +24,7 @@ const DEFAULT_PRESETS: ApiPreset[] = [];
 
 // Default Rose Color
 const DEFAULT_THEME_COLOR = '#e28a9d';
+const FONT_BASELINE_MULTIPLIER = 1.2; // Old 120% is the new 100%
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   activeCommentsEnabled: false,
@@ -203,8 +204,10 @@ const App: React.FC = () => {
   // --- THEME & FONT SIZE APPLICATION ---
 
   useEffect(() => {
+    const effectiveFontScale = appSettings.fontSizeScale * FONT_BASELINE_MULTIPLIER;
+
     // Apply Font Size Global Scale
-    document.documentElement.style.fontSize = `${appSettings.fontSizeScale * 90}%`;
+    document.documentElement.style.fontSize = `${effectiveFontScale * 90}%`;
 
     // Calculate Colors
     const baseColor = appSettings.themeColor;
@@ -223,7 +226,7 @@ const App: React.FC = () => {
 
     // Apply CSS Variables to Root
     const root = document.documentElement;
-    root.style.setProperty('--app-font-scale', `${appSettings.fontSizeScale}`);
+    root.style.setProperty('--app-font-scale', `${effectiveFontScale}`);
     root.style.setProperty('--theme-50', hexToRgbValues(c50));
     root.style.setProperty('--theme-100', hexToRgbValues(c100));
     root.style.setProperty('--theme-200', hexToRgbValues(c200));
