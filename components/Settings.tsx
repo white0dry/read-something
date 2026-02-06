@@ -21,6 +21,7 @@ import WorldBookSettings from './settings/WorldBookSettings';
 import AppearanceSettings from './settings/AppearanceSettings';
 import ApiSettings from './settings/ApiSettings';
 import ModalPortal from './ModalPortal';
+import { deleteImageByRef, saveImageFile } from '../utils/imageStorage';
 
 interface SettingsProps {
   isDarkMode: boolean;
@@ -176,22 +177,36 @@ const Settings: React.FC<SettingsProps> = ({
   const updateAvatar = (imageUrl: string) => {
     if (!avatarModal.targetId) return;
 
+    const previousAvatar =
+      avatarModal.targetType === 'PERSONA'
+        ? personas.find(p => p.id === avatarModal.targetId)?.avatar
+        : characters.find(c => c.id === avatarModal.targetId)?.avatar;
+
     if (avatarModal.targetType === 'PERSONA') {
       setPersonas(prev => prev.map(p => p.id === avatarModal.targetId ? { ...p, avatar: imageUrl } : p));
     } else {
       setCharacters(prev => prev.map(c => c.id === avatarModal.targetId ? { ...c, avatar: imageUrl } : c));
     }
+
+    if (previousAvatar && previousAvatar !== imageUrl) {
+      deleteImageByRef(previousAvatar).catch(err => console.error('Failed to delete old avatar image:', err));
+    }
+
     closeAvatarModal();
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        updateAvatar(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+      try {
+        const imageRef = await saveImageFile(file);
+        updateAvatar(imageRef);
+      } catch (error) {
+        console.error('Failed to save avatar image:', error);
+        alert('图片保存失败，请重试或改用网络链接。');
+      } finally {
+        e.target.value = '';
+      }
     }
   };
 

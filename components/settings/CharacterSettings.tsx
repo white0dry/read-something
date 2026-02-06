@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Camera, Check, Trash2, UserCircle, Book, Plus, ArrowLeft } from 'lucide-react';
 import { Character, Persona, ThemeClasses } from './types';
 import MultiSelectDropdown from './MultiSelectDropdown';
+import ResolvedImage from '../ResolvedImage';
 
 interface CharacterSettingsProps {
   characters: Character[];
@@ -82,7 +83,7 @@ const CharacterSettings: React.FC<CharacterSettingsProps> = ({
                   <div className="relative group cursor-pointer flex-shrink-0" onClick={() => isEditing && onOpenAvatarModal(char.id, 'CHARACTER')}>
                     <div className={`w-14 h-14 rounded-full overflow-hidden flex items-center justify-center border-4 ${isDarkMode ? 'border-[#2d3748]' : 'border-[#e0e5ec]'} ${pressedClass}`}>
                       {char.avatar ? (
-                        <img src={char.avatar} alt="Avatar" className="w-full h-full object-cover" />
+                        <ResolvedImage src={char.avatar} alt="Avatar" className="w-full h-full object-cover" />
                       ) : (
                         <FeatherIcon size={32} className="text-slate-300" />
                       )}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+﻿import React, { useState, useEffect, useRef } from 'react';
 import { BookOpen, PieChart, Settings as SettingsIcon, LayoutGrid, CheckCircle2, AlertCircle } from 'lucide-react';
 import Library from './components/Library';
 import Reader from './components/Reader';
@@ -6,6 +6,8 @@ import Stats from './components/Stats';
 import Settings from './components/Settings';
 import { AppView, Book, ApiConfig, ApiPreset, AppSettings } from './types';
 import { Persona, Character, WorldBookEntry } from './components/settings/types';
+import { deleteImageByRef, migrateDataUrlToImageRef } from './utils/imageStorage';
+import { compactBookForState, deleteBookContent, migrateInlineBookContent, saveBookContent } from './utils/bookContentStorage';
 
 interface Notification {
   show: boolean;
@@ -38,10 +40,10 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
 };
 
 const MOCK_BOOKS_INIT: Book[] = [
-  { id: '1', title: '三体：黑暗森林', author: '刘慈欣', coverUrl: 'https://picsum.photos/150/220?random=1', progress: 45, lastRead: '2小时前', tags: ['科幻', '硬核', '必读'], chapters: [], fullText: '' },
-  { id: '2', title: '百年孤独', author: '加西亚·马尔克斯', coverUrl: 'https://picsum.photos/150/220?random=2', progress: 12, lastRead: '昨天', tags: ['文学', '魔幻现实'], chapters: [], fullText: '' },
-  { id: '3', title: '人类简史', author: '尤瓦尔·赫拉利', coverUrl: 'https://picsum.photos/150/220?random=3', progress: 88, lastRead: '3天前', tags: ['历史', '科普'], chapters: [], fullText: '' },
-  { id: '4', title: '解忧杂货店', author: '东野圭吾', coverUrl: 'https://picsum.photos/150/220?random=4', progress: 0, lastRead: '', tags: ['小说', '治愈'], chapters: [], fullText: '' },
+  { id: '1', title: 'The Three-Body Problem', author: 'Liu Cixin', coverUrl: 'https://picsum.photos/150/220?random=1', progress: 45, lastRead: '2 hours ago', tags: ['Sci-Fi', 'Hardcore', 'Must Read'], chapters: [], fullText: '' },
+  { id: '2', title: 'One Hundred Years of Solitude', author: 'Gabriel Garcia Marquez', coverUrl: 'https://picsum.photos/150/220?random=2', progress: 12, lastRead: 'Yesterday', tags: ['Literature', 'Magical Realism'], chapters: [], fullText: '' },
+  { id: '3', title: 'Sapiens', author: 'Yuval Noah Harari', coverUrl: 'https://picsum.photos/150/220?random=3', progress: 88, lastRead: '3 days ago', tags: ['History', 'Popular Science'], chapters: [], fullText: '' },
+  { id: '4', title: 'The Miracles of the Namiya General Store', author: 'Keigo Higashino', coverUrl: 'https://picsum.photos/150/220?random=4', progress: 0, lastRead: '', tags: ['Novel', 'Healing'], chapters: [], fullText: '' },
 ];
 
 // Helper to convert hex to RGB values for CSS variables
@@ -165,15 +167,15 @@ const App: React.FC = () => {
   const [wbCategories, setWbCategories] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem('app_wb_categories');
-      return saved ? JSON.parse(saved) : ['未分类'];
-    } catch { return ['未分类']; }
+      return saved ? JSON.parse(saved) : ['Uncategorized'];
+    } catch { return ['Uncategorized']; }
   });
 
   // Library User Profile State
   const [userSignature, setUserSignature] = useState(() => {
     // Check for null strictly so we allow empty string as a valid signature
     const saved = localStorage.getItem('app_user_signature');
-    return saved !== null ? saved : "黑夜无论怎样悠长 白昼总会到来";
+    return saved !== null ? saved : "榛戝鏃犺鎬庢牱鎮犻暱 鐧芥樇鎬讳細鍒版潵";
   });
   
   const [activePersonaId, setActivePersonaId] = useState<string | null>(() => {
@@ -184,22 +186,106 @@ const App: React.FC = () => {
     return localStorage.getItem('app_active_character_id') || null;
   });
 
+  const safeSetStorageItem = (key: string, value: string) => {
+    try {
+      localStorage.setItem(key, value);
+      return true;
+    } catch (error) {
+      console.error(`Failed to persist key "${key}"`, error);
+      return false;
+    }
+  };
+
   // --- EFFECTS FOR PERSISTENCE ---
 
-  useEffect(() => localStorage.setItem('app_dark_mode', JSON.stringify(isDarkMode)), [isDarkMode]);
-  useEffect(() => localStorage.setItem('app_books', JSON.stringify(books)), [books]);
-  useEffect(() => localStorage.setItem('app_api_config', JSON.stringify(apiConfig)), [apiConfig]);
-  useEffect(() => localStorage.setItem('app_api_presets', JSON.stringify(apiPresets)), [apiPresets]);
-  useEffect(() => localStorage.setItem('app_settings', JSON.stringify(appSettings)), [appSettings]);
-  useEffect(() => localStorage.setItem('app_personas', JSON.stringify(personas)), [personas]);
-  useEffect(() => localStorage.setItem('app_characters', JSON.stringify(characters)), [characters]);
-  useEffect(() => localStorage.setItem('app_worldbook', JSON.stringify(worldBookEntries)), [worldBookEntries]);
-  useEffect(() => localStorage.setItem('app_wb_categories', JSON.stringify(wbCategories)), [wbCategories]);
+  useEffect(() => { safeSetStorageItem('app_dark_mode', JSON.stringify(isDarkMode)); }, [isDarkMode]);
+  useEffect(() => {
+    const compactedBooks = books.map(compactBookForState);
+    safeSetStorageItem('app_books', JSON.stringify(compactedBooks));
+  }, [books]);
+  useEffect(() => { safeSetStorageItem('app_api_config', JSON.stringify(apiConfig)); }, [apiConfig]);
+  useEffect(() => { safeSetStorageItem('app_api_presets', JSON.stringify(apiPresets)); }, [apiPresets]);
+  useEffect(() => { safeSetStorageItem('app_settings', JSON.stringify(appSettings)); }, [appSettings]);
+  useEffect(() => { safeSetStorageItem('app_personas', JSON.stringify(personas)); }, [personas]);
+  useEffect(() => { safeSetStorageItem('app_characters', JSON.stringify(characters)); }, [characters]);
+  useEffect(() => { safeSetStorageItem('app_worldbook', JSON.stringify(worldBookEntries)); }, [worldBookEntries]);
+  useEffect(() => { safeSetStorageItem('app_wb_categories', JSON.stringify(wbCategories)); }, [wbCategories]);
   
   // New persistence
-  useEffect(() => localStorage.setItem('app_user_signature', userSignature), [userSignature]);
-  useEffect(() => localStorage.setItem('app_active_persona_id', activePersonaId || ''), [activePersonaId]);
-  useEffect(() => localStorage.setItem('app_active_character_id', activeCharacterId || ''), [activeCharacterId]);
+  useEffect(() => { safeSetStorageItem('app_user_signature', userSignature); }, [userSignature]);
+  useEffect(() => { safeSetStorageItem('app_active_persona_id', activePersonaId || ''); }, [activePersonaId]);
+  useEffect(() => { safeSetStorageItem('app_active_character_id', activeCharacterId || ''); }, [activeCharacterId]);
+
+  // One-time migration: move old inline images/text out of localStorage into IndexedDB.
+  useEffect(() => {
+    let cancelled = false;
+
+    const migrateStateData = async () => {
+      try {
+        const migratedPersonas = await Promise.all(
+          personas.map(async (persona) => {
+            if (!persona.avatar || !persona.avatar.startsWith('data:image/')) return persona;
+            try {
+              const avatarRef = await migrateDataUrlToImageRef(persona.avatar);
+              return { ...persona, avatar: avatarRef };
+            } catch {
+              return persona;
+            }
+          })
+        );
+
+        const migratedCharacters = await Promise.all(
+          characters.map(async (character) => {
+            if (!character.avatar || !character.avatar.startsWith('data:image/')) return character;
+            try {
+              const avatarRef = await migrateDataUrlToImageRef(character.avatar);
+              return { ...character, avatar: avatarRef };
+            } catch {
+              return character;
+            }
+          })
+        );
+
+        const booksWithMigratedCover = await Promise.all(
+          books.map(async (book) => {
+            if (!book.coverUrl || !book.coverUrl.startsWith('data:image/')) return book;
+            try {
+              const coverRef = await migrateDataUrlToImageRef(book.coverUrl);
+              return { ...book, coverUrl: coverRef };
+            } catch {
+              return book;
+            }
+          })
+        );
+        const migratedBooks = await migrateInlineBookContent(booksWithMigratedCover);
+
+        if (cancelled) return;
+
+        const personasChanged = migratedPersonas.some((p, idx) => p.avatar !== personas[idx]?.avatar);
+        const charactersChanged = migratedCharacters.some((c, idx) => c.avatar !== characters[idx]?.avatar);
+        const booksChanged = migratedBooks.some((book, idx) => {
+          const original = books[idx];
+          if (!original) return true;
+          return (
+            book.coverUrl !== original.coverUrl ||
+            (book.fullText || '') !== (original.fullText || '') ||
+            (book.fullTextLength || 0) !== (original.fullTextLength || 0) ||
+            (book.chapterCount || 0) !== (original.chapterCount || 0) ||
+            (book.chapters?.length || 0) !== (original.chapters?.length || 0)
+          );
+        });
+
+        if (personasChanged) setPersonas(migratedPersonas);
+        if (charactersChanged) setCharacters(migratedCharacters);
+        if (booksChanged) setBooks(migratedBooks);
+      } catch (error) {
+        console.error('State migration failed:', error);
+      }
+    };
+
+    migrateStateData();
+    return () => { cancelled = true; };
+  }, []);
 
   // --- THEME & FONT SIZE APPLICATION ---
 
@@ -262,10 +348,10 @@ const App: React.FC = () => {
              headers: { 'Authorization': `Bearer ${apiConfig.apiKey}`, 'Content-Type': 'application/json' }
           });
         }
-        if (response && response.ok) showNotification('拉取模型成功', 'success');
+        if (response && response.ok) showNotification('\u62c9\u53d6\u6a21\u578b\u6210\u529f', 'success');
       } catch (error) { 
         console.error("Auto-fetch failed", error);
-        showNotification('拉取模型失败', 'error');
+        showNotification('\u62c9\u53d6\u6a21\u578b\u5931\u8d25', 'error');
       }
     };
     checkConnection();
@@ -314,19 +400,45 @@ const App: React.FC = () => {
     transitionToView(AppView.LIBRARY);
   };
 
-  const handleAddBook = (newBook: Book) => {
-    setBooks(prev => [newBook, ...prev]);
-    showNotification('导入书籍成功');
+  const handleAddBook = async (newBook: Book) => {
+    const fullText = newBook.fullText || '';
+    const chapters = newBook.chapters || [];
+
+    try {
+      await saveBookContent(newBook.id, fullText, chapters);
+      const compacted = compactBookForState({ ...newBook, fullText, chapters });
+      setBooks(prev => [compacted, ...prev]);
+      showNotification('Book imported successfully');
+    } catch (error) {
+      console.error('Failed to persist new book content:', error);
+      showNotification('Failed to save book content', 'error');
+    }
   };
 
-  const handleUpdateBook = (updatedBook: Book) => {
-    setBooks(prev => prev.map(b => b.id === updatedBook.id ? updatedBook : b));
-    showNotification('书籍信息已更新');
+  const handleUpdateBook = async (updatedBook: Book) => {
+    const fullText = updatedBook.fullText || '';
+    const chapters = updatedBook.chapters || [];
+
+    try {
+      await saveBookContent(updatedBook.id, fullText, chapters);
+      const compacted = compactBookForState({ ...updatedBook, fullText, chapters });
+      setBooks(prev => prev.map(b => (b.id === updatedBook.id ? compacted : b)));
+      showNotification('Book updated');
+    } catch (error) {
+      console.error('Failed to persist updated book content:', error);
+      showNotification('Failed to save changes', 'error');
+    }
   };
 
   const handleDeleteBook = (bookId: string) => {
+    const targetBook = books.find(b => b.id === bookId);
+    if (targetBook?.coverUrl) {
+      deleteImageByRef(targetBook.coverUrl).catch(err => console.error('Failed to delete deleted-book cover image:', err));
+    }
+    deleteBookContent(bookId).catch(err => console.error('Failed to delete deleted-book text content:', err));
+
     setBooks(prev => prev.filter(b => b.id !== bookId));
-    showNotification('书籍已删除');
+    showNotification('Book deleted');
   };
 
   const appWrapperClass = `flex flex-col h-full font-sans overflow-hidden transition-colors duration-300 ${isDarkMode ? 'dark-mode bg-[#2d3748] text-slate-200' : 'bg-[#e0e5ec] text-slate-600'}`;
@@ -455,3 +567,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+

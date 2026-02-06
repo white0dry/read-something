@@ -4,6 +4,9 @@ import { GoogleGenAI } from "@google/genai";
 import { Book, Chapter, ApiConfig } from '../types';
 import { Persona, Character } from './settings/types';
 import ModalPortal from './ModalPortal';
+import ResolvedImage from './ResolvedImage';
+import { deleteImageByRef, saveImageFile } from '../utils/imageStorage';
+import { getBookContent, getBookTextLength } from '../utils/bookContentStorage';
 
 interface LibraryProps {
   books: Book[];
@@ -104,6 +107,7 @@ const Library: React.FC<LibraryProps> = ({
   // State for Book Editing
   const [editingBook, setEditingBook] = useState<Book | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [isLoadingBookContent, setIsLoadingBookContent] = useState(false);
   const [closingModal, setClosingModal] = useState<'edit' | 'import' | null>(null);
   
   // State for Book Importing
@@ -273,6 +277,7 @@ const Library: React.FC<LibraryProps> = ({
     const matchesTags = selectedTags.length === 0 || selectedTags.every(tag => book.tags?.includes(tag));
     return matchesSearch && matchesTags;
   });
+  const getTextLength = (book: Partial<Book>) => getBookTextLength(book);
 
   // Apply Sorting
   const sortedBooks = [...filteredBooks].sort((a, b) => {
@@ -288,8 +293,8 @@ const Library: React.FC<LibraryProps> = ({
         result = a.progress - b.progress;
         break;
       case 'length':
-        const lenA = a.fullText?.length || 0;
-        const lenB = b.fullText?.length || 0;
+        const lenA = getTextLength(a);
+        const lenB = getTextLength(b);
         result = lenA - lenB;
         break;
       case 'id':
@@ -325,10 +330,30 @@ const Library: React.FC<LibraryProps> = ({
       window.clearTimeout(editModalCloseTimerRef.current);
       editModalCloseTimerRef.current = null;
     }
-    setEditingBook({ ...book, tags: book.tags || [] });
+    setEditingBook({ ...book, tags: book.tags || [], fullText: '', chapters: [] });
+    setIsLoadingBookContent(true);
     setClosingModal(prev => prev === 'edit' ? null : prev);
     setIsEditModalOpen(true);
     resetModalState();
+
+    getBookContent(book.id)
+      .then((content) => {
+        setEditingBook(prev => {
+          if (!prev || prev.id !== book.id) return prev;
+          return {
+            ...prev,
+            fullText: content?.fullText || '',
+            chapters: content?.chapters || [],
+          };
+        });
+      })
+      .catch((error) => {
+        console.error('Failed to load book content for edit modal:', error);
+        openErrorModal('读取书籍正文失败，请稍后重试。');
+      })
+      .finally(() => {
+        setIsLoadingBookContent(false);
+      });
   };
 
   // Open Import
@@ -347,6 +372,7 @@ const Library: React.FC<LibraryProps> = ({
 
   const closeEditModal = () => {
     if (!isEditModalOpen) return;
+    setIsLoadingBookContent(false);
     setClosingModal('edit');
     if (editModalCloseTimerRef.current) window.clearTimeout(editModalCloseTimerRef.current);
     editModalCloseTimerRef.current = window.setTimeout(() => {
@@ -422,18 +448,26 @@ const Library: React.FC<LibraryProps> = ({
   };
 
   // Handlers for Inputs
-  const handleCoverFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleCoverFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     const targetBook = isEditModalOpen ? editingBook : importingBook;
     const setTarget = isEditModalOpen ? setEditingBook : setImportingBook;
 
     if (file && targetBook) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
+      const oldCover = targetBook.coverUrl || '';
+      try {
+        const imageRef = await saveImageFile(file);
         // @ts-ignore
-        setTarget({ ...targetBook, coverUrl: reader.result as string });
-      };
-      reader.readAsDataURL(file);
+        setTarget({ ...targetBook, coverUrl: imageRef });
+        if (oldCover && oldCover !== imageRef) {
+          deleteImageByRef(oldCover).catch(err => console.error('Failed to delete old cover image:', err));
+        }
+      } catch (error) {
+        console.error('Failed to save cover image:', error);
+        openErrorModal('图片保存失败，请重试或使用网络链接。');
+      } finally {
+        e.target.value = '';
+      }
     }
   };
 
@@ -442,8 +476,12 @@ const Library: React.FC<LibraryProps> = ({
     const setTarget = isEditModalOpen ? setEditingBook : setImportingBook;
 
     if (targetBook && tempCoverUrl.trim()) {
+      const oldCover = targetBook.coverUrl || '';
       // @ts-ignore
       setTarget({ ...targetBook, coverUrl: tempCoverUrl });
+      if (oldCover && oldCover !== tempCoverUrl) {
+        deleteImageByRef(oldCover).catch(err => console.error('Failed to delete old cover image:', err));
+      }
       setUrlInputMode(false);
       setTempCoverUrl('');
     }
@@ -650,13 +688,13 @@ const Library: React.FC<LibraryProps> = ({
 
   const renderAvatar = (imageUrl: string | undefined, isDefaultUser: boolean, isDefaultChar: boolean, type: 'USER' | 'CHAR') => {
     if (imageUrl) {
-      return <img src={imageUrl} alt="Avatar" className="w-full h-full object-cover" />;
+      return <ResolvedImage src={imageUrl} alt="Avatar" className="w-full h-full object-cover" />;
     }
     if (type === 'USER') {
-      if (isDefaultUser) return <img src={defaultUserImg} alt="Default User" className="w-full h-full object-cover" />;
+      if (isDefaultUser) return <ResolvedImage src={defaultUserImg} alt="Default User" className="w-full h-full object-cover" />;
       return <UserCircle className="text-slate-400 w-3/5 h-3/5" />;
     } else {
-      if (isDefaultChar) return <img src={defaultCharImg} alt="Default Char" className="w-full h-full object-cover" />;
+      if (isDefaultChar) return <ResolvedImage src={defaultCharImg} alt="Default Char" className="w-full h-full object-cover" />;
       return <FeatherIcon className="text-slate-400 w-3/5 h-3/5" />;
     }
   };
@@ -741,7 +779,7 @@ const Library: React.FC<LibraryProps> = ({
                  {/* Cover Preview */}
                  <div className={`w-16 h-20 rounded-lg overflow-hidden flex-shrink-0 shadow-sm ${cardClass}`}>
                     {book.coverUrl ? (
-                       <img src={book.coverUrl} className="w-full h-full object-cover" />
+                       <ResolvedImage src={book.coverUrl} className="w-full h-full object-cover" alt="Cover" />
                     ) : (
                        <DefaultBookCover />
                     )}
@@ -961,7 +999,7 @@ const Library: React.FC<LibraryProps> = ({
                             className={`flex items-center gap-3 p-2 rounded-xl cursor-pointer transition-colors ${!activeCharacterId ? 'bg-rose-400/10 text-rose-400' : 'hover:bg-black/5 dark:hover:bg-white/5 text-slate-500'}`}
                           >
                              <div className="w-8 h-8 rounded-full overflow-hidden bg-slate-200 flex-shrink-0">
-                                <img src={defaultCharImg} className="w-full h-full object-cover" />
+                                <ResolvedImage src={defaultCharImg} className="w-full h-full object-cover" alt="Default Char" />
                              </div>
                              <div className="flex-1 min-w-0">
                                 <div className="font-bold text-sm truncate">Char</div>
@@ -976,7 +1014,7 @@ const Library: React.FC<LibraryProps> = ({
                                className={`flex items-center gap-3 p-2 rounded-xl cursor-pointer transition-colors ${activeCharacterId === c.id ? 'bg-rose-400/10 text-rose-400' : 'hover:bg-black/5 dark:hover:bg-white/5 text-slate-500'}`}
                              >
                                 <div className="w-8 h-8 rounded-full overflow-hidden flex items-center justify-center bg-slate-200 flex-shrink-0">
-                                   {c.avatar ? <img src={c.avatar} className="w-full h-full object-cover" /> : <FeatherIcon size={16} className="text-slate-500" />}
+                                   {c.avatar ? <ResolvedImage src={c.avatar} className="w-full h-full object-cover" alt={c.name} /> : <FeatherIcon size={16} className="text-slate-500" />}
                                 </div>
                                 <div className="flex-1 min-w-0">
                                    <div className="font-bold text-sm truncate">{c.nickname || c.name}</div>
@@ -1024,7 +1062,7 @@ const Library: React.FC<LibraryProps> = ({
                             className={`flex items-center gap-3 p-2 rounded-xl cursor-pointer transition-colors ${!activePersonaId ? 'bg-rose-400/10 text-rose-400' : 'hover:bg-black/5 dark:hover:bg-white/5 text-slate-500'}`}
                           >
                              <div className="w-8 h-8 rounded-full overflow-hidden bg-slate-200 flex-shrink-0">
-                                <img src={defaultUserImg} className="w-full h-full object-cover" />
+                                <ResolvedImage src={defaultUserImg} className="w-full h-full object-cover" alt="Default User" />
                              </div>
                              <div className="flex-1 min-w-0">
                                 <div className="font-bold text-sm truncate">User</div>
@@ -1039,7 +1077,7 @@ const Library: React.FC<LibraryProps> = ({
                                className={`flex items-center gap-3 p-2 rounded-xl cursor-pointer transition-colors ${activePersonaId === p.id ? 'bg-rose-400/10 text-rose-400' : 'hover:bg-black/5 dark:hover:bg-white/5 text-slate-500'}`}
                              >
                                 <div className="w-8 h-8 rounded-full overflow-hidden flex items-center justify-center bg-slate-200 flex-shrink-0">
-                                   {p.avatar ? <img src={p.avatar} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center bg-slate-300 text-white"><UserCircle size={16} /></div>}
+                                   {p.avatar ? <ResolvedImage src={p.avatar} className="w-full h-full object-cover" alt={p.name} /> : <div className="w-full h-full flex items-center justify-center bg-slate-300 text-white"><UserCircle size={16} /></div>}
                                 </div>
                                 <div className="flex-1 min-w-0">
                                    <div className="font-bold text-sm truncate">{p.name}</div>
@@ -1068,7 +1106,7 @@ const Library: React.FC<LibraryProps> = ({
             >
               <div className="w-20 h-28 flex-shrink-0 rounded-lg overflow-hidden shadow-md">
                 {recentBook.coverUrl ? (
-                    <img src={recentBook.coverUrl} alt="Cover" className="w-full h-full object-cover opacity-90" />
+                    <ResolvedImage src={recentBook.coverUrl} alt="Cover" className="w-full h-full object-cover opacity-90" />
                 ) : (
                     <DefaultBookCover />
                 )}
@@ -1205,7 +1243,7 @@ const Library: React.FC<LibraryProps> = ({
                    <div className={`relative aspect-[3/4] rounded-2xl overflow-hidden p-1 group-active:scale-[0.98] transition-transform duration-150 ${cardClass}`}>
                      <div className="w-full h-full rounded-xl overflow-hidden opacity-90 hover:opacity-100 transition-opacity">
                         {book.coverUrl ? (
-                             <img src={book.coverUrl} className="w-full h-full object-cover" alt={book.title} />
+                             <ResolvedImage src={book.coverUrl} className="w-full h-full object-cover" alt={book.title} />
                         ) : (
                              <DefaultBookCover />
                         )}
@@ -1267,7 +1305,7 @@ const Library: React.FC<LibraryProps> = ({
                     {/* Cover Image instead of Icon */}
                     <div className={`w-14 rounded-lg overflow-hidden flex-shrink-0 shadow-sm relative ${pressedClass} min-h-[4.5rem]`}>
                        {book.coverUrl ? (
-                          <img src={book.coverUrl} className="w-full h-full object-cover absolute inset-0" alt={book.title} />
+                          <ResolvedImage src={book.coverUrl} className="w-full h-full object-cover absolute inset-0" alt={book.title} />
                        ) : (
                           <div className="absolute inset-0"><DefaultBookCover /></div>
                        )}
@@ -1278,7 +1316,7 @@ const Library: React.FC<LibraryProps> = ({
                            <div className="flex justify-between items-start">
                               <h3 className={`font-bold text-sm truncate ${headingClass}`}>{book.title}</h3>
                               <span className="text-[10px] text-slate-400 whitespace-nowrap ml-2 flex-shrink-0">
-                                 {(book.fullText?.length || 0) > 10000 ? `${Math.floor((book.fullText?.length || 0) / 10000)}万字` : `${book.fullText?.length || 0}字`}
+                                 {getTextLength(book) > 10000 ? `${Math.floor(getTextLength(book) / 10000)}万字` : `${getTextLength(book)}字`}
                               </span>
                            </div>
                            <p className={`text-xs ${subTextClass} truncate mt-0.5`}>{book.author}</p>
@@ -1335,6 +1373,9 @@ const Library: React.FC<LibraryProps> = ({
             
             <h3 className={`text-lg font-bold mb-6 text-center ${headingClass}`}>编辑书籍信息</h3>
 
+            {isLoadingBookContent && (
+              <div className="mb-3 text-xs text-slate-400 text-center">Loading book content...</div>
+            )}
             {renderBookForm(editingBook, true)}
 
             {/* Actions */}
@@ -1348,7 +1389,8 @@ const Library: React.FC<LibraryProps> = ({
                </button>
                <button 
                   onClick={saveBookChanges}
-                  className={`flex-1 py-3 rounded-full text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all font-bold text-sm`}
+                  disabled={isLoadingBookContent}
+                  className={`flex-1 py-3 rounded-full text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all font-bold text-sm disabled:opacity-50 disabled:cursor-not-allowed`}
                >
                   保存修改
                </button>

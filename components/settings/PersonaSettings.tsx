@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { UserCircle, Camera, Check, Trash2, Plus, ArrowLeft } from 'lucide-react';
 import { Persona, Character, ThemeClasses } from './types';
 import MultiSelectDropdown from './MultiSelectDropdown';
+import ResolvedImage from '../ResolvedImage';
 
 interface PersonaSettingsProps {
   personas: Persona[];
@@ -78,7 +79,7 @@ const PersonaSettings: React.FC<PersonaSettingsProps> = ({
                   <div className="relative group cursor-pointer flex-shrink-0" onClick={() => isEditing && onOpenAvatarModal(persona.id, 'PERSONA')}>
                     <div className={`w-14 h-14 rounded-full overflow-hidden flex items-center justify-center border-4 ${isDarkMode ? 'border-[#2d3748]' : 'border-[#e0e5ec]'} ${pressedClass}`}>
                       {persona.avatar ? (
-                        <img src={persona.avatar} alt="Avatar" className="w-full h-full object-cover" />
+                        <ResolvedImage src={persona.avatar} alt="Avatar" className="w-full h-full object-cover" />
                       ) : (
                         <UserCircle size={32} className="text-slate-300" />
                       )}
