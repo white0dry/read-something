@@ -23,7 +23,7 @@ const Stats: React.FC<StatsProps> = ({ isDarkMode }) => {
   const headingClass = isDarkMode ? 'text-slate-200' : 'text-slate-700';
 
   return (
-    <div className={`flex-1 flex flex-col p-6 pb-28 overflow-y-auto no-scrollbar animate-slide-in-right ${containerClass}`}>
+    <div className={`flex-1 flex flex-col p-6 pb-28 overflow-y-auto no-scrollbar ${containerClass}`}>
       <header className="mb-6 pt-2">
         <h1 className={`text-2xl font-bold ${headingClass}`}>阅读统计</h1>
       </header>

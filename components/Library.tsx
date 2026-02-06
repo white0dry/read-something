@@ -3,6 +3,7 @@ import { Book as BookIcon, Plus, Clock, Edit2, Check, UserCircle, LogOut, Link2,
 import { GoogleGenAI } from "@google/genai";
 import { Book, Chapter, ApiConfig } from '../types';
 import { Persona, Character } from './settings/types';
+import ModalPortal from './ModalPortal';
 
 interface LibraryProps {
   books: Book[];
@@ -57,6 +58,7 @@ const Library: React.FC<LibraryProps> = ({
   onSelectCharacter,
   apiConfig
 }) => {
+  const MODAL_TRANSITION_MS = 240;
   const containerClass = isDarkMode ? 'bg-[#2d3748] text-slate-200' : 'neu-bg text-slate-600';
   const headingClass = isDarkMode ? 'text-slate-200' : 'text-slate-700';
   const subTextClass = isDarkMode ? 'text-slate-400' : 'text-slate-500';
@@ -102,6 +104,7 @@ const Library: React.FC<LibraryProps> = ({
   // State for Book Editing
   const [editingBook, setEditingBook] = useState<Book | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [closingModal, setClosingModal] = useState<'edit' | 'import' | null>(null);
   
   // State for Book Importing
   const [importingBook, setImportingBook] = useState<Partial<Book>>({
@@ -120,6 +123,7 @@ const Library: React.FC<LibraryProps> = ({
   // State for Deletion Confirmation
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [errorModal, setErrorModal] = useState<{show: boolean, msg: string}>({ show: false, msg: '' });
+  const [isErrorModalClosing, setIsErrorModalClosing] = useState(false);
 
   // State for AI Regex Generation
   const [isGeneratingRegex, setIsGeneratingRegex] = useState(false);
@@ -130,6 +134,9 @@ const Library: React.FC<LibraryProps> = ({
   const sortRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const txtFileInputRef = useRef<HTMLInputElement>(null);
+  const editModalCloseTimerRef = useRef<number | null>(null);
+  const importModalCloseTimerRef = useRef<number | null>(null);
+  const errorModalCloseTimerRef = useRef<number | null>(null);
 
   // Sync prop changes
   useEffect(() => setTempSig(userSignature), [userSignature]);
@@ -139,6 +146,13 @@ const Library: React.FC<LibraryProps> = ({
   useEffect(() => { localStorage.setItem('lib_sortField', sortField); }, [sortField]);
   useEffect(() => { localStorage.setItem('lib_sortDirection', sortDirection); }, [sortDirection]);
   useEffect(() => { localStorage.setItem('lib_viewMode', viewMode); }, [viewMode]);
+  useEffect(() => {
+    return () => {
+      if (editModalCloseTimerRef.current) window.clearTimeout(editModalCloseTimerRef.current);
+      if (importModalCloseTimerRef.current) window.clearTimeout(importModalCloseTimerRef.current);
+      if (errorModalCloseTimerRef.current) window.clearTimeout(errorModalCloseTimerRef.current);
+    };
+  }, []);
 
 
   // Click outside to close menu
@@ -307,25 +321,69 @@ const Library: React.FC<LibraryProps> = ({
   // Open Edit
   const openEditModal = (e: React.MouseEvent, book: Book) => {
     e.stopPropagation();
+    if (editModalCloseTimerRef.current) {
+      window.clearTimeout(editModalCloseTimerRef.current);
+      editModalCloseTimerRef.current = null;
+    }
     setEditingBook({ ...book, tags: book.tags || [] });
+    setClosingModal(prev => prev === 'edit' ? null : prev);
     setIsEditModalOpen(true);
     resetModalState();
   };
 
   // Open Import
   const openImportModal = () => {
+     if (importModalCloseTimerRef.current) {
+       window.clearTimeout(importModalCloseTimerRef.current);
+       importModalCloseTimerRef.current = null;
+     }
      setImportingBook({
          title: '', author: '', coverUrl: '', tags: [], fullText: '', chapterRegex: '', progress: 0, lastRead: '从未阅读'
      });
+     setClosingModal(prev => prev === 'import' ? null : prev);
      setIsImportModalOpen(true);
      resetModalState();
   };
 
-  const closeModals = () => {
-    setIsEditModalOpen(false);
-    setEditingBook(null);
-    setIsImportModalOpen(false);
-    setImportingBook({});
+  const closeEditModal = () => {
+    if (!isEditModalOpen) return;
+    setClosingModal('edit');
+    if (editModalCloseTimerRef.current) window.clearTimeout(editModalCloseTimerRef.current);
+    editModalCloseTimerRef.current = window.setTimeout(() => {
+      setIsEditModalOpen(false);
+      setEditingBook(null);
+      setClosingModal(prev => prev === 'edit' ? null : prev);
+    }, MODAL_TRANSITION_MS);
+  };
+
+  const closeImportModal = () => {
+    if (!isImportModalOpen) return;
+    setClosingModal('import');
+    if (importModalCloseTimerRef.current) window.clearTimeout(importModalCloseTimerRef.current);
+    importModalCloseTimerRef.current = window.setTimeout(() => {
+      setIsImportModalOpen(false);
+      setImportingBook({});
+      setClosingModal(prev => prev === 'import' ? null : prev);
+    }, MODAL_TRANSITION_MS);
+  };
+
+  const openErrorModal = (msg: string) => {
+    if (errorModalCloseTimerRef.current) {
+      window.clearTimeout(errorModalCloseTimerRef.current);
+      errorModalCloseTimerRef.current = null;
+    }
+    setIsErrorModalClosing(false);
+    setErrorModal({ show: true, msg });
+  };
+
+  const closeErrorModal = () => {
+    if (!errorModal.show) return;
+    setIsErrorModalClosing(true);
+    if (errorModalCloseTimerRef.current) window.clearTimeout(errorModalCloseTimerRef.current);
+    errorModalCloseTimerRef.current = window.setTimeout(() => {
+      setErrorModal({ show: false, msg: '' });
+      setIsErrorModalClosing(false);
+    }, MODAL_TRANSITION_MS);
   };
 
   // Save Edit
@@ -335,7 +393,7 @@ const Library: React.FC<LibraryProps> = ({
       const chapters = parseChapters(editingBook.fullText || '', editingBook.chapterRegex || '');
       const updatedBook = { ...editingBook, chapters };
       onUpdateBook(updatedBook);
-      closeModals();
+      closeEditModal();
     }
   };
 
@@ -359,7 +417,7 @@ const Library: React.FC<LibraryProps> = ({
             chapters: chapters
         };
         onAddBook(newBook);
-        closeModals();
+        closeImportModal();
      }
   };
 
@@ -451,7 +509,7 @@ const Library: React.FC<LibraryProps> = ({
   // AI Regex Auto Generate with Real API
   const handleAutoGenerateRegex = async () => {
       if (!apiConfig.apiKey) {
-        setErrorModal({ show: true, msg: "请先在设置中配置 API Key" });
+        openErrorModal("请先在设置中配置 API Key");
         return;
       }
 
@@ -460,7 +518,7 @@ const Library: React.FC<LibraryProps> = ({
       const currentInput = targetBook?.chapterRegex || '';
 
       if (!currentInput.trim()) {
-          setErrorModal({ show: true, msg: "请先在输入框中填入一个章节标题示例，例如：'第一章 起点' 或 'Chapter 1'" });
+          openErrorModal("请先在输入框中填入一个章节标题示例，例如：'第一章 起点' 或 'Chapter 1'");
           return;
       }
 
@@ -560,7 +618,7 @@ const Library: React.FC<LibraryProps> = ({
 
       } catch (e: any) {
          const errorMessage = e instanceof Error ? e.message : String(e);
-         setErrorModal({ show: true, msg: "自动生成失败: " + errorMessage });
+         openErrorModal("自动生成失败: " + errorMessage);
       } finally {
          setIsGeneratingRegex(false);
       }
@@ -576,7 +634,7 @@ const Library: React.FC<LibraryProps> = ({
     if (deleteConfirmId) {
       onDeleteBook(deleteConfirmId);
       setDeleteConfirmId(null);
-      closeModals();
+      closeEditModal();
     }
   };
 
@@ -636,7 +694,7 @@ const Library: React.FC<LibraryProps> = ({
                          </button>
                     </div>
                 ) : (
-                    <div className="w-full flex gap-2 animate-slide-in-right">
+                    <div className="w-full flex gap-2 app-view-enter-left">
                          <input 
                             type="text" 
                             value={tempTxtUrl}
@@ -709,7 +767,7 @@ const Library: React.FC<LibraryProps> = ({
                            </button>
                         </div>
                      ) : (
-                        <div className="w-full flex gap-2 animate-slide-in-right">
+                        <div className="w-full flex gap-2 app-view-enter-left">
                            <input 
                               type="text" 
                               value={tempCoverUrl}
@@ -841,7 +899,7 @@ const Library: React.FC<LibraryProps> = ({
 
   return (
     <>
-      <div className={`flex-1 flex flex-col p-6 pb-28 overflow-y-auto no-scrollbar animate-slide-in-right ${containerClass}`}>
+      <div className={`flex-1 flex flex-col p-6 pb-28 overflow-y-auto no-scrollbar ${containerClass}`}>
         <header className="flex justify-between items-start mb-8 pt-2 relative">
           <div className="flex-1 pr-4 min-w-0">
             <h1 className={`text-2xl font-bold ${headingClass}`}>书架</h1>
@@ -1001,12 +1059,12 @@ const Library: React.FC<LibraryProps> = ({
         </header>
 
         {/* Recent Read Card - Always visible if book exists, regardless of view mode if searching is inactive */}
-        {recentBook && !isSearching && (
+        {recentBook && (
           <div className="mb-8">
             <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 pl-1">最近阅读</h2>
             <div 
               onClick={() => onOpenBook(recentBook)}
-              className={`${cardClass} p-5 flex gap-5 cursor-pointer active:scale-[0.98] transition-transform rounded-2xl relative group`}
+              className={`${cardClass} p-5 flex gap-5 cursor-pointer active:scale-[0.975] active:translate-y-[1px] transition-[transform,box-shadow] duration-150 rounded-2xl relative group`}
             >
               <div className="w-20 h-28 flex-shrink-0 rounded-lg overflow-hidden shadow-md">
                 {recentBook.coverUrl ? (
@@ -1035,7 +1093,7 @@ const Library: React.FC<LibraryProps> = ({
               {/* Edit Button for Recent Book */}
               <button 
                 onClick={(e) => openEditModal(e, recentBook)}
-                className={`absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:text-rose-400 ${isDarkMode ? 'bg-black/20 text-slate-200' : 'bg-white/50 text-slate-600'}`}
+                className={`absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity hover:text-rose-400 ${isDarkMode ? 'bg-black/20 text-slate-200' : 'bg-white/50 text-slate-600'}`}
               >
                 <Edit2 size={16} />
               </button>
@@ -1143,8 +1201,8 @@ const Library: React.FC<LibraryProps> = ({
 
                {/* Grid Books */}
                {sortedBooks.map(book => (
-                 <div key={book.id} onClick={() => onOpenBook(book)} className="flex flex-col gap-3 cursor-pointer group">
-                   <div className={`relative aspect-[3/4] rounded-2xl overflow-hidden p-1 group-active:scale-[0.98] transition-transform ${cardClass}`}>
+                 <div key={book.id} onClick={() => onOpenBook(book)} className="flex flex-col gap-3 cursor-pointer group active:scale-[0.98] active:translate-y-[1px] transition-transform duration-150">
+                   <div className={`relative aspect-[3/4] rounded-2xl overflow-hidden p-1 group-active:scale-[0.98] transition-transform duration-150 ${cardClass}`}>
                      <div className="w-full h-full rounded-xl overflow-hidden opacity-90 hover:opacity-100 transition-opacity">
                         {book.coverUrl ? (
                              <img src={book.coverUrl} className="w-full h-full object-cover" alt={book.title} />
@@ -1162,12 +1220,12 @@ const Library: React.FC<LibraryProps> = ({
                      {book.tags && book.tags.length > 0 && (
                        <div className="absolute top-3 left-3 right-12 flex flex-wrap gap-1 max-h-[60%] overflow-hidden content-start">
                           {book.tags.slice(0, 2).map((tag, i) => (
-                            <span key={i} className="text-[9px] bg-black/40 text-white/90 px-2 py-1 rounded-md backdrop-blur-sm shadow-sm truncate max-w-full">
+                            <span key={i} className="bg-black/40 text-white/90 px-2 py-1 rounded-md backdrop-blur-sm shadow-sm truncate max-w-full" style={{ fontSize: 'calc(9px * var(--app-font-scale, 1))' }}>
                                {tag}
                             </span>
                           ))}
                           {book.tags.length > 2 && (
-                            <span className="text-[9px] bg-black/40 text-white/90 px-2 py-1 rounded-md backdrop-blur-sm shadow-sm">
+                            <span className="bg-black/40 text-white/90 px-2 py-1 rounded-md backdrop-blur-sm shadow-sm" style={{ fontSize: 'calc(9px * var(--app-font-scale, 1))' }}>
                                +{book.tags.length - 2}
                             </span>
                           )}
@@ -1176,7 +1234,7 @@ const Library: React.FC<LibraryProps> = ({
 
                      <button 
                         onClick={(e) => openEditModal(e, book)}
-                        className="absolute top-2 right-2 w-7 h-7 bg-black/40 hover:bg-rose-500 text-white rounded-full flex items-center justify-center backdrop-blur-sm transition-colors opacity-0 group-hover:opacity-100"
+                        className="absolute top-2 right-2 w-7 h-7 bg-black/40 hover:bg-rose-500 text-white rounded-full flex items-center justify-center backdrop-blur-sm transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
                      >
                         <Edit2 size={14} />
                      </button>
@@ -1204,7 +1262,7 @@ const Library: React.FC<LibraryProps> = ({
                  <div 
                     key={book.id} 
                     onClick={() => onOpenBook(book)}
-                    className={`${cardClass} p-4 rounded-2xl flex items-stretch gap-4 group cursor-pointer active:scale-[0.99] transition-transform`}
+                    className={`${cardClass} p-4 rounded-2xl flex items-stretch gap-4 group cursor-pointer active:scale-[0.985] active:translate-y-[1px] transition-transform duration-150`}
                  >
                     {/* Cover Image instead of Icon */}
                     <div className={`w-14 rounded-lg overflow-hidden flex-shrink-0 shadow-sm relative ${pressedClass} min-h-[4.5rem]`}>
@@ -1230,12 +1288,12 @@ const Library: React.FC<LibraryProps> = ({
                        {book.tags && book.tags.length > 0 && (
                           <div className="flex flex-wrap gap-1 mt-2 mb-1 w-full overflow-hidden">
                              {book.tags.slice(0, 3).map((tag, i) => (
-                               <span key={i} className={`text-[9px] px-1.5 py-0.5 rounded-md max-w-[5rem] truncate ${isDarkMode ? 'bg-black/20 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>
+                               <span key={i} className={`px-1.5 py-0.5 rounded-md max-w-[5rem] truncate ${isDarkMode ? 'bg-black/20 text-slate-400' : 'bg-slate-200 text-slate-500'}`} style={{ fontSize: 'calc(9px * var(--app-font-scale, 1))' }}>
                                   {tag}
                                </span>
                              ))}
                              {book.tags.length > 3 && (
-                                <span className={`text-[9px] px-1.5 py-0.5 rounded-md ${isDarkMode ? 'bg-black/20 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>
+                                <span className={`px-1.5 py-0.5 rounded-md ${isDarkMode ? 'bg-black/20 text-slate-400' : 'bg-slate-200 text-slate-500'}`} style={{ fontSize: 'calc(9px * var(--app-font-scale, 1))' }}>
                                    +{book.tags.length - 3}
                                 </span>
                              )}
@@ -1255,7 +1313,7 @@ const Library: React.FC<LibraryProps> = ({
                     <div className="flex flex-col justify-center">
                         <button 
                             onClick={(e) => openEditModal(e, book)}
-                            className={`w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity ${btnClass}`}
+                            className={`w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-400 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity ${btnClass}`}
                          >
                             <Edit2 size={14} />
                          </button>
@@ -1268,9 +1326,10 @@ const Library: React.FC<LibraryProps> = ({
 
       {/* Edit Book Modal */}
       {isEditModalOpen && editingBook && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-500/20 backdrop-blur-sm animate-fade-in">
-          <div className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm rounded-2xl p-6 shadow-2xl border relative flex flex-col max-h-[85vh]`}>
-            <button onClick={closeModals} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
+        <ModalPortal>
+          <div className={`fixed inset-0 z-[100] flex items-center justify-center p-6 pb-28 bg-slate-500/20 backdrop-blur-sm ${closingModal === 'edit' ? 'app-fade-exit' : 'app-fade-enter'}`}>
+          <div className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm rounded-2xl p-6 shadow-2xl border relative flex flex-col max-h-[calc(100vh-9rem)] ${closingModal === 'edit' ? 'app-fade-exit' : 'app-fade-enter'}`}>
+            <button onClick={closeEditModal} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
               <X size={20} />
             </button>
             
@@ -1295,14 +1354,16 @@ const Library: React.FC<LibraryProps> = ({
                </button>
             </div>
           </div>
-        </div>
+          </div>
+        </ModalPortal>
       )}
 
       {/* Import Book Modal */}
       {isImportModalOpen && (
-         <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-500/20 backdrop-blur-sm animate-fade-in">
-            <div className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm rounded-2xl p-6 shadow-2xl border relative flex flex-col max-h-[85vh]`}>
-               <button onClick={closeModals} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
+         <ModalPortal>
+           <div className={`fixed inset-0 z-[100] flex items-center justify-center p-6 pb-28 bg-slate-500/20 backdrop-blur-sm ${closingModal === 'import' ? 'app-fade-exit' : 'app-fade-enter'}`}>
+            <div className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm rounded-2xl p-6 shadow-2xl border relative flex flex-col max-h-[calc(100vh-9rem)] ${closingModal === 'import' ? 'app-fade-exit' : 'app-fade-enter'}`}>
+               <button onClick={closeImportModal} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
                   <X size={20} />
                </button>
                
@@ -1313,7 +1374,7 @@ const Library: React.FC<LibraryProps> = ({
                {/* Actions */}
                <div className="mt-2 flex gap-3">
                   <button 
-                     onClick={closeModals}
+                     onClick={closeImportModal}
                      className={`flex-1 py-3 rounded-full text-slate-500 text-sm font-bold ${btnClass}`}
                   >
                      取消
@@ -1327,12 +1388,14 @@ const Library: React.FC<LibraryProps> = ({
                   </button>
                </div>
             </div>
-         </div>
+           </div>
+         </ModalPortal>
       )}
 
       {/* Delete Confirmation Modal */}
       {deleteConfirmId && (
-         <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm animate-fade-in">
+         <ModalPortal>
+           <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm animate-fade-in">
             <div className={`${cardClass} w-full max-w-xs rounded-2xl p-6 shadow-2xl border-2 border-rose-100/10 relative flex flex-col items-center text-center`}>
                <div className={`w-12 h-12 rounded-full ${isDarkMode ? 'bg-rose-500/20' : 'bg-rose-100'} text-rose-500 flex items-center justify-center mb-4`}>
                   <Trash2 size={24} />
@@ -1358,13 +1421,15 @@ const Library: React.FC<LibraryProps> = ({
                   </button>
                </div>
             </div>
-         </div>
+           </div>
+         </ModalPortal>
       )}
 
       {/* Error Alert Modal (Reused for AI errors) */}
       {errorModal.show && (
-         <div className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm animate-fade-in">
-             <div className={`${cardClass} w-full max-w-xs rounded-2xl p-6 shadow-2xl border-2 border-red-100/10 relative flex flex-col items-center text-center`}>
+         <ModalPortal>
+           <div className={`fixed inset-0 z-[120] flex items-center justify-center p-6 pb-28 bg-black/40 backdrop-blur-sm ${isErrorModalClosing ? 'app-fade-exit' : 'app-fade-enter'}`}>
+             <div className={`${cardClass} w-full max-w-xs rounded-2xl p-6 shadow-2xl border-2 border-red-100/10 relative flex flex-col items-center text-center ${isErrorModalClosing ? 'app-fade-exit' : 'app-fade-enter'}`}>
                 <div className={`w-12 h-12 rounded-full ${isDarkMode ? 'bg-red-500/20' : 'bg-red-100'} text-red-500 flex items-center justify-center mb-4`}>
                    <AlertTriangle size={24} />
                 </div>
@@ -1375,13 +1440,14 @@ const Library: React.FC<LibraryProps> = ({
                    {errorModal.msg}
                 </p>
                 <button 
-                   onClick={() => setErrorModal({ show: false, msg: '' })}
+                   onClick={closeErrorModal}
                    className={`w-full py-2 rounded-full text-white bg-red-500 shadow-lg hover:bg-red-600 active:scale-95 transition-all font-bold text-sm`}
                 >
                    关闭
                 </button>
              </div>
-         </div>
+           </div>
+         </ModalPortal>
       )}
     </>
   );

@@ -17,6 +17,7 @@ import {
   Zap
 } from 'lucide-react';
 import { ApiConfig, ApiPreset, ApiProvider, ThemeClasses } from './types';
+import ModalPortal from '../ModalPortal';
 
 interface ApiSettingsProps {
   config: ApiConfig;
@@ -528,7 +529,8 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
 
       {/* Preset Name Modal */}
       {isPresetModalOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-500/20 backdrop-blur-sm animate-fade-in">
+        <ModalPortal>
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-500/20 backdrop-blur-sm animate-fade-in">
           <div className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm rounded-2xl p-6 shadow-2xl border relative`}>
             <button onClick={() => setIsPresetModalOpen(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
               <X size={20} />
@@ -562,12 +564,14 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
               </div>
             </div>
           </div>
-        </div>
+          </div>
+        </ModalPortal>
       )}
 
       {/* Error Modal */}
       {errorModal.open && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm animate-fade-in">
+        <ModalPortal>
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm animate-fade-in">
           <div className={`${cardClass} w-full max-w-xs rounded-2xl p-6 shadow-2xl border-2 border-red-100/10 relative flex flex-col items-center text-center`}>
             <div className={`w-12 h-12 rounded-full ${isDarkMode ? 'bg-red-500/20' : 'bg-red-100'} text-red-500 flex items-center justify-center mb-4`}>
                <AlertTriangle size={24} />
@@ -585,7 +589,8 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
               关闭
             </button>
           </div>
-        </div>
+          </div>
+        </ModalPortal>
       )}
 
     </div>

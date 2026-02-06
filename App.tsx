@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { BookOpen, PieChart, Settings as SettingsIcon, LayoutGrid, CheckCircle2, AlertCircle } from 'lucide-react';
 import Library from './components/Library';
 import Reader from './components/Reader';
@@ -86,8 +86,13 @@ const darkenColor = (hex: string, percent: number) => {
 }
 
 const App: React.FC = () => {
+  const VIEW_TRANSITION_MS = 260;
   const [currentView, setCurrentView] = useState<AppView>(AppView.LIBRARY);
   const [activeBook, setActiveBook] = useState<Book | null>(null);
+  const [viewAnimationClass, setViewAnimationClass] = useState('app-view-enter-left');
+  const [isViewTransitioning, setIsViewTransitioning] = useState(false);
+  const viewTransitionTimerRef = useRef<number | null>(null);
+  const viewTransitionUnlockTimerRef = useRef<number | null>(null);
   const [isDarkMode, setIsDarkMode] = useState(() => {
     try {
       const saved = localStorage.getItem('app_dark_mode');
@@ -218,6 +223,7 @@ const App: React.FC = () => {
 
     // Apply CSS Variables to Root
     const root = document.documentElement;
+    root.style.setProperty('--app-font-scale', `${appSettings.fontSizeScale}`);
     root.style.setProperty('--theme-50', hexToRgbValues(c50));
     root.style.setProperty('--theme-100', hexToRgbValues(c100));
     root.style.setProperty('--theme-200', hexToRgbValues(c200));
@@ -269,14 +275,40 @@ const App: React.FC = () => {
     }, 3000);
   };
 
+  useEffect(() => {
+    return () => {
+      if (viewTransitionTimerRef.current) window.clearTimeout(viewTransitionTimerRef.current);
+      if (viewTransitionUnlockTimerRef.current) window.clearTimeout(viewTransitionUnlockTimerRef.current);
+    };
+  }, []);
+
+  const transitionToView = (nextView: AppView, nextBook: Book | null = null) => {
+    if (isViewTransitioning) return;
+    if (nextView === currentView && nextView !== AppView.READER) return;
+
+    setIsViewTransitioning(true);
+    setViewAnimationClass('app-view-exit-right');
+
+    if (viewTransitionTimerRef.current) window.clearTimeout(viewTransitionTimerRef.current);
+    if (viewTransitionUnlockTimerRef.current) window.clearTimeout(viewTransitionUnlockTimerRef.current);
+
+    viewTransitionTimerRef.current = window.setTimeout(() => {
+      setActiveBook(nextView === AppView.READER ? nextBook : null);
+      setCurrentView(nextView);
+      setViewAnimationClass('app-view-enter-left');
+
+      viewTransitionUnlockTimerRef.current = window.setTimeout(() => {
+        setIsViewTransitioning(false);
+      }, VIEW_TRANSITION_MS);
+    }, VIEW_TRANSITION_MS);
+  };
+
   const handleOpenBook = (book: Book) => {
-    setActiveBook(book);
-    setCurrentView(AppView.READER);
+    transitionToView(AppView.READER, book);
   };
 
   const handleBackToLibrary = () => {
-    setActiveBook(null);
-    setCurrentView(AppView.LIBRARY);
+    transitionToView(AppView.LIBRARY);
   };
 
   const handleAddBook = (newBook: Book) => {
@@ -306,7 +338,9 @@ const App: React.FC = () => {
           paddingBottom: `${appSettings.safeAreaBottom || 0}px` 
         }}
       >
-        <Reader onBack={handleBackToLibrary} isDarkMode={isDarkMode} />
+        <div className={`flex-1 flex flex-col overflow-hidden ${viewAnimationClass}`}>
+          <Reader onBack={handleBackToLibrary} isDarkMode={isDarkMode} />
+        </div>
       </div>
     );
   }
@@ -333,7 +367,7 @@ const App: React.FC = () => {
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col overflow-hidden relative">
+      <div className={`flex-1 flex flex-col overflow-hidden relative ${viewAnimationClass}`}>
         {currentView === AppView.LIBRARY && (
           <Library 
             books={books}
@@ -389,21 +423,24 @@ const App: React.FC = () => {
       >
         <div className={`flex w-full justify-around items-center py-3 px-2 rounded-2xl ${isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357]' : 'neu-flat'}`}>
           <button 
-            onClick={() => setCurrentView(AppView.LIBRARY)}
+            onClick={() => transitionToView(AppView.LIBRARY)}
+            disabled={isViewTransitioning}
             className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${currentView === AppView.LIBRARY ? 'text-rose-400 shadow-[inset_3px_3px_6px_rgba(0,0,0,0.2),inset_-3px_-3px_6px_rgba(255,255,255,0.1)]' : 'text-slate-400 hover:text-slate-600'}`}
           >
             <LayoutGrid size={22} strokeWidth={currentView === AppView.LIBRARY ? 2.5 : 2} />
           </button>
           
           <button 
-            onClick={() => setCurrentView(AppView.STATS)}
+            onClick={() => transitionToView(AppView.STATS)}
+            disabled={isViewTransitioning}
             className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${currentView === AppView.STATS ? 'text-rose-400 shadow-[inset_3px_3px_6px_rgba(0,0,0,0.2),inset_-3px_-3px_6px_rgba(255,255,255,0.1)]' : 'text-slate-400 hover:text-slate-600'}`}
           >
             <PieChart size={22} strokeWidth={currentView === AppView.STATS ? 2.5 : 2} />
           </button>
 
           <button 
-            onClick={() => setCurrentView(AppView.SETTINGS)}
+            onClick={() => transitionToView(AppView.SETTINGS)}
+            disabled={isViewTransitioning}
             className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${currentView === AppView.SETTINGS ? 'text-rose-400 shadow-[inset_3px_3px_6px_rgba(0,0,0,0.2),inset_-3px_-3px_6px_rgba(255,255,255,0.1)]' : 'text-slate-400 hover:text-slate-600'}`}
           >
             <SettingsIcon size={22} strokeWidth={currentView === AppView.SETTINGS ? 2.5 : 2} />

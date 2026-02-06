@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   Settings as SettingsIcon, 
   Book, 
@@ -20,6 +20,7 @@ import CharacterSettings from './settings/CharacterSettings';
 import WorldBookSettings from './settings/WorldBookSettings';
 import AppearanceSettings from './settings/AppearanceSettings';
 import ApiSettings from './settings/ApiSettings';
+import ModalPortal from './ModalPortal';
 
 interface SettingsProps {
   isDarkMode: boolean;
@@ -69,8 +70,10 @@ const Settings: React.FC<SettingsProps> = ({
   wbCategories,
   setWbCategories
 }) => {
+  const SETTINGS_VIEW_TRANSITION_MS = 260;
   const [currentView, setCurrentView] = useState<SettingsView>('MAIN');
-  const [navDirection, setNavDirection] = useState<'forward' | 'back'>('forward');
+  const [transitionAnimationClass, setTransitionAnimationClass] = useState('app-view-enter-left');
+  const [isSwitchingView, setIsSwitchingView] = useState(false);
   
   // Avatar Selection Modal State
   const [avatarModal, setAvatarModal] = useState<{
@@ -81,6 +84,8 @@ const Settings: React.FC<SettingsProps> = ({
   const [urlInputMode, setUrlInputMode] = useState(false);
   const [tempUrl, setTempUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const viewTransitionTimerRef = useRef<number | null>(null);
+  const viewTransitionUnlockTimerRef = useRef<number | null>(null);
 
   // Theme Classes
   const theme: ThemeClasses = {
@@ -92,21 +97,44 @@ const Settings: React.FC<SettingsProps> = ({
     btnClass: isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357] text-slate-200' : 'neu-btn',
     activeBorderClass: 'border-2 border-rose-300 relative z-20',
     baseBorderClass: 'border-2 border-transparent relative z-0',
-    animationClass: navDirection === 'forward' ? 'animate-slide-in-right' : 'animate-slide-in-left',
+    animationClass: transitionAnimationClass,
     isDarkMode
   };
 
   const { containerClass, animationClass, cardClass, headingClass, pressedClass, inputClass, btnClass } = theme;
 
   // --- Helpers ---
+  useEffect(() => {
+    return () => {
+      if (viewTransitionTimerRef.current) window.clearTimeout(viewTransitionTimerRef.current);
+      if (viewTransitionUnlockTimerRef.current) window.clearTimeout(viewTransitionUnlockTimerRef.current);
+    };
+  }, []);
+
+  const switchView = (view: SettingsView) => {
+    if (isSwitchingView || view === currentView) return;
+
+    setIsSwitchingView(true);
+    setTransitionAnimationClass('app-view-exit-right');
+
+    if (viewTransitionTimerRef.current) window.clearTimeout(viewTransitionTimerRef.current);
+    if (viewTransitionUnlockTimerRef.current) window.clearTimeout(viewTransitionUnlockTimerRef.current);
+
+    viewTransitionTimerRef.current = window.setTimeout(() => {
+      setCurrentView(view);
+      setTransitionAnimationClass('app-view-enter-left');
+      viewTransitionUnlockTimerRef.current = window.setTimeout(() => {
+        setIsSwitchingView(false);
+      }, SETTINGS_VIEW_TRANSITION_MS);
+    }, SETTINGS_VIEW_TRANSITION_MS);
+  };
+
   const navigateTo = (view: SettingsView) => {
-    setNavDirection('forward');
-    setCurrentView(view);
+    switchView(view);
   };
 
   const goBack = (toView: SettingsView = 'MAIN') => {
-    setNavDirection('back');
-    setCurrentView(toView);
+    switchView(toView);
   };
   
   const renderHeader = (title: string, onBack?: () => void) => (
@@ -170,7 +198,8 @@ const Settings: React.FC<SettingsProps> = ({
   const renderAvatarModal = () => {
     if (!avatarModal.isOpen) return null;
     return (
-      <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-500/20 backdrop-blur-sm animate-fade-in">
+      <ModalPortal>
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-500/20 backdrop-blur-sm animate-fade-in">
         <div className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm rounded-2xl p-6 shadow-2xl border relative`}>
           <button onClick={closeAvatarModal} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
             <X size={20} />
@@ -203,7 +232,7 @@ const Settings: React.FC<SettingsProps> = ({
               />
             </div>
           ) : (
-            <div className="flex flex-col gap-4 animate-slide-in-right">
+            <div className="flex flex-col gap-4 app-view-enter-left">
               <input 
                 type="text" 
                 value={tempUrl}
@@ -226,7 +255,8 @@ const Settings: React.FC<SettingsProps> = ({
             </div>
           )}
         </div>
-      </div>
+        </div>
+      </ModalPortal>
     );
   };
 
@@ -414,13 +444,13 @@ const Settings: React.FC<SettingsProps> = ({
                             <span>检测间隔 (秒)</span>
                           </div>
                           <div className="relative h-2 w-full">
-                             <input 
+                            <input 
                               type="range" 
                               min="10" 
                               max="600" 
                               value={appSettings.commentInterval} 
                               onChange={(e) => updateSetting('commentInterval', parseInt(e.target.value))}
-                              className="w-full h-2 bg-transparent appearance-none cursor-pointer z-10 relative"
+                              className="app-range absolute top-1/2 -translate-y-1/2 left-0 w-full h-5 bg-transparent appearance-none cursor-pointer z-10"
                             />
                             <div className={`absolute top-0 left-0 h-full rounded-lg w-full ${isDarkMode ? 'bg-slate-700' : 'bg-black/5'}`} />
                             <div className="absolute top-0 left-0 h-full bg-rose-300 rounded-lg pointer-events-none" style={{width: `${(appSettings.commentInterval - 10) / (600 - 10) * 100}%`}} />
@@ -449,7 +479,7 @@ const Settings: React.FC<SettingsProps> = ({
                               max="100" 
                               value={appSettings.commentProbability} 
                               onChange={(e) => updateSetting('commentProbability', parseInt(e.target.value))}
-                              className="w-full h-2 bg-transparent appearance-none cursor-pointer z-10 relative"
+                              className="app-range absolute top-1/2 -translate-y-1/2 left-0 w-full h-5 bg-transparent appearance-none cursor-pointer z-10"
                             />
                             <div className={`absolute top-0 left-0 h-full rounded-lg w-full ${isDarkMode ? 'bg-slate-700' : 'bg-black/5'}`} />
                             <div className="absolute top-0 left-0 h-full bg-rose-300 rounded-lg pointer-events-none" style={{width: `${appSettings.commentProbability}%`}} />

@@ -26,13 +26,24 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode }) => {
   const [inputText, setInputText] = useState('');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+
+  const scrollMessagesToBottom = (behavior: ScrollBehavior = 'auto') => {
+    if (!messagesContainerRef.current) return;
+    messagesContainerRef.current.scrollTo({
+      top: messagesContainerRef.current.scrollHeight,
+      behavior
+    });
+  };
 
   // Auto-scroll chat
   useEffect(() => {
-    if (isAiPanelOpen && messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (!isAiPanelOpen) return;
+    const rafId = window.requestAnimationFrame(() => {
+      scrollMessagesToBottom('smooth');
       setHasUnreadMessages(false);
-    }
+    });
+    return () => window.cancelAnimationFrame(rafId);
   }, [messages, isAiPanelOpen]);
 
   // Simulate AI receiving context or triggering a message
@@ -168,8 +179,8 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode }) => {
 
       {/* AI Panel (Collapsible Split Screen - Neumorphic) */}
       <div 
-        className={`absolute bottom-0 left-0 right-0 transition-all duration-500 ease-in-out z-30 
-          ${isAiPanelOpen ? 'h-[40vh] opacity-100' : 'h-0 opacity-0 overflow-hidden'}
+        className={`absolute bottom-0 left-0 right-0 h-[40vh] transition-[transform,opacity] duration-500 ease-in-out z-30 
+          ${isAiPanelOpen ? 'translate-y-0 opacity-100' : 'translate-y-full opacity-0 pointer-events-none'}
           ${isDarkMode ? 'bg-[#2d3748] rounded-t-3xl shadow-[0_-5px_20px_rgba(0,0,0,0.4)]' : 'neu-flat rounded-t-3xl'}
         `}
         style={{ boxShadow: isDarkMode ? '' : '0 -10px 20px -5px rgba(163,177,198, 0.4)' }}
@@ -199,7 +210,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode }) => {
           </div>
 
           {/* Messages Area */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 px-6">
+          <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4 px-6" style={{ overflowAnchor: 'none' }}>
             {messages.map((msg) => (
               <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div 
