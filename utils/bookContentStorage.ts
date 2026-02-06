@@ -80,8 +80,9 @@ export const deleteBookContent = async (bookId: string): Promise<void> => {
 };
 
 export const getBookTextLength = (book: Partial<Book>): number => {
+  if (typeof book.fullTextLength === 'number') return book.fullTextLength;
   if (typeof book.fullText === 'string') return book.fullText.length;
-  return book.fullTextLength || 0;
+  return 0;
 };
 
 const compactBook = (book: Book, fullTextLength: number, chapterCount: number): Book => {
@@ -133,4 +134,3 @@ export const compactBookForState = (book: Book): Book => {
   const chapterCount = Array.isArray(book.chapters) ? book.chapters.length : (book.chapterCount || 0);
   return compactBook(book, fullTextLength, chapterCount);
 };
-

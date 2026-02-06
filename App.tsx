@@ -39,12 +39,20 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   safeAreaBottom: 0
 };
 
-const MOCK_BOOKS_INIT: Book[] = [
-  { id: '1', title: 'The Three-Body Problem', author: 'Liu Cixin', coverUrl: 'https://picsum.photos/150/220?random=1', progress: 45, lastRead: '2 hours ago', tags: ['Sci-Fi', 'Hardcore', 'Must Read'], chapters: [], fullText: '' },
-  { id: '2', title: 'One Hundred Years of Solitude', author: 'Gabriel Garcia Marquez', coverUrl: 'https://picsum.photos/150/220?random=2', progress: 12, lastRead: 'Yesterday', tags: ['Literature', 'Magical Realism'], chapters: [], fullText: '' },
-  { id: '3', title: 'Sapiens', author: 'Yuval Noah Harari', coverUrl: 'https://picsum.photos/150/220?random=3', progress: 88, lastRead: '3 days ago', tags: ['History', 'Popular Science'], chapters: [], fullText: '' },
-  { id: '4', title: 'The Miracles of the Namiya General Store', author: 'Keigo Higashino', coverUrl: 'https://picsum.photos/150/220?random=4', progress: 0, lastRead: '', tags: ['Novel', 'Healing'], chapters: [], fullText: '' },
-];
+const BUILT_IN_SAMPLE_COVER_URLS = new Set([
+  'https://picsum.photos/150/220?random=1',
+  'https://picsum.photos/150/220?random=2',
+  'https://picsum.photos/150/220?random=3',
+  'https://picsum.photos/150/220?random=4',
+]);
+
+const stripBuiltInSampleBooks = (books: Book[]): Book[] => {
+  return books.filter(book => {
+    const isLegacySampleId = ['1', '2', '3', '4'].includes(book.id);
+    const isLegacySampleCover = BUILT_IN_SAMPLE_COVER_URLS.has(book.coverUrl);
+    return !(isLegacySampleId && isLegacySampleCover);
+  });
+};
 
 // Helper to convert hex to RGB values for CSS variables
 const hexToRgbValues = (hex: string) => {
@@ -112,8 +120,10 @@ const App: React.FC = () => {
   const [books, setBooks] = useState<Book[]>(() => {
     try {
       const saved = localStorage.getItem('app_books');
-      return saved ? JSON.parse(saved) : MOCK_BOOKS_INIT;
-    } catch { return MOCK_BOOKS_INIT; }
+      if (!saved) return [];
+      const parsed = JSON.parse(saved);
+      return Array.isArray(parsed) ? stripBuiltInSampleBooks(parsed) : [];
+    } catch { return []; }
   });
 
   // API Config
@@ -454,7 +464,7 @@ const App: React.FC = () => {
         }}
       >
         <div className={`flex-1 flex flex-col overflow-hidden ${viewAnimationClass}`}>
-          <Reader onBack={handleBackToLibrary} isDarkMode={isDarkMode} />
+          <Reader onBack={handleBackToLibrary} isDarkMode={isDarkMode} activeBook={activeBook} />
         </div>
       </div>
     );
