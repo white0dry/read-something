@@ -108,6 +108,22 @@ export const migrateInlineBookContent = async (books: Book[]): Promise<Book[]> =
           typeof book.fullText === 'string' ? book.fullText.length : (book.fullTextLength || 0);
         const estimatedChapters =
           Array.isArray(book.chapters) ? book.chapters.length : (book.chapterCount || 0);
+
+        if (estimatedLength > 0 || estimatedChapters > 0) {
+          return compactBook(book, estimatedLength, estimatedChapters);
+        }
+
+        // Backfill old compacted records (length/count were 0) from IndexedDB payload if it exists.
+        const stored = await getBookContent(book.id).catch(() => null);
+        if (stored) {
+          const backfilledLength = stored.fullText?.length || 0;
+          const backfilledChapters = stored.chapters?.length || 0;
+          if (backfilledLength > 0 || backfilledChapters > 0) {
+            changed = true;
+            return compactBook(book, backfilledLength, backfilledChapters);
+          }
+        }
+
         return compactBook(book, estimatedLength, estimatedChapters);
       }
 
