@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>AI 陪读伴侣</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class', // Enable class-based dark mode manually
+        theme: {
+          extend: {
+            colors: {
+              // Override rose to use CSS variables for dynamic theming
+              rose: {
+                50: 'rgb(var(--theme-50) / <alpha-value>)',
+                100: 'rgb(var(--theme-100) / <alpha-value>)',
+                200: 'rgb(var(--theme-200) / <alpha-value>)',
+                300: 'rgb(var(--theme-300) / <alpha-value>)',
+                400: 'rgb(var(--theme-400) / <alpha-value>)', /* Main Highlight */
+                500: 'rgb(var(--theme-500) / <alpha-value>)',
+                600: 'rgb(var(--theme-600) / <alpha-value>)',
+                700: 'rgb(var(--theme-700) / <alpha-value>)',
+                800: 'rgb(var(--theme-800) / <alpha-value>)',
+                900: 'rgb(var(--theme-900) / <alpha-value>)',
+              },
+              // New Desaturated Dreamy Purple-Blue
+              dreamy: {
+                300: '#aab7d6', // Light mode text/border
+                400: '#8da4cd', // Light mode bg highlight
+                500: '#6d7fcc', // Dark mode text
+                900: '#2d334d', // Dark mode bg
+              }
+            },
+            keyframes: {
+              "slide-in-right": {
+                "0%": { transform: "translateX(20px)", opacity: 0 },
+                "100%": { transform: "translateX(0)", opacity: 1 }
+              },
+              "slide-in-left": {
+                "0%": { transform: "translateX(-20px)", opacity: 0 },
+                "100%": { transform: "translateX(0)", opacity: 1 }
+              },
+              "fade-in": {
+                "0%": { opacity: 0 },
+                "100%": { opacity: 1 }
+              }
+            },
+            animation: {
+              "slide-in-right": "slide-in-right 0.3s ease-out forwards",
+              "slide-in-left": "slide-in-left 0.3s ease-out forwards",
+              "fade-in": "fade-in 0.3s ease-out forwards",
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      :root {
+        --neu-bg: #e0e5ec;
+        --neu-text: #64748b; 
+        --neu-shadow-light: #ffffff;
+        --neu-shadow-dark: #a3b1c6;
+        --neu-highlight: #e28a9d; 
+        
+        /* Default Theme Colors (Rose-ish) - Will be overridden by JS */
+        --theme-50: 253 242 244;
+        --theme-100: 252 231 234;
+        --theme-200: 248 208 217;
+        --theme-300: 240 171 184;
+        --theme-400: 226 138 157;
+        --theme-500: 212 114 136;
+        --theme-600: 190 83 107;
+        --theme-700: 160 63 86;
+        --theme-800: 134 54 74;
+        --theme-900: 113 48 65;
+      }
+      
+      /* Dark mode variables */
+      .dark-mode {
+        --neu-bg: #2d3748;
+        --neu-text: #e2e8f0;
+        --neu-shadow-light: #374357; 
+        --neu-shadow-dark: #232b39;
+        --neu-highlight: #f0abb8;
+      }
+
+      /* Fix Scrollbars & Layout */
+      html, body {
+        height: 100%;
+        overflow: hidden; /* Prevent body scroll */
+        background-color: var(--neu-bg);
+        color: var(--neu-text);
+        transition: background-color 0.3s ease, color 0.3s ease, font-size 0.3s ease;
+      }
+      #root {
+        height: 100%;
+      }
+
+      /* Custom scrollbar for a cleaner look */
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: var(--neu-shadow-dark);
+        border-radius: 3px;
+        opacity: 0.5;
+      }
+      .no-scrollbar::-webkit-scrollbar {
+        display: none;
+      }
+      .no-scrollbar {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+
+      /* Neumorphism Utilities */
+      .neu-bg { background-color: var(--neu-bg); }
+      .neu-text { color: var(--neu-text); }
+      
+      .neu-flat {
+        background: var(--neu-bg);
+        box-shadow: 6px 6px 12px var(--neu-shadow-dark), -6px -6px 12px var(--neu-shadow-light);
+        border-radius: 1rem;
+        border: none;
+      }
+      
+      .neu-pressed {
+        background: var(--neu-bg);
+        box-shadow: inset 5px 5px 10px var(--neu-shadow-dark), inset -5px -5px 10px var(--neu-shadow-light);
+        border-radius: 1rem;
+        border: none;
+      }
+
+      .neu-btn {
+        background: var(--neu-bg);
+        box-shadow: 5px 5px 10px var(--neu-shadow-dark), -5px -5px 10px var(--neu-shadow-light);
+        border-radius: 9999px; /* Pill/Circle */
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s ease;
+        color: var(--neu-text);
+        border: none;
+        cursor: pointer;
+      }
+      
+      .neu-btn:active, .neu-btn-active {
+        box-shadow: inset 3px 3px 6px var(--neu-shadow-dark), inset -3px -3px 6px var(--neu-shadow-light);
+        color: var(--neu-highlight); /* This variable needs to update with theme too */
+        transform: translateY(1px);
+      }
+      
+      .neu-input {
+        background: var(--neu-bg);
+        box-shadow: inset 4px 4px 8px var(--neu-shadow-dark), inset -4px -4px 8px var(--neu-shadow-light);
+        border-radius: 9999px;
+        border: none;
+        outline: none;
+        color: var(--neu-text);
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.2.4",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "lucide-react": "https://esm.sh/lucide-react@^0.563.0",
+    "recharts": "https://esm.sh/recharts@^3.7.0",
+    "@google/genai": "https://esm.sh/@google/genai@^1.40.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>

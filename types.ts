@@ -1,0 +1,66 @@
+export interface Chapter {
+  title: string;
+  content: string;
+}
+
+export interface Book {
+  id: string;
+  title: string;
+  author: string;
+  coverUrl: string;
+  progress: number; // 0-100
+  lastRead: string;
+  tags: string[];
+  fullText?: string; // The raw content of the book
+  chapters?: Chapter[]; // Parsed chapters
+  chapterRegex?: string; // The regex used to parse
+}
+
+export interface Message {
+  id: string;
+  sender: 'user' | 'ai';
+  text: string;
+  timestamp: Date;
+  isThinking?: boolean;
+}
+
+export interface AICharacter {
+  id: string;
+  name: string;
+  nickname: string; // Display name in chat
+  avatarUrl: string;
+  description: string; // Personality/System Prompt
+}
+
+export enum AppView {
+  LIBRARY = 'LIBRARY',
+  READER = 'READER',
+  STATS = 'STATS',
+  SETTINGS = 'SETTINGS'
+}
+
+export type ApiProvider = 'OPENAI' | 'DEEPSEEK' | 'GEMINI' | 'CLAUDE' | 'CUSTOM';
+
+export interface ApiConfig {
+  provider: ApiProvider;
+  endpoint: string;
+  apiKey: string;
+  model: string;
+}
+
+export interface ApiPreset {
+  id: string;
+  name: string;
+  config: ApiConfig;
+}
+
+export interface AppSettings {
+  activeCommentsEnabled: boolean;
+  autoParseEnabled: boolean;
+  commentInterval: number;
+  commentProbability: number;
+  themeColor: string; // Hex code
+  fontSizeScale: number; // 0.8 - 1.2
+  safeAreaTop: number; // px
+  safeAreaBottom: number; // px
+}
