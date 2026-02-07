@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Bookmark,
@@ -13,11 +13,20 @@ import {
   Sparkles,
   Type,
 } from 'lucide-react';
-import { Book, Chapter, Message, ReaderBookState, ReaderFontState, ReaderHighlightRange } from '../types';
+import {
+  Book,
+  Chapter,
+  Message,
+  ReaderBookState,
+  ReaderFontState,
+  ReaderHighlightRange,
+  ReaderPositionState,
+  ReaderSessionSnapshot,
+} from '../types';
 import { getBookContent, saveBookReaderState } from '../utils/bookContentStorage';
 
 interface ReaderProps {
-  onBack: () => void;
+  onBack: (snapshot?: ReaderSessionSnapshot) => void;
   isDarkMode: boolean;
   activeBook: Book | null;
 }
@@ -72,6 +81,7 @@ type CaretDocument = Document & {
 const FLOATING_PANEL_TRANSITION_MS = 220;
 const HIGHIGHTER_CLICK_DELAY_MS = 220;
 const TYPOGRAPHY_COLOR_EDITOR_TRANSITION_MS = 180;
+const AI_FAB_OPEN_DELAY_MS = 120;
 const READER_APPEARANCE_STORAGE_KEY = 'app_reader_appearance';
 const DEFAULT_HIGHLIGHT_COLOR = '#FFE066';
 const PRESET_HIGHLIGHT_COLORS = ['#FFE066', '#FFD6A5', '#FFADAD', '#C7F9CC', '#A0C4FF', '#D7B5FF'];
@@ -98,6 +108,38 @@ const DEFAULT_READER_FONT_OPTIONS: ReaderFontOption[] = [
     sourceType: 'default',
   },
 ];
+
+const isSameHexColor = (left: string, right: string) => left.trim().toUpperCase() === right.trim().toUpperCase();
+
+const hasOnlyDefaultReaderFonts = (fontOptions: ReaderFontOption[]) => {
+  if (fontOptions.length !== DEFAULT_READER_FONT_OPTIONS.length) return false;
+  return fontOptions.every(option => {
+    const defaultOption = DEFAULT_READER_FONT_OPTIONS.find(item => item.id === option.id);
+    if (!defaultOption) return false;
+    return (
+      option.sourceType === 'default' &&
+      option.label === defaultOption.label &&
+      option.family === defaultOption.family
+    );
+  });
+};
+
+const isReaderAppearancePristine = (
+  typography: ReaderTypographyStyle,
+  fontOptions: ReaderFontOption[],
+  selectedFontId: string,
+  darkMode: boolean
+) => {
+  const defaults = getDefaultReaderTypography(darkMode);
+  return (
+    typography.fontSizePx === defaults.fontSizePx &&
+    Math.abs(typography.lineHeight - defaults.lineHeight) < 0.001 &&
+    isSameHexColor(typography.textColor, defaults.textColor) &&
+    isSameHexColor(typography.backgroundColor, defaults.backgroundColor) &&
+    selectedFontId === DEFAULT_READER_FONT_ID &&
+    hasOnlyDefaultReaderFonts(fontOptions)
+  );
+};
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -172,6 +214,79 @@ const normalizeStoredFontFamily = (family: string) => {
 };
 
 const isValidFontSourceType = (value: unknown): value is 'css' | 'font' => value === 'css' || value === 'font';
+
+const normalizeReaderPosition = (value: ReaderBookState['readingPosition']): ReaderPositionState | null => {
+  if (!value || typeof value !== 'object') return null;
+
+  const chapterIndex =
+    value.chapterIndex === null
+      ? null
+      : typeof value.chapterIndex === 'number' && Number.isFinite(value.chapterIndex)
+      ? Math.max(0, Math.floor(value.chapterIndex))
+      : null;
+
+  return {
+    chapterIndex,
+    chapterCharOffset:
+      typeof value.chapterCharOffset === 'number' && Number.isFinite(value.chapterCharOffset)
+        ? Math.max(0, Math.floor(value.chapterCharOffset))
+        : 0,
+    globalCharOffset:
+      typeof value.globalCharOffset === 'number' && Number.isFinite(value.globalCharOffset)
+        ? Math.max(0, Math.floor(value.globalCharOffset))
+        : 0,
+    scrollRatio:
+      typeof value.scrollRatio === 'number' && Number.isFinite(value.scrollRatio)
+        ? clamp(value.scrollRatio, 0, 1)
+        : 0,
+    totalLength:
+      typeof value.totalLength === 'number' && Number.isFinite(value.totalLength)
+        ? Math.max(0, Math.floor(value.totalLength))
+        : 0,
+    updatedAt:
+      typeof value.updatedAt === 'number' && Number.isFinite(value.updatedAt) ? Math.floor(value.updatedAt) : Date.now(),
+  };
+};
+
+const getTotalTextLength = (chapters: Chapter[], fallbackText: string) => {
+  if (chapters.length > 0) {
+    return chapters.reduce((total, chapter) => total + (chapter.content?.length || 0), 0);
+  }
+  return fallbackText.length;
+};
+
+const getChapterStartOffset = (chapters: Chapter[], chapterIndex: number) => {
+  if (chapterIndex <= 0) return 0;
+  return chapters.slice(0, chapterIndex).reduce((total, chapter) => total + (chapter.content?.length || 0), 0);
+};
+
+const resolveChapterPositionFromGlobalOffset = (chapters: Chapter[], globalOffset: number) => {
+  const totalLength = getTotalTextLength(chapters, '');
+  const clampedOffset = clamp(Math.round(globalOffset), 0, totalLength);
+  if (chapters.length === 0) {
+    return { chapterIndex: null as number | null, chapterCharOffset: clampedOffset };
+  }
+
+  let cursor = 0;
+  for (let index = 0; index < chapters.length; index += 1) {
+    const chapterLength = chapters[index].content?.length || 0;
+    const nextCursor = cursor + chapterLength;
+    if (clampedOffset <= nextCursor || index === chapters.length - 1) {
+      return {
+        chapterIndex: index,
+        chapterCharOffset: clamp(clampedOffset - cursor, 0, chapterLength),
+      };
+    }
+    cursor = nextCursor;
+  }
+
+  const fallbackIndex = Math.max(0, chapters.length - 1);
+  const fallbackLength = chapters[fallbackIndex]?.content?.length || 0;
+  return {
+    chapterIndex: fallbackIndex,
+    chapterCharOffset: fallbackLength,
+  };
+};
 
 const mergeSortedHighlightRanges = (ranges: TextHighlightRange[]) => {
   const merged: TextHighlightRange[] = [];
@@ -317,6 +432,7 @@ const resolveNodeOffsetToIndex = (node: Node, offset: number, totalLength: numbe
 
 const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   const [isAiPanelOpen, setIsAiPanelOpen] = useState(true);
+  const [isAiFabOpening, setIsAiFabOpening] = useState(false);
   const [unreadMessageCount, setUnreadMessageCount] = useState(0);
   const [activeFloatingPanel, setActiveFloatingPanel] = useState<FloatingPanel>('none');
   const [closingFloatingPanel, setClosingFloatingPanel] = useState<FloatingPanel | null>(null);
@@ -378,6 +494,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   const typographyColorEditorTimerRef = useRef<number | null>(null);
   const persistReaderStateTimerRef = useRef<number | null>(null);
   const highlighterClickTimerRef = useRef<number | null>(null);
+  const aiFabOpenTimerRef = useRef<number | null>(null);
   const fontObjectUrlsRef = useRef<string[]>([]);
   const fontLinkNodesRef = useRef<HTMLLinkElement[]>([]);
   const highlightDragRef = useRef<{ active: boolean; pointerId: number | null; startIndex: number | null }>({
@@ -385,6 +502,8 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     pointerId: null,
     startIndex: null,
   });
+  const pendingRestorePositionRef = useRef<ReaderPositionState | null>(null);
+  const latestReadingPositionRef = useRef<ReaderPositionState | null>(null);
 
   const isTocOpen = activeFloatingPanel === 'toc';
   const isHighlighterPanelOpen = activeFloatingPanel === 'highlighter';
@@ -421,6 +540,43 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
       top: thumbTop,
       height: thumbHeight,
     });
+  };
+
+  const getCurrentReadingPosition = (timestamp = Date.now()): ReaderPositionState | null => {
+    if (!activeBook) return null;
+
+    const hasChapters = chapters.length > 0;
+    const hasActiveChapter =
+      hasChapters && selectedChapterIndex !== null && selectedChapterIndex >= 0 && selectedChapterIndex < chapters.length;
+    const resolvedChapterIndex = hasActiveChapter && selectedChapterIndex !== null ? selectedChapterIndex : null;
+    const chapterText = resolvedChapterIndex !== null ? chapters[resolvedChapterIndex].content || '' : bookText;
+    const chapterLength = chapterText.length;
+
+    const scroller = readerScrollRef.current;
+    const scrollableHeight = scroller ? Math.max(0, scroller.scrollHeight - scroller.clientHeight) : 0;
+    const scrollTop = scroller ? scroller.scrollTop : lastReaderScrollTopRef.current;
+    const scrollRatio = scrollableHeight > 0 ? clamp(scrollTop / scrollableHeight, 0, 1) : 0;
+
+    const chapterCharOffset = chapterLength > 0 ? clamp(Math.round(chapterLength * scrollRatio), 0, chapterLength) : 0;
+    const totalLength = getTotalTextLength(chapters, bookText);
+    const chapterStartOffset = resolvedChapterIndex !== null ? getChapterStartOffset(chapters, resolvedChapterIndex) : 0;
+    const globalCharOffset = clamp(chapterStartOffset + chapterCharOffset, 0, totalLength);
+
+    return {
+      chapterIndex: resolvedChapterIndex,
+      chapterCharOffset,
+      globalCharOffset,
+      scrollRatio,
+      totalLength,
+      updatedAt: timestamp,
+    };
+  };
+
+  const syncReadingPositionRef = (timestamp = Date.now()) => {
+    const snapshot = getCurrentReadingPosition(timestamp);
+    if (!snapshot) return null;
+    latestReadingPositionRef.current = snapshot;
+    return snapshot;
   };
 
   const scrollReaderTo = (target: ScrollTarget) => {
@@ -637,6 +793,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     isAiPanelOpenRef.current = isAiPanelOpen;
     if (isAiPanelOpen) {
       setUnreadMessageCount(0);
+      setIsAiFabOpening(false);
     }
   }, [isAiPanelOpen]);
 
@@ -666,6 +823,8 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         setIsReaderStateHydrated(false);
         setHydratedBookId(null);
         hideFloatingPanelImmediately();
+        pendingRestorePositionRef.current = null;
+        latestReadingPositionRef.current = null;
         setIsLoadingBookContent(false);
         return;
       }
@@ -682,6 +841,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         const readerState = content?.readerState;
         const persistedColor = readerState?.highlightColor;
         const persistedRanges = readerState?.highlightsByChapter;
+        const persistedPosition = normalizeReaderPosition(readerState?.readingPosition);
 
         if (cancelled) return;
 
@@ -702,12 +862,63 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         setFontFamilyInput('');
         hideFloatingPanelImmediately();
 
-        if (resolvedChapters.length > 0) {
-          setSelectedChapterIndex(0);
-          setBookText(resolvedChapters[0].content || fullText);
+        const hasChapters = resolvedChapters.length > 0;
+        let nextChapterIndex: number | null = hasChapters ? 0 : null;
+        let nextChapterOffset = 0;
+
+        if (persistedPosition) {
+          if (hasChapters) {
+            const hasValidChapterIndex =
+              persistedPosition.chapterIndex !== null &&
+              persistedPosition.chapterIndex >= 0 &&
+              persistedPosition.chapterIndex < resolvedChapters.length;
+
+            if (hasValidChapterIndex) {
+              nextChapterIndex = persistedPosition.chapterIndex;
+              const chapterLength = resolvedChapters[nextChapterIndex].content?.length || 0;
+              nextChapterOffset = clamp(persistedPosition.chapterCharOffset, 0, chapterLength);
+            } else {
+              const resolved = resolveChapterPositionFromGlobalOffset(resolvedChapters, persistedPosition.globalCharOffset);
+              nextChapterIndex = resolved.chapterIndex;
+              nextChapterOffset = resolved.chapterCharOffset;
+            }
+          } else {
+            const fallbackLength = fullText.length;
+            const fallbackOffset = persistedPosition.chapterCharOffset > 0
+              ? persistedPosition.chapterCharOffset
+              : persistedPosition.globalCharOffset;
+            nextChapterOffset = clamp(fallbackOffset, 0, fallbackLength);
+          }
+        }
+
+        const nextBookText =
+          nextChapterIndex !== null
+            ? resolvedChapters[nextChapterIndex]?.content || fullText
+            : fullText;
+
+        setSelectedChapterIndex(nextChapterIndex);
+        setBookText(nextBookText);
+
+        if (persistedPosition) {
+          const chapterLength = nextBookText.length;
+          const totalLength = getTotalTextLength(resolvedChapters, fullText);
+          const chapterStartOffset =
+            nextChapterIndex !== null ? getChapterStartOffset(resolvedChapters, nextChapterIndex) : 0;
+          const globalCharOffset = clamp(chapterStartOffset + nextChapterOffset, 0, totalLength);
+          const derivedRatio = chapterLength > 0 ? nextChapterOffset / chapterLength : 0;
+          const normalizedRatio = persistedPosition.scrollRatio > 0 ? persistedPosition.scrollRatio : derivedRatio;
+          pendingRestorePositionRef.current = {
+            chapterIndex: nextChapterIndex,
+            chapterCharOffset: nextChapterOffset,
+            globalCharOffset,
+            scrollRatio: clamp(normalizedRatio, 0, 1),
+            totalLength,
+            updatedAt: persistedPosition.updatedAt,
+          };
+          latestReadingPositionRef.current = pendingRestorePositionRef.current;
         } else {
-          setSelectedChapterIndex(null);
-          setBookText(fullText);
+          pendingRestorePositionRef.current = null;
+          latestReadingPositionRef.current = null;
         }
       } catch (error) {
         console.error('Failed to load reader content:', error);
@@ -722,6 +933,8 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
           setFontUrlInput('');
           setFontFamilyInput('');
           hideFloatingPanelImmediately();
+          pendingRestorePositionRef.current = null;
+          latestReadingPositionRef.current = null;
           setBookText(activeBook.fullText || '');
         }
       } finally {
@@ -739,6 +952,24 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     };
   }, [activeBook?.id]);
 
+  useLayoutEffect(() => {
+    const pending = pendingRestorePositionRef.current;
+    const scroller = readerScrollRef.current;
+    if (!pending || !scroller || isLoadingBookContent) return;
+
+    const chapterLength = bookText.length;
+    const ratioFromOffset = chapterLength > 0 ? pending.chapterCharOffset / chapterLength : 0;
+    const targetRatio = clamp(pending.scrollRatio > 0 ? pending.scrollRatio : ratioFromOffset, 0, 1);
+
+    const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const nextScrollTop = maxScrollTop > 0 ? maxScrollTop * targetRatio : 0;
+    scroller.scrollTop = nextScrollTop;
+    lastReaderScrollTopRef.current = nextScrollTop;
+    refreshReaderScrollbar();
+    syncReadingPositionRef(Date.now());
+    pendingRestorePositionRef.current = null;
+  }, [activeBook?.id, isLoadingBookContent, bookText]);
+
   useEffect(() => {
     refreshReaderScrollbar();
     const rafId = window.requestAnimationFrame(() => refreshReaderScrollbar());
@@ -751,6 +982,11 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
       window.removeEventListener('resize', onResize);
     };
   }, [bookText, isLoadingBookContent, activeFloatingPanel, selectedChapterIndex]);
+
+  useEffect(() => {
+    if (!activeBook || isLoadingBookContent) return;
+    syncReadingPositionRef(Date.now());
+  }, [activeBook?.id, isLoadingBookContent, selectedChapterIndex, bookText, chapters]);
 
   useEffect(() => {
     return () => {
@@ -768,6 +1004,10 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
       if (highlighterClickTimerRef.current) {
         window.clearTimeout(highlighterClickTimerRef.current);
       }
+      if (aiFabOpenTimerRef.current) {
+        window.clearTimeout(aiFabOpenTimerRef.current);
+        aiFabOpenTimerRef.current = null;
+      }
       fontObjectUrlsRef.current.forEach(url => {
         URL.revokeObjectURL(url);
       });
@@ -783,13 +1023,30 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   }, [readerTypography.textColor, readerTypography.backgroundColor]);
 
   useEffect(() => {
-    const prevDefaults = getDefaultReaderTypography(!isDarkMode);
+    const prevMode = !isDarkMode;
+    const prevDefaults = getDefaultReaderTypography(prevMode);
     const nextDefaults = getDefaultReaderTypography(isDarkMode);
-    setReaderTypography(prev => ({
-      ...prev,
-      textColor: prev.textColor === prevDefaults.textColor ? nextDefaults.textColor : prev.textColor,
-      backgroundColor: prev.backgroundColor === prevDefaults.backgroundColor ? nextDefaults.backgroundColor : prev.backgroundColor,
-    }));
+    setReaderTypography(prev => {
+      const isPristine = isReaderAppearancePristine(prev, readerFontOptions, selectedReaderFontId, prevMode);
+      if (isPristine) {
+        return nextDefaults;
+      }
+
+      const nextTextColor = isSameHexColor(prev.textColor, prevDefaults.textColor) ? nextDefaults.textColor : prev.textColor;
+      const nextBackgroundColor = isSameHexColor(prev.backgroundColor, prevDefaults.backgroundColor)
+        ? nextDefaults.backgroundColor
+        : prev.backgroundColor;
+
+      if (nextTextColor === prev.textColor && nextBackgroundColor === prev.backgroundColor) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        textColor: nextTextColor,
+        backgroundColor: nextBackgroundColor,
+      };
+    });
   }, [isDarkMode]);
 
   useEffect(() => {
@@ -977,9 +1234,11 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     }
 
     persistReaderStateTimerRef.current = window.setTimeout(() => {
+      const readingPosition = syncReadingPositionRef(Date.now()) || latestReadingPositionRef.current || undefined;
       const readerState: ReaderBookState = {
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
+        readingPosition,
       };
       saveBookReaderState(activeBook.id, readerState).catch((error) => {
         console.error('Failed to persist reader state:', error);
@@ -1044,6 +1303,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     const prevTop = lastReaderScrollTopRef.current;
     const currTop = target.scrollTop;
     lastReaderScrollTopRef.current = currTop;
+    syncReadingPositionRef(Date.now());
 
     const { nearTop, nearBottom, noScrollableContent } = canTriggerBoundarySwitch(target);
     const isScrollingDown = currTop > prevTop + 0.5;
@@ -1224,6 +1484,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
       scroller.scrollTop = nextScrollTop;
       lastReaderScrollTopRef.current = nextScrollTop;
       refreshReaderScrollbar();
+      syncReadingPositionRef(Date.now());
     };
 
     const onUp = () => {
@@ -1597,6 +1858,64 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     }, 800);
   };
 
+  const handleOpenAiPanelFromFab = () => {
+    if (isAiPanelOpen || isAiFabOpening) return;
+
+    setIsAiFabOpening(true);
+    if (aiFabOpenTimerRef.current) {
+      window.clearTimeout(aiFabOpenTimerRef.current);
+    }
+
+    aiFabOpenTimerRef.current = window.setTimeout(() => {
+      setIsAiPanelOpen(true);
+      setIsAiFabOpening(false);
+      aiFabOpenTimerRef.current = null;
+    }, AI_FAB_OPEN_DELAY_MS);
+  };
+
+  const buildReaderSessionSnapshot = (): ReaderSessionSnapshot | null => {
+    if (!activeBook?.id) return null;
+
+    const now = Date.now();
+    const readingPosition = syncReadingPositionRef(now) || latestReadingPositionRef.current;
+    if (!readingPosition) return null;
+
+    const safeTotalLength = Math.max(0, readingPosition.totalLength);
+    const safeGlobalOffset = clamp(readingPosition.globalCharOffset, 0, safeTotalLength);
+    const progress = safeTotalLength > 0 ? Math.round(clamp((safeGlobalOffset / safeTotalLength) * 100, 0, 100)) : 0;
+
+    const normalizedPosition: ReaderPositionState = {
+      ...readingPosition,
+      globalCharOffset: safeGlobalOffset,
+      totalLength: safeTotalLength,
+      updatedAt: now,
+    };
+
+    latestReadingPositionRef.current = normalizedPosition;
+
+    return {
+      bookId: activeBook.id,
+      progress,
+      lastReadAt: now,
+      readingPosition: normalizedPosition,
+    };
+  };
+
+  const handleBackClick = () => {
+    const sessionSnapshot = buildReaderSessionSnapshot();
+    if (sessionSnapshot) {
+      const readerState: ReaderBookState = {
+        highlightColor,
+        highlightsByChapter: highlightRangesByChapter,
+        readingPosition: sessionSnapshot.readingPosition,
+      };
+      saveBookReaderState(sessionSnapshot.bookId, readerState).catch((error) => {
+        console.error('Failed to persist reader state on exit:', error);
+      });
+    }
+    onBack(sessionSnapshot || undefined);
+  };
+
   const isHighlighterVisualActive = isHighlightMode || isHighlighterClickPending;
   const highlighterToggleColor = isHighlightMode ? highlightColor : '#64748B';
   const highlighterToggleStyle = { color: highlighterToggleColor } as React.CSSProperties;
@@ -1721,7 +2040,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
       }`}
     >
       <div className={`flex items-center gap-3 p-4 z-10 transition-colors ${isDarkMode ? 'bg-[#2d3748]' : 'bg-[#e0e5ec]'}`}>
-        <button onClick={onBack} className="w-10 h-10 neu-btn rounded-full text-slate-500 hover:text-slate-700 shrink-0">
+        <button onClick={handleBackClick} className="w-10 h-10 neu-btn rounded-full text-slate-500 hover:text-slate-700 shrink-0">
           <ArrowLeft size={20} />
         </button>
         <div className="flex-1 min-w-0 max-w-[calc(100%-14rem)]">
@@ -2137,20 +2456,21 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
 
       {!isAiPanelOpen && (
         <button
-          onClick={() => setIsAiPanelOpen(true)}
-          className="absolute bottom-6 right-6 w-12 h-12 neu-btn rounded-full z-20 text-rose-400"
+          onClick={handleOpenAiPanelFromFab}
+          className={`reader-ai-fab absolute bottom-6 right-6 w-12 h-12 neu-btn rounded-full z-20 text-rose-400 ${
+            isAiFabOpening ? 'neu-btn-active' : ''
+          }`}
         >
           <Sparkles size={20} />
-          {unreadMessageCount > 0 && (
-            <span
-              className={`absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full text-[10px] leading-none font-bold flex items-center justify-center ${
-                isDarkMode ? 'border border-slate-700 text-white' : 'border border-white/70 text-white'
-              }`}
-              style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }}
-            >
-              {unreadMessageCount}
-            </span>
-          )}
+          <span
+            className={`reader-ai-fab-badge absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full text-[10px] leading-none font-bold flex items-center justify-center ${
+              unreadMessageCount > 0 ? 'opacity-100 scale-100' : 'opacity-0 scale-50'
+            } ${isDarkMode ? 'border border-slate-700 text-white' : 'border border-white/70 text-white'}`}
+            style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }}
+            aria-hidden={unreadMessageCount <= 0}
+          >
+            {unreadMessageCount > 0 ? unreadMessageCount : ''}
+          </span>
         </button>
       )}
 

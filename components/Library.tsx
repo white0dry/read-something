@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Book as BookIcon, Plus, Clock, Edit2, Check, UserCircle, LogOut, Link2, Search, Filter, MoreVertical, X, Image, Trash2, Link, FileText, FileUp, List, Sparkles, AlertTriangle, ArrowUpDown, ArrowUp, ArrowDown, LayoutGrid, AlignJustify } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import { Book, Chapter, ApiConfig } from '../types';
@@ -131,6 +131,7 @@ const Library: React.FC<LibraryProps> = ({
 
   // State for AI Regex Generation
   const [isGeneratingRegex, setIsGeneratingRegex] = useState(false);
+  const [clockNow, setClockNow] = useState(() => Date.now());
 
   const menuRef = useRef<HTMLDivElement>(null);
   const charMenuRef = useRef<HTMLDivElement>(null);
@@ -156,6 +157,13 @@ const Library: React.FC<LibraryProps> = ({
       if (importModalCloseTimerRef.current) window.clearTimeout(importModalCloseTimerRef.current);
       if (errorModalCloseTimerRef.current) window.clearTimeout(errorModalCloseTimerRef.current);
     };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setClockNow(Date.now());
+    }, 60000);
+    return () => window.clearInterval(timer);
   }, []);
 
 
@@ -699,8 +707,26 @@ const Library: React.FC<LibraryProps> = ({
     }
   };
 
-  // Recent read book (first in list as mock logic for now, ideally passed as prop)
-  const recentBook = books.length > 0 ? books[0] : null;
+  const formatLastReadTime = (lastReadAt?: number, fallback = '从未阅读') => {
+    if (!lastReadAt || Number.isNaN(lastReadAt)) return fallback;
+
+    const diffMs = Math.max(0, clockNow - lastReadAt);
+    const diffMinutes = Math.floor(diffMs / 60000);
+    if (diffMinutes < 60) return `${Math.max(1, diffMinutes)}分钟前`;
+
+    const diffHours = Math.floor(diffMinutes / 60);
+    if (diffHours < 24) return `${diffHours}小时前`;
+
+    const date = new Date(lastReadAt);
+    const pad = (value: number) => value.toString().padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  };
+
+  const recentBook = useMemo(() => {
+    const candidates = books.filter(book => typeof book.lastReadAt === 'number' && book.lastReadAt > 0);
+    if (candidates.length === 0) return null;
+    return [...candidates].sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0))[0];
+  }, [books]);
 
   // Reusable Modal Content Render
   const renderBookForm = (book: Partial<Book>, isEdit: boolean) => (
@@ -1119,7 +1145,7 @@ const Library: React.FC<LibraryProps> = ({
                 <div>
                    <div className="flex justify-between text-xs text-slate-400 mb-2">
                      <span>已读 {recentBook.progress}%</span>
-                     <span><Clock size={12} className="inline mr-1"/>{recentBook.lastRead}</span>
+                     <span><Clock size={12} className="inline mr-1"/>{formatLastReadTime(recentBook.lastReadAt, recentBook.lastRead)}</span>
                    </div>
                    <div className={`w-full h-2 rounded-full overflow-hidden p-[2px] ${pressedClass}`}>
                      {/* Theme colored progress bar */}

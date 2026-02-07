@@ -26,12 +26,29 @@ export interface ReaderFontState {
   sourceUrl: string;
 }
 
+export interface ReaderPositionState {
+  chapterIndex: number | null;
+  chapterCharOffset: number;
+  globalCharOffset: number;
+  scrollRatio: number;
+  totalLength: number;
+  updatedAt: number;
+}
+
+export interface ReaderSessionSnapshot {
+  bookId: string;
+  progress: number;
+  lastReadAt: number;
+  readingPosition: ReaderPositionState;
+}
+
 export interface ReaderBookState {
   highlightColor?: string;
   highlightsByChapter?: Record<string, ReaderHighlightRange[]>;
   typographyStyle?: ReaderTypographyState;
   fontOptions?: ReaderFontState[];
   selectedFontId?: string;
+  readingPosition?: ReaderPositionState;
 }
 
 export interface Book {
@@ -41,6 +58,7 @@ export interface Book {
   coverUrl: string;
   progress: number; // 0-100
   lastRead: string;
+  lastReadAt?: number;
   tags: string[];
   fullText?: string; // The raw content of the book
   chapters?: Chapter[]; // Parsed chapters

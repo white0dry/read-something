@@ -4,7 +4,7 @@ import Library from './components/Library';
 import Reader from './components/Reader';
 import Stats from './components/Stats';
 import Settings from './components/Settings';
-import { AppView, Book, ApiConfig, ApiPreset, AppSettings } from './types';
+import { AppView, Book, ApiConfig, ApiPreset, AppSettings, ReaderSessionSnapshot } from './types';
 import { Persona, Character, WorldBookEntry } from './components/settings/types';
 import { deleteImageByRef, migrateDataUrlToImageRef } from './utils/imageStorage';
 import { compactBookForState, deleteBookContent, migrateInlineBookContent, saveBookContent } from './utils/bookContentStorage';
@@ -36,7 +36,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   themeColor: DEFAULT_THEME_COLOR,
   fontSizeScale: 1.0,
   safeAreaTop: 0,
-  safeAreaBottom: 0
+  safeAreaBottom: 10
 };
 
 const BUILT_IN_SAMPLE_COVER_URLS = new Set([
@@ -95,6 +95,20 @@ const darkenColor = (hex: string, percent: number) => {
        ((0|(1<<8) + g * (100 - percent) / 100).toString(16)).substr(1) +
        ((0|(1<<8) + b * (100 - percent) / 100).toString(16)).substr(1);
 }
+
+const formatBookLastRead = (timestamp: number) => {
+  const now = Date.now();
+  const diffMs = Math.max(0, now - timestamp);
+  const diffMinutes = Math.floor(diffMs / 60000);
+  if (diffMinutes < 60) return `${Math.max(1, diffMinutes)}分钟前`;
+
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}小时前`;
+
+  const date = new Date(timestamp);
+  const pad = (value: number) => value.toString().padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
 
 const App: React.FC = () => {
   const VIEW_TRANSITION_MS = 260;
@@ -209,6 +223,10 @@ const App: React.FC = () => {
   // --- EFFECTS FOR PERSISTENCE ---
 
   useEffect(() => { safeSetStorageItem('app_dark_mode', JSON.stringify(isDarkMode)); }, [isDarkMode]);
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark-mode', isDarkMode);
+    document.body.classList.toggle('dark-mode', isDarkMode);
+  }, [isDarkMode]);
   useEffect(() => {
     const compactedBooks = books.map(compactBookForState);
     safeSetStorageItem('app_books', JSON.stringify(compactedBooks));
@@ -407,10 +425,36 @@ const App: React.FC = () => {
   };
 
   const handleOpenBook = (book: Book) => {
+    const openedAt = Date.now();
+    setBooks(prev =>
+      prev.map(item =>
+        item.id === book.id
+          ? {
+              ...item,
+              lastReadAt: openedAt,
+              lastRead: formatBookLastRead(openedAt),
+            }
+          : item
+      )
+    );
     transitionToView(AppView.READER, book);
   };
 
-  const handleBackToLibrary = () => {
+  const handleBackToLibrary = (snapshot?: ReaderSessionSnapshot) => {
+    if (snapshot) {
+      setBooks(prev =>
+        prev.map(book =>
+          book.id === snapshot.bookId
+            ? {
+                ...book,
+                progress: snapshot.progress,
+                lastReadAt: snapshot.lastReadAt,
+                lastRead: formatBookLastRead(snapshot.lastReadAt),
+              }
+            : book
+        )
+      );
+    }
     transitionToView(AppView.LIBRARY);
   };
 

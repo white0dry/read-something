@@ -242,6 +242,15 @@
         box-shadow: inset 3px 3px 6px var(--neu-shadow-dark), inset -3px -3px 6px var(--neu-shadow-light);
       }
 
+      .reader-ai-fab {
+        transition: color 0.2s ease, box-shadow 0.14s ease, transform 0.14s ease, opacity 0.2s ease;
+      }
+
+      .reader-ai-fab-badge {
+        transform-origin: top right;
+        transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease;
+      }
+
       /* Card press feedback for clickable book cards */
       .app-card-press {
         transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 160ms ease, filter 160ms ease;
@@ -270,22 +279,22 @@
 
       @keyframes app-view-enter-left {
         0% {
-          left: -24px;
+          transform: translateX(-24px);
           opacity: 0;
         }
         100% {
-          left: 0;
+          transform: translateX(0);
           opacity: 1;
         }
       }
 
       @keyframes app-view-exit-right {
         0% {
-          left: 0;
+          transform: translateX(0);
           opacity: 1;
         }
         100% {
-          left: 24px;
+          transform: translateX(24px);
           opacity: 0;
         }
       }
@@ -313,25 +322,25 @@
       .app-view-enter-left {
         position: relative;
         animation: app-view-enter-left 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
-        will-change: left, opacity;
+        will-change: transform, opacity;
       }
 
       .app-view-exit-right {
         position: relative;
         animation: app-view-exit-right 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
-        will-change: left, opacity;
+        will-change: transform, opacity;
       }
 
       .app-modal-enter-left {
         position: relative;
         animation: app-view-enter-left 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
-        will-change: left, opacity;
+        will-change: transform, opacity;
       }
 
       .app-modal-exit-right {
         position: relative;
         animation: app-view-exit-right 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
-        will-change: left, opacity;
+        will-change: transform, opacity;
       }
 
       .app-modal-overlay-enter {
