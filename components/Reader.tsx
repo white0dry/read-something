@@ -111,22 +111,8 @@ const DEFAULT_READER_FONT_OPTIONS: ReaderFontOption[] = [
 
 const isSameHexColor = (left: string, right: string) => left.trim().toUpperCase() === right.trim().toUpperCase();
 
-const hasOnlyDefaultReaderFonts = (fontOptions: ReaderFontOption[]) => {
-  if (fontOptions.length !== DEFAULT_READER_FONT_OPTIONS.length) return false;
-  return fontOptions.every(option => {
-    const defaultOption = DEFAULT_READER_FONT_OPTIONS.find(item => item.id === option.id);
-    if (!defaultOption) return false;
-    return (
-      option.sourceType === 'default' &&
-      option.label === defaultOption.label &&
-      option.family === defaultOption.family
-    );
-  });
-};
-
 const isReaderAppearancePristine = (
   typography: ReaderTypographyStyle,
-  fontOptions: ReaderFontOption[],
   selectedFontId: string,
   darkMode: boolean
 ) => {
@@ -136,8 +122,7 @@ const isReaderAppearancePristine = (
     Math.abs(typography.lineHeight - defaults.lineHeight) < 0.001 &&
     isSameHexColor(typography.textColor, defaults.textColor) &&
     isSameHexColor(typography.backgroundColor, defaults.backgroundColor) &&
-    selectedFontId === DEFAULT_READER_FONT_ID &&
-    hasOnlyDefaultReaderFonts(fontOptions)
+    selectedFontId === DEFAULT_READER_FONT_ID
   );
 };
 
@@ -1027,7 +1012,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     const prevDefaults = getDefaultReaderTypography(prevMode);
     const nextDefaults = getDefaultReaderTypography(isDarkMode);
     setReaderTypography(prev => {
-      const isPristine = isReaderAppearancePristine(prev, readerFontOptions, selectedReaderFontId, prevMode);
+      const isPristine = isReaderAppearancePristine(prev, selectedReaderFontId, prevMode);
       if (isPristine) {
         return nextDefaults;
       }
@@ -1113,10 +1098,14 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         const selectedFontId = mergedFontOptions.some(option => option.id === persistedSelectedFontId)
           ? persistedSelectedFontId
           : DEFAULT_READER_FONT_ID;
+        const isPristineInAnyMode =
+          isReaderAppearancePristine(normalizedTypography, selectedFontId, false) ||
+          isReaderAppearancePristine(normalizedTypography, selectedFontId, true);
+        const hydratedTypography = isPristineInAnyMode ? defaults : normalizedTypography;
 
         if (cancelled) return;
 
-        setReaderTypography(normalizedTypography);
+        setReaderTypography(hydratedTypography);
         setReaderFontOptions(mergedFontOptions);
         setSelectedReaderFontId(selectedFontId);
 
