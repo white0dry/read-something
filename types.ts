@@ -3,6 +3,17 @@ export interface Chapter {
   content: string;
 }
 
+export interface ReaderHighlightRange {
+  start: number;
+  end: number;
+  color: string;
+}
+
+export interface ReaderBookState {
+  highlightColor?: string;
+  highlightsByChapter?: Record<string, ReaderHighlightRange[]>;
+}
+
 export interface Book {
   id: string;
   title: string;

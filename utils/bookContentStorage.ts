@@ -1,12 +1,13 @@
-import { Book, Chapter } from '../types';
+import { Book, Chapter, ReaderBookState } from '../types';
 
 const BOOK_CONTENT_DB_NAME = 'app_book_content_v1';
 const BOOK_CONTENT_STORE = 'book_contents';
 const BOOK_CONTENT_DB_VERSION = 1;
 
-interface StoredBookContent {
+export interface StoredBookContent {
   fullText: string;
   chapters: Chapter[];
+  readerState?: ReaderBookState;
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -37,15 +38,47 @@ export const saveBookContent = async (bookId: string, fullText: string, chapters
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(BOOK_CONTENT_STORE, 'readwrite');
     const store = tx.objectStore(BOOK_CONTENT_STORE);
-    const payload: StoredBookContent = {
-      fullText,
-      chapters,
+
+    const getRequest = store.get(bookId);
+    getRequest.onsuccess = () => {
+      const existing = getRequest.result as StoredBookContent | undefined;
+      const payload: StoredBookContent = {
+        fullText,
+        chapters,
+        readerState: existing?.readerState,
+      };
+      store.put(payload, bookId);
     };
-    store.put(payload, bookId);
+    getRequest.onerror = () => reject(getRequest.error || new Error('Failed to read existing book content'));
 
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error || new Error('Failed to save book content'));
     tx.onabort = () => reject(tx.error || new Error('Failed to save book content'));
+  });
+};
+
+export const saveBookReaderState = async (bookId: string, readerState: ReaderBookState): Promise<void> => {
+  const db = await openBookContentDb();
+
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(BOOK_CONTENT_STORE, 'readwrite');
+    const store = tx.objectStore(BOOK_CONTENT_STORE);
+
+    const getRequest = store.get(bookId);
+    getRequest.onsuccess = () => {
+      const existing = (getRequest.result as StoredBookContent | undefined) || { fullText: '', chapters: [] };
+      const payload: StoredBookContent = {
+        fullText: existing.fullText || '',
+        chapters: existing.chapters || [],
+        readerState,
+      };
+      store.put(payload, bookId);
+    };
+    getRequest.onerror = () => reject(getRequest.error || new Error('Failed to read existing reader state'));
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('Failed to save reader state'));
+    tx.onabort = () => reject(tx.error || new Error('Failed to save reader state'));
   });
 };
 

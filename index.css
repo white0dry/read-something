@@ -153,6 +153,40 @@
         will-change: transform, opacity;
       }
 
+      @keyframes reader-flyout-expand-down {
+        from {
+          opacity: 0;
+          transform: translateY(-8px) scaleY(0.88);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0) scaleY(1);
+        }
+      }
+
+      @keyframes reader-flyout-collapse-up {
+        from {
+          opacity: 1;
+          transform: translateY(0) scaleY(1);
+        }
+        to {
+          opacity: 0;
+          transform: translateY(-8px) scaleY(0.88);
+        }
+      }
+
+      .reader-flyout-enter {
+        transform-origin: top center;
+        animation: reader-flyout-expand-down 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        will-change: transform, opacity;
+      }
+
+      .reader-flyout-exit {
+        transform-origin: top center;
+        animation: reader-flyout-collapse-up 220ms ease-in both;
+        will-change: transform, opacity;
+      }
+
       /* Neumorphism Utilities */
       .neu-bg { background-color: var(--neu-bg); }
       .neu-text { color: var(--neu-text); }
@@ -188,6 +222,24 @@
         box-shadow: inset 3px 3px 6px var(--neu-shadow-dark), inset -3px -3px 6px var(--neu-shadow-light);
         color: var(--neu-highlight); /* This variable needs to update with theme too */
         transform: translateY(1px);
+      }
+
+      /* Toggle-style pressed state: keep inset look without extra movement */
+      .reader-tool-active {
+        box-shadow: inset 3px 3px 6px var(--neu-shadow-dark), inset -3px -3px 6px var(--neu-shadow-light);
+      }
+
+      /* Highlighter toggle: avoid transient :active flash, rely on persistent pressed state */
+      .reader-tool-toggle {
+        transition: color 0.2s ease, box-shadow 0.12s ease;
+      }
+      .reader-tool-toggle:active {
+        transform: none;
+        box-shadow: 5px 5px 10px var(--neu-shadow-dark), -5px -5px 10px var(--neu-shadow-light);
+      }
+      .reader-tool-toggle.reader-tool-active:active {
+        transform: none;
+        box-shadow: inset 3px 3px 6px var(--neu-shadow-dark), inset -3px -3px 6px var(--neu-shadow-light);
       }
       
       .neu-input {

@@ -10,8 +10,8 @@ import {
   Sparkles,
   Type,
 } from 'lucide-react';
-import { Book, Chapter, Message } from '../types';
-import { getBookContent } from '../utils/bookContentStorage';
+import { Book, Chapter, Message, ReaderBookState, ReaderHighlightRange } from '../types';
+import { getBookContent, saveBookReaderState } from '../utils/bookContentStorage';
 
 interface ReaderProps {
   onBack: () => void;
@@ -21,11 +21,219 @@ interface ReaderProps {
 
 type ScrollTarget = 'top' | 'bottom';
 type ChapterSwitchDirection = 'next' | 'prev';
+type FloatingPanel = 'none' | 'toc' | 'highlighter';
+
+interface RgbValue {
+  r: number;
+  g: number;
+  b: number;
+}
+
+type TextHighlightRange = ReaderHighlightRange;
+
+interface ParagraphMeta {
+  text: string;
+  start: number;
+  end: number;
+}
+
+interface ParagraphSegment {
+  start: number;
+  end: number;
+  text: string;
+  color?: string;
+}
+
+type CaretDocument = Document & {
+  caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+  caretRangeFromPoint?: (x: number, y: number) => Range | null;
+};
+
+const FLOATING_PANEL_TRANSITION_MS = 220;
+const HIGHIGHTER_CLICK_DELAY_MS = 220;
+const DEFAULT_HIGHLIGHT_COLOR = '#FFE066';
+const PRESET_HIGHLIGHT_COLORS = ['#FFE066', '#FFD6A5', '#FFADAD', '#C7F9CC', '#A0C4FF', '#D7B5FF'];
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const hexToRgb = (hex: string): RgbValue => {
+  const normalized = hex.replace('#', '');
+  if (!/^[\da-fA-F]{6}$/.test(normalized)) {
+    return { r: 255, g: 224, b: 102 };
+  }
+  return {
+    r: parseInt(normalized.slice(0, 2), 16),
+    g: parseInt(normalized.slice(2, 4), 16),
+    b: parseInt(normalized.slice(4, 6), 16),
+  };
+};
+
+const rgbToHex = ({ r, g, b }: RgbValue) =>
+  `#${[r, g, b].map(v => clamp(v, 0, 255).toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+
+const normalizeHexInput = (raw: string) => {
+  const cleaned = raw.replace(/[^#0-9a-fA-F]/g, '').replace(/#/g, '');
+  return `#${cleaned.slice(0, 6).toUpperCase()}`;
+};
+
+const isValidHexColor = (value: string) => /^#[0-9A-F]{6}$/.test(value);
+
+const mergeSortedHighlightRanges = (ranges: TextHighlightRange[]) => {
+  const merged: TextHighlightRange[] = [];
+
+  ranges.forEach(range => {
+    if (range.end <= range.start) return;
+    if (merged.length === 0) {
+      merged.push({ ...range });
+      return;
+    }
+    const last = merged[merged.length - 1];
+    if (last.color === range.color && last.end >= range.start) {
+      last.end = Math.max(last.end, range.end);
+      return;
+    }
+    merged.push({ ...range });
+  });
+
+  return merged;
+};
+
+const applyHighlightStroke = (ranges: TextHighlightRange[], stroke: TextHighlightRange) => {
+  const strokeStart = Math.min(stroke.start, stroke.end);
+  const strokeEnd = Math.max(stroke.start, stroke.end);
+  if (strokeEnd <= strokeStart) return ranges;
+
+  const subtractStroke = (range: TextHighlightRange) => {
+    if (range.end <= strokeStart || range.start >= strokeEnd) return [{ ...range }];
+    const pieces: TextHighlightRange[] = [];
+    if (range.start < strokeStart) {
+      pieces.push({ ...range, end: strokeStart });
+    }
+    if (range.end > strokeEnd) {
+      pieces.push({ ...range, start: strokeEnd });
+    }
+    return pieces;
+  };
+
+  const coveredSegments = ranges
+    .map(range => ({
+      start: Math.max(range.start, strokeStart),
+      end: Math.min(range.end, strokeEnd),
+    }))
+    .filter(segment => segment.end > segment.start)
+    .sort((a, b) => a.start - b.start);
+
+  const mergedCovered = coveredSegments.reduce<Array<{ start: number; end: number }>>((acc, segment) => {
+    if (acc.length === 0) {
+      acc.push({ ...segment });
+      return acc;
+    }
+    const last = acc[acc.length - 1];
+    if (segment.start <= last.end) {
+      last.end = Math.max(last.end, segment.end);
+      return acc;
+    }
+    acc.push({ ...segment });
+    return acc;
+  }, []);
+
+  const coveredLength = mergedCovered.reduce((sum, segment) => sum + (segment.end - segment.start), 0);
+  const strokeLength = strokeEnd - strokeStart;
+  const isEraseIntent = coveredLength >= strokeLength;
+
+  const trimmed = ranges.flatMap(subtractStroke);
+  if (isEraseIntent) {
+    return mergeSortedHighlightRanges(trimmed.sort((a, b) => a.start - b.start));
+  }
+
+  const mergedInput = [...trimmed, { start: strokeStart, end: strokeEnd, color: stroke.color }].sort((a, b) => a.start - b.start);
+  return mergeSortedHighlightRanges(mergedInput);
+};
+
+const buildParagraphSegments = (paragraph: ParagraphMeta, ranges: TextHighlightRange[]) => {
+  const segments: ParagraphSegment[] = [];
+  let cursor = paragraph.start;
+
+  const pushPlain = (start: number, end: number) => {
+    if (end <= start) return;
+    segments.push({
+      start,
+      end,
+      text: paragraph.text.slice(start - paragraph.start, end - paragraph.start),
+    });
+  };
+
+  const pushHighlight = (start: number, end: number, color: string) => {
+    if (end <= start) return;
+    segments.push({
+      start,
+      end,
+      text: paragraph.text.slice(start - paragraph.start, end - paragraph.start),
+      color,
+    });
+  };
+
+  ranges.forEach(range => {
+    if (range.end <= paragraph.start || range.start >= paragraph.end) return;
+    const rangeStart = Math.max(range.start, paragraph.start);
+    const rangeEnd = Math.min(range.end, paragraph.end);
+
+    pushPlain(cursor, rangeStart);
+    pushHighlight(rangeStart, rangeEnd, range.color);
+    cursor = Math.max(cursor, rangeEnd);
+  });
+
+  pushPlain(cursor, paragraph.end);
+
+  if (segments.length === 0) {
+    segments.push({
+      start: paragraph.start,
+      end: paragraph.end,
+      text: paragraph.text,
+    });
+  }
+
+  return segments;
+};
+
+const resolveNodeOffsetToIndex = (node: Node, offset: number, totalLength: number) => {
+  let segmentElement: HTMLElement | null = null;
+  let resolvedOffset = 0;
+
+  if (node.nodeType === Node.TEXT_NODE) {
+    const textNode = node as Text;
+    segmentElement = textNode.parentElement?.closest('[data-reader-segment="1"]') as HTMLElement | null;
+    resolvedOffset = clamp(offset, 0, textNode.data.length);
+  } else if (node.nodeType === Node.ELEMENT_NODE) {
+    const element = node as HTMLElement;
+    segmentElement = element.closest('[data-reader-segment="1"]') as HTMLElement | null;
+    if (segmentElement) {
+      const textLength = segmentElement.textContent?.length ?? 0;
+      resolvedOffset = offset <= 0 ? 0 : textLength;
+    }
+  }
+
+  if (!segmentElement) return null;
+  const start = Number(segmentElement.dataset.start ?? Number.NaN);
+  if (Number.isNaN(start)) return null;
+
+  return clamp(start + resolvedOffset, 0, totalLength);
+};
 
 const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   const [isAiPanelOpen, setIsAiPanelOpen] = useState(true);
-  const [hasUnreadMessages, setHasUnreadMessages] = useState(false);
-  const [isTocOpen, setIsTocOpen] = useState(false);
+  const [unreadMessageCount, setUnreadMessageCount] = useState(0);
+  const [activeFloatingPanel, setActiveFloatingPanel] = useState<FloatingPanel>('none');
+  const [closingFloatingPanel, setClosingFloatingPanel] = useState<FloatingPanel | null>(null);
+  const [isHighlightMode, setIsHighlightMode] = useState(false);
+  const [isHighlighterClickPending, setIsHighlighterClickPending] = useState(false);
+  const [highlightColor, setHighlightColor] = useState(DEFAULT_HIGHLIGHT_COLOR);
+  const [highlightColorDraft, setHighlightColorDraft] = useState<RgbValue>(() => hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
+  const [highlightHexInput, setHighlightHexInput] = useState(DEFAULT_HIGHLIGHT_COLOR);
+  const [highlightRangesByChapter, setHighlightRangesByChapter] = useState<Record<string, TextHighlightRange[]>>({});
+  const [pendingHighlightRange, setPendingHighlightRange] = useState<TextHighlightRange | null>(null);
+  const [isReaderStateHydrated, setIsReaderStateHydrated] = useState(false);
+  const [hydratedBookId, setHydratedBookId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
@@ -45,6 +253,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const readerScrollRef = useRef<HTMLDivElement>(null);
   const readerScrollbarTrackRef = useRef<HTMLDivElement>(null);
+  const readerArticleRef = useRef<HTMLElement>(null);
   const chapterAutoSwitchLockRef = useRef(false);
   const lastReaderScrollTopRef = useRef(0);
   const touchStartYRef = useRef<number | null>(null);
@@ -56,6 +265,19 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   const boundaryArmedAtRef = useRef(0);
   const chapterTransitionTimersRef = useRef<number[]>([]);
   const chapterTransitioningRef = useRef(false);
+  const isAiPanelOpenRef = useRef(isAiPanelOpen);
+  const floatingPanelTimerRef = useRef<number | null>(null);
+  const persistReaderStateTimerRef = useRef<number | null>(null);
+  const highlighterClickTimerRef = useRef<number | null>(null);
+  const highlightDragRef = useRef<{ active: boolean; pointerId: number | null; startIndex: number | null }>({
+    active: false,
+    pointerId: null,
+    startIndex: null,
+  });
+
+  const isTocOpen = activeFloatingPanel === 'toc';
+  const isHighlighterPanelOpen = activeFloatingPanel === 'highlighter';
+  const isFloatingPanelVisible = activeFloatingPanel !== 'none';
 
   const scrollMessagesToBottom = (behavior: ScrollBehavior = 'auto') => {
     if (!messagesContainerRef.current) return;
@@ -137,7 +359,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     const applyChapter = () => {
       setSelectedChapterIndex(index);
       setBookText(chapter.content || '');
-      setIsTocOpen(false);
+      closeFloatingPanel();
       scrollReaderTo(target);
     };
 
@@ -207,11 +429,72 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     return { noScrollableContent, nearTop, nearBottom };
   };
 
+  const clearFloatingPanelTimer = () => {
+    if (!floatingPanelTimerRef.current) return;
+    window.clearTimeout(floatingPanelTimerRef.current);
+    floatingPanelTimerRef.current = null;
+  };
+
+  const hideFloatingPanelImmediately = () => {
+    clearFloatingPanelTimer();
+    setActiveFloatingPanel('none');
+    setClosingFloatingPanel(null);
+  };
+
+  const commitHighlighterDraftColor = () => {
+    const nextColor = rgbToHex(highlightColorDraft);
+    setHighlightColor(nextColor);
+    setHighlightHexInput(nextColor);
+  };
+
+  const closeFloatingPanel = (options?: { discardDraft?: boolean }) => {
+    if (activeFloatingPanel === 'none') return;
+    if (activeFloatingPanel === 'highlighter' && !options?.discardDraft) {
+      commitHighlighterDraftColor();
+    }
+    clearFloatingPanelTimer();
+    const panelToClose = activeFloatingPanel;
+    setClosingFloatingPanel(panelToClose);
+    floatingPanelTimerRef.current = window.setTimeout(() => {
+      setActiveFloatingPanel('none');
+      setClosingFloatingPanel(null);
+    }, FLOATING_PANEL_TRANSITION_MS);
+  };
+
+  const openFloatingPanel = (panel: Exclude<FloatingPanel, 'none'>) => {
+    if (activeFloatingPanel === 'highlighter' && panel !== 'highlighter') {
+      commitHighlighterDraftColor();
+    }
+    clearFloatingPanelTimer();
+    setClosingFloatingPanel(null);
+    setActiveFloatingPanel(panel);
+  };
+
+  const toggleTocPanel = () => {
+    if (isTocOpen) {
+      closeFloatingPanel();
+      return;
+    }
+    openFloatingPanel('toc');
+  };
+
+  const openHighlighterPanel = () => {
+    setHighlightColorDraft(hexToRgb(highlightColor));
+    setHighlightHexInput(highlightColor.toUpperCase());
+    openFloatingPanel('highlighter');
+  };
+
+  useEffect(() => {
+    isAiPanelOpenRef.current = isAiPanelOpen;
+    if (isAiPanelOpen) {
+      setUnreadMessageCount(0);
+    }
+  }, [isAiPanelOpen]);
+
   useEffect(() => {
     if (!isAiPanelOpen) return;
     const rafId = window.requestAnimationFrame(() => {
       scrollMessagesToBottom('smooth');
-      setHasUnreadMessages(false);
     });
     return () => window.cancelAnimationFrame(rafId);
   }, [messages, isAiPanelOpen]);
@@ -224,23 +507,45 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         setChapters([]);
         setSelectedChapterIndex(null);
         setBookText('');
-        setIsTocOpen(false);
+        setHighlightRangesByChapter({});
+        setHighlightColor(DEFAULT_HIGHLIGHT_COLOR);
+        setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
+        setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
+        setIsReaderStateHydrated(false);
+        setHydratedBookId(null);
+        hideFloatingPanelImmediately();
         setIsLoadingBookContent(false);
         return;
       }
 
       setIsLoadingBookContent(true);
+      setIsReaderStateHydrated(false);
+      setHydratedBookId(null);
       try {
         const content = await getBookContent(activeBook.id);
         const fullText = content?.fullText || activeBook.fullText || '';
         const contentChapters = content?.chapters || [];
         const fallbackChapters = activeBook.chapters || [];
         const resolvedChapters = contentChapters.length > 0 ? contentChapters : fallbackChapters;
+        const readerState = content?.readerState;
+        const persistedColor = readerState?.highlightColor;
+        const persistedRanges = readerState?.highlightsByChapter;
 
         if (cancelled) return;
 
         setChapters(resolvedChapters);
-        setIsTocOpen(false);
+        setHighlightRangesByChapter(persistedRanges || {});
+        if (persistedColor && isValidHexColor(persistedColor.toUpperCase())) {
+          const normalized = persistedColor.toUpperCase();
+          setHighlightColor(normalized);
+          setHighlightColorDraft(hexToRgb(normalized));
+          setHighlightHexInput(normalized);
+        } else {
+          setHighlightColor(DEFAULT_HIGHLIGHT_COLOR);
+          setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
+          setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
+        }
+        hideFloatingPanelImmediately();
 
         if (resolvedChapters.length > 0) {
           setSelectedChapterIndex(0);
@@ -254,11 +559,17 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         if (!cancelled) {
           setChapters([]);
           setSelectedChapterIndex(null);
-          setIsTocOpen(false);
+          setHighlightRangesByChapter({});
+          setHighlightColor(DEFAULT_HIGHLIGHT_COLOR);
+          setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
+          setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
+          hideFloatingPanelImmediately();
           setBookText(activeBook.fullText || '');
         }
       } finally {
         if (!cancelled) {
+          setIsReaderStateHydrated(true);
+          setHydratedBookId(activeBook.id);
           setIsLoadingBookContent(false);
         }
       }
@@ -281,11 +592,23 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
       window.clearTimeout(timerId);
       window.removeEventListener('resize', onResize);
     };
-  }, [bookText, isLoadingBookContent, isTocOpen, selectedChapterIndex]);
+  }, [bookText, isLoadingBookContent, activeFloatingPanel, selectedChapterIndex]);
 
   useEffect(() => {
     return () => {
       clearChapterTransitionTimers();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearFloatingPanelTimer();
+      if (persistReaderStateTimerRef.current) {
+        window.clearTimeout(persistReaderStateTimerRef.current);
+      }
+      if (highlighterClickTimerRef.current) {
+        window.clearTimeout(highlighterClickTimerRef.current);
+      }
     };
   }, []);
 
@@ -306,9 +629,79 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
       .filter(Boolean);
   }, [bookText]);
 
-  const activeChapterTitle = selectedChapterIndex !== null
-    ? (chapters[selectedChapterIndex]?.title || `Chapter ${selectedChapterIndex + 1}`)
-    : '';
+  const paragraphMeta = useMemo(() => {
+    let cursor = 0;
+    return paragraphs.map((text, index) => {
+      const start = cursor;
+      const end = start + text.length;
+      cursor = end + (index < paragraphs.length - 1 ? 1 : 0);
+      return { text, start, end };
+    });
+  }, [paragraphs]);
+
+  const totalParagraphLength = useMemo(() => {
+    if (paragraphMeta.length === 0) return 0;
+    return paragraphMeta[paragraphMeta.length - 1].end;
+  }, [paragraphMeta]);
+
+  const highlightStorageKey = useMemo(() => {
+    return selectedChapterIndex === null ? 'full' : `chapter-${selectedChapterIndex}`;
+  }, [selectedChapterIndex]);
+
+  const currentHighlightRanges = useMemo(() => {
+    return highlightRangesByChapter[highlightStorageKey] || [];
+  }, [highlightRangesByChapter, highlightStorageKey]);
+
+  const renderedHighlightRanges = useMemo(() => {
+    if (!pendingHighlightRange || pendingHighlightRange.end <= pendingHighlightRange.start) {
+      return currentHighlightRanges;
+    }
+    return applyHighlightStroke(currentHighlightRanges, pendingHighlightRange);
+  }, [currentHighlightRanges, pendingHighlightRange]);
+
+  const paragraphRenderData = useMemo(() => {
+    return paragraphMeta.map(item => ({
+      paragraph: item,
+      segments: buildParagraphSegments(item, renderedHighlightRanges),
+    }));
+  }, [paragraphMeta, renderedHighlightRanges]);
+
+  useEffect(() => {
+    setPendingHighlightRange(null);
+    highlightDragRef.current = { active: false, pointerId: null, startIndex: null };
+  }, [highlightStorageKey]);
+
+  useEffect(() => {
+    if (!isHighlightMode) {
+      setPendingHighlightRange(null);
+      highlightDragRef.current = { active: false, pointerId: null, startIndex: null };
+      window.getSelection()?.removeAllRanges();
+    }
+  }, [isHighlightMode]);
+
+  useEffect(() => {
+    if (!activeBook?.id || !isReaderStateHydrated || hydratedBookId !== activeBook.id) return;
+    if (persistReaderStateTimerRef.current) {
+      window.clearTimeout(persistReaderStateTimerRef.current);
+    }
+
+    persistReaderStateTimerRef.current = window.setTimeout(() => {
+      const readerState: ReaderBookState = {
+        highlightColor,
+        highlightsByChapter: highlightRangesByChapter,
+      };
+      saveBookReaderState(activeBook.id, readerState).catch((error) => {
+        console.error('Failed to persist reader state:', error);
+      });
+    }, 120);
+
+    return () => {
+      if (persistReaderStateTimerRef.current) {
+        window.clearTimeout(persistReaderStateTimerRef.current);
+        persistReaderStateTimerRef.current = null;
+      }
+    };
+  }, [activeBook?.id, isReaderStateHydrated, hydratedBookId, highlightColor, highlightRangesByChapter]);
 
   const handleJumpToChapter = (index: number) => {
     if (selectedChapterIndex === null) {
@@ -414,6 +807,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   };
 
   const handleReaderTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (isHighlightMode) return;
     const startY = e.touches[0]?.clientY ?? null;
     touchStartYRef.current = startY;
     touchLastYRef.current = startY;
@@ -421,6 +815,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   };
 
   const handleReaderTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (isHighlightMode) return;
     if (touchStartYRef.current === null) return;
     if (touchSwitchHandledRef.current) return;
 
@@ -477,6 +872,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   };
 
   const handleReaderTouchEnd = () => {
+    if (isHighlightMode) return;
     touchStartYRef.current = null;
     touchLastYRef.current = null;
     touchSwitchHandledRef.current = false;
@@ -518,8 +914,174 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     window.addEventListener('pointercancel', onUp);
   };
 
+  const getCharacterIndexFromPoint = (x: number, y: number) => {
+    if (totalParagraphLength <= 0) return null;
+
+    const doc = document as CaretDocument;
+    let offsetNode: Node | null = null;
+    let offset = 0;
+
+    if (typeof doc.caretPositionFromPoint === 'function') {
+      const caretPos = doc.caretPositionFromPoint(x, y);
+      if (caretPos) {
+        offsetNode = caretPos.offsetNode;
+        offset = caretPos.offset;
+      }
+    }
+
+    if (!offsetNode && typeof doc.caretRangeFromPoint === 'function') {
+      const caretRange = doc.caretRangeFromPoint(x, y);
+      if (caretRange) {
+        offsetNode = caretRange.startContainer;
+        offset = caretRange.startOffset;
+      }
+    }
+
+    if (offsetNode) {
+      return resolveNodeOffsetToIndex(offsetNode, offset, totalParagraphLength);
+    }
+
+    const elementAtPoint = document.elementFromPoint(x, y) as HTMLElement | null;
+    const fallbackSegment = elementAtPoint?.closest('[data-reader-segment="1"]') as HTMLElement | null;
+    if (!fallbackSegment) return null;
+
+    const start = Number(fallbackSegment.dataset.start ?? Number.NaN);
+    if (Number.isNaN(start)) return null;
+    return clamp(start + (fallbackSegment.textContent?.length ?? 0), 0, totalParagraphLength);
+  };
+
+  const commitHighlightRange = (range: TextHighlightRange) => {
+    if (range.end <= range.start) return;
+    setHighlightRangesByChapter(prev => {
+      const existing = prev[highlightStorageKey] || [];
+      const merged = applyHighlightStroke(existing, range);
+      return { ...prev, [highlightStorageKey]: merged };
+    });
+  };
+
+  const clearHighlightDragState = () => {
+    setPendingHighlightRange(null);
+    highlightDragRef.current = { active: false, pointerId: null, startIndex: null };
+  };
+
+  const handleReaderTextPointerDown = (e: React.PointerEvent<HTMLElement>) => {
+    if (!isHighlightMode) return;
+    if (e.pointerType !== 'touch' && e.button !== 0) return;
+
+    const index = getCharacterIndexFromPoint(e.clientX, e.clientY);
+    if (index === null) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    window.getSelection()?.removeAllRanges();
+
+    highlightDragRef.current = {
+      active: true,
+      pointerId: e.pointerId,
+      startIndex: index,
+    };
+    setPendingHighlightRange({ start: index, end: index, color: highlightColor });
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const handleReaderTextPointerMove = (e: React.PointerEvent<HTMLElement>) => {
+    if (!isHighlightMode) return;
+
+    const dragState = highlightDragRef.current;
+    if (!dragState.active || dragState.pointerId !== e.pointerId) return;
+
+    const index = getCharacterIndexFromPoint(e.clientX, e.clientY);
+    if (index === null || dragState.startIndex === null) return;
+
+    e.preventDefault();
+    window.getSelection()?.removeAllRanges();
+
+    setPendingHighlightRange({
+      start: Math.min(dragState.startIndex, index),
+      end: Math.max(dragState.startIndex, index),
+      color: highlightColor,
+    });
+  };
+
+  const handleReaderTextPointerUp = (e: React.PointerEvent<HTMLElement>) => {
+    if (!isHighlightMode) return;
+
+    const dragState = highlightDragRef.current;
+    if (!dragState.active || dragState.pointerId !== e.pointerId) return;
+
+    e.preventDefault();
+    window.getSelection()?.removeAllRanges();
+
+    const index = getCharacterIndexFromPoint(e.clientX, e.clientY) ?? dragState.startIndex;
+    if (index !== null && dragState.startIndex !== null) {
+      const start = Math.min(dragState.startIndex, index);
+      const end = Math.max(dragState.startIndex, index);
+      commitHighlightRange({ start, end, color: highlightColor });
+    }
+
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    clearHighlightDragState();
+  };
+
+  const handleReaderTextPointerCancel = (e: React.PointerEvent<HTMLElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    clearHighlightDragState();
+  };
+
+  const handleHighlighterButtonClick = () => {
+    if (highlighterClickTimerRef.current) {
+      window.clearTimeout(highlighterClickTimerRef.current);
+      highlighterClickTimerRef.current = null;
+      setIsHighlighterClickPending(false);
+      openHighlighterPanel();
+      return;
+    }
+
+    setIsHighlighterClickPending(true);
+    highlighterClickTimerRef.current = window.setTimeout(() => {
+      setIsHighlighterClickPending(false);
+      setIsHighlightMode(prev => !prev);
+      highlighterClickTimerRef.current = null;
+    }, HIGHIGHTER_CLICK_DELAY_MS);
+  };
+
+  const updateHighlightDraftChannel = (channel: keyof RgbValue, value: number) => {
+    const next = {
+      ...highlightColorDraft,
+      [channel]: clamp(Number.isNaN(value) ? 0 : value, 0, 255),
+    };
+    setHighlightColorDraft(next);
+    setHighlightHexInput(rgbToHex(next));
+  };
+
+  const handleHighlightHexInputChange = (raw: string) => {
+    const normalized = normalizeHexInput(raw);
+    setHighlightHexInput(normalized);
+    if (!isValidHexColor(normalized)) return;
+    setHighlightColorDraft(hexToRgb(normalized));
+  };
+
+  const handleHighlightHexInputBlur = () => {
+    if (isValidHexColor(highlightHexInput)) {
+      setHighlightColorDraft(hexToRgb(highlightHexInput));
+      return;
+    }
+    setHighlightHexInput(rgbToHex(highlightColorDraft));
+  };
+
+  const applyHighlightColorDraft = () => {
+    commitHighlighterDraftColor();
+    closeFloatingPanel({ discardDraft: true });
+  };
+
   const handleSimulateAiMessage = () => {
-    if (!isAiPanelOpen) setHasUnreadMessages(true);
+    if (!isAiPanelOpenRef.current) {
+      setUnreadMessageCount(prev => Math.min(99, prev + 1));
+    }
 
     const newMsg: Message = {
       id: Date.now().toString(),
@@ -552,7 +1114,9 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, aiMsg]);
-      if (!isAiPanelOpen) setHasUnreadMessages(true);
+      if (!isAiPanelOpenRef.current) {
+        setUnreadMessageCount(prev => Math.min(99, prev + 1));
+      }
     }, 800);
   };
 
@@ -566,16 +1130,24 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         <button onClick={onBack} className="w-10 h-10 neu-btn rounded-full text-slate-500 hover:text-slate-700 shrink-0">
           <ArrowLeft size={20} />
         </button>
-        <div className="flex-1 min-w-0 max-w-[calc(100%-11rem)]">
+        <div className="flex-1 min-w-0 max-w-[calc(100%-14rem)]">
           <div className="text-sm font-serif font-medium opacity-70 truncate">{activeBook?.title || '\u9605\u8bfb\u4e2d'}</div>
         </div>
         <div className="flex gap-3 shrink-0">
           <button
-            onClick={() => setIsTocOpen(prev => !prev)}
+            onClick={toggleTocPanel}
             className="w-10 h-10 neu-btn rounded-full text-slate-500 hover:text-rose-400"
             title="\u76ee\u5f55"
           >
             <ListIcon size={18} />
+          </button>
+          <button
+            onClick={handleHighlighterButtonClick}
+            className={`w-10 h-10 neu-btn reader-tool-toggle rounded-full text-slate-500 hover:text-slate-700 ${(isHighlightMode || isHighlighterClickPending) ? 'reader-tool-active' : ''}`}
+            style={(isHighlightMode || isHighlighterClickPending) ? { color: highlightColor } : undefined}
+            title={'\u8367\u5149\u7b14'}
+          >
+            <Highlighter size={18} />
           </button>
           <button className="w-10 h-10 neu-btn rounded-full text-slate-500 hover:text-slate-700">
             <Type size={18} />
@@ -586,35 +1158,124 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         </div>
       </div>
 
-      {isTocOpen && (
+      {isFloatingPanelVisible && (
         <>
           <button
-            aria-label="close-toc"
-            className="absolute inset-0 z-20 bg-black/40 backdrop-blur-sm"
-            onClick={() => setIsTocOpen(false)}
+            aria-label="close-floating-panel"
+            className={`absolute inset-0 z-20 bg-black/35 backdrop-blur-sm ${closingFloatingPanel ? 'app-fade-exit' : 'app-fade-enter'}`}
+            onClick={closeFloatingPanel}
           />
-          <div className={`absolute z-30 top-16 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[55vh] overflow-y-auto no-scrollbar rounded-2xl p-3 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'}`}>
-            <div className="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 py-2">
-              {`\u76ee\u5f55 ${chapters.length > 0 ? `(${chapters.length})` : ''}`}
+          {isTocOpen && (
+            <div className={`absolute z-30 top-16 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[32vh] overflow-y-auto no-scrollbar rounded-2xl p-3 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${closingFloatingPanel === 'toc' ? 'reader-flyout-exit' : 'reader-flyout-enter'}`}>
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 py-2">
+                {`\u76ee\u5f55 ${chapters.length > 0 ? `(${chapters.length})` : ''}`}
+              </div>
+              {chapters.length === 0 && (
+                <div className="text-xs text-slate-400 px-2 py-3">{'\u5f53\u524d\u56fe\u4e66\u6ca1\u6709\u7ae0\u8282\u6570\u636e\uff0c\u5df2\u6309\u5168\u6587\u9605\u8bfb\u3002'}</div>
+              )}
+              {chapters.map((chapter, index) => {
+                const isActive = selectedChapterIndex === index;
+                const title = chapter.title?.trim() || `Chapter ${index + 1}`;
+                return (
+                  <button
+                    key={`${title}-${index}`}
+                    onClick={() => handleJumpToChapter(index)}
+                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${isActive ? 'text-rose-400 bg-rose-400/10' : 'text-slate-500 hover:bg-black/5 dark:hover:bg-white/5'}`}
+                  >
+                    <span className="text-xs mr-2 opacity-70">{index + 1}.</span>
+                    <span>{title}</span>
+                  </button>
+                );
+              })}
             </div>
-            {chapters.length === 0 && (
-              <div className="text-xs text-slate-400 px-2 py-3">{'\u5f53\u524d\u56fe\u4e66\u6ca1\u6709\u7ae0\u8282\u6570\u636e\uff0c\u5df2\u6309\u5168\u6587\u9605\u8bfb\u3002'}</div>
-            )}
-            {chapters.map((chapter, index) => {
-              const isActive = selectedChapterIndex === index;
-              const title = chapter.title?.trim() || `Chapter ${index + 1}`;
-              return (
+          )}
+          {isHighlighterPanelOpen && (
+            <div className={`absolute z-30 top-16 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[32vh] overflow-hidden rounded-2xl p-2 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${closingFloatingPanel === 'highlighter' ? 'reader-flyout-exit' : 'reader-flyout-enter'} flex flex-col`}>
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 py-1">
+                {'\u8367\u5149\u7b14\u989c\u8272'}
+              </div>
+              <div className="flex-1 overflow-y-auto no-scrollbar px-1 pb-1">
+                <div className="mb-2 flex items-center gap-2">
+                  <div className={`h-10 flex-1 rounded-xl p-1.5 ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
+                    <div className="w-full h-full rounded-lg border border-white/20" style={{ backgroundColor: rgbToHex(highlightColorDraft) }} />
+                  </div>
+                  <input
+                    type="text"
+                    value={highlightHexInput}
+                    onChange={(e) => handleHighlightHexInputChange(e.target.value)}
+                    onBlur={handleHighlightHexInputBlur}
+                    maxLength={7}
+                    spellCheck={false}
+                    className={`h-10 w-28 rounded-lg font-mono text-xs uppercase text-center outline-none ${isDarkMode ? 'bg-[#1a202c] text-slate-200' : 'bg-white/60 text-slate-700'}`}
+                  />
+                </div>
+
+                <div className="grid grid-cols-6 gap-1.5 mb-2">
+                  {PRESET_HIGHLIGHT_COLORS.map(color => (
+                    <button
+                      key={color}
+                      type="button"
+                      onClick={() => {
+                        setHighlightColorDraft(hexToRgb(color));
+                        setHighlightHexInput(color);
+                      }}
+                      className={`h-6 rounded-md border transition-transform hover:scale-[1.03] active:scale-[0.98] ${rgbToHex(highlightColorDraft) === color ? 'border-slate-500' : 'border-white/25'}`}
+                      style={{ backgroundColor: color }}
+                      aria-label={`preset-${color}`}
+                    />
+                  ))}
+                </div>
+
+                <div className="space-y-2">
+                  {(['r', 'g', 'b'] as const).map(channel => (
+                    <div key={channel} className="flex items-center gap-2">
+                      <span className="w-4 text-[10px] font-bold uppercase text-slate-500">{channel}</span>
+                      <div className="relative flex-1 h-2">
+                        <div className={`absolute inset-0 rounded-full ${isDarkMode ? 'bg-slate-700' : 'bg-black/10'}`} />
+                        <div
+                          className="absolute inset-y-0 left-0 rounded-full bg-rose-300"
+                          style={{ width: `${(highlightColorDraft[channel] / 255) * 100}%` }}
+                        />
+                        <input
+                          type="range"
+                          min="0"
+                          max="255"
+                          value={highlightColorDraft[channel]}
+                          onChange={(e) => updateHighlightDraftChannel(channel, parseInt(e.target.value, 10))}
+                          className="app-range absolute top-1/2 -translate-y-1/2 left-0 w-full h-5 bg-transparent appearance-none cursor-pointer z-10"
+                        />
+                      </div>
+                      <input
+                        type="number"
+                        min="0"
+                        max="255"
+                        value={highlightColorDraft[channel]}
+                        onChange={(e) => updateHighlightDraftChannel(channel, parseInt(e.target.value || '0', 10))}
+                        className={`w-11 h-6 text-center text-[10px] rounded-md outline-none ${isDarkMode ? 'bg-[#1a202c] text-slate-200' : 'bg-white/60 text-slate-700'} [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-1 flex gap-2 px-1 pb-1">
                 <button
-                  key={`${title}-${index}`}
-                  onClick={() => handleJumpToChapter(index)}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${isActive ? 'text-rose-400 bg-rose-400/10' : 'text-slate-500 hover:bg-black/5 dark:hover:bg-white/5'}`}
+                  type="button"
+                  onClick={() => closeFloatingPanel({ discardDraft: true })}
+                  className={`flex-1 h-7 rounded-full text-[11px] font-bold ${isDarkMode ? 'bg-[#1a202c] text-slate-300 hover:text-slate-100' : 'neu-btn text-slate-500 hover:text-slate-700'}`}
                 >
-                  <span className="text-xs mr-2 opacity-70">{index + 1}.</span>
-                  <span>{title}</span>
+                  {'\u53d6\u6d88'}
                 </button>
-              );
-            })}
-          </div>
+                <button
+                  type="button"
+                  onClick={applyHighlightColorDraft}
+                  className="flex-1 h-7 rounded-full text-[11px] font-bold text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all"
+                >
+                  {'\u5e94\u7528'}
+                </button>
+              </div>
+            </div>
+          )}
         </>
       )}
 
@@ -624,27 +1285,43 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
           className={`reader-scroll-panel reader-content-scroll h-full min-h-0 overflow-y-auto rounded-2xl shadow-inner transition-colors px-6 py-6 pb-24 ${
             isDarkMode ? 'bg-[#1a202c] shadow-[inset_0_2px_10px_rgba(0,0,0,0.5)]' : 'bg-[#f0f2f5] shadow-[inset_4px_4px_8px_#d1d9e6,inset_-4px_-4px_8px_#ffffff]'
           }`}
+          style={{ touchAction: isHighlightMode ? 'none' : 'pan-y' }}
           onScroll={handleReaderScroll}
           onWheel={handleReaderWheel}
           onTouchStart={handleReaderTouchStart}
           onTouchMove={handleReaderTouchMove}
           onTouchEnd={handleReaderTouchEnd}
           onClick={() => {
+            if (isHighlightMode) return;
             if (Math.random() > 0.7) handleSimulateAiMessage();
           }}
         >
-          <article className={`prose prose-lg max-w-none font-serif leading-loose ${chapterTransitionClass} ${isDarkMode ? 'prose-invert text-slate-400' : 'text-slate-800'}`}>
+          <article
+            ref={readerArticleRef}
+            className={`prose prose-lg max-w-none font-serif leading-loose ${chapterTransitionClass} ${isDarkMode ? 'prose-invert text-slate-400' : 'text-slate-800'} ${isHighlightMode ? 'select-none cursor-crosshair' : ''}`}
+            onPointerDown={handleReaderTextPointerDown}
+            onPointerMove={handleReaderTextPointerMove}
+            onPointerUp={handleReaderTextPointerUp}
+            onPointerCancel={handleReaderTextPointerCancel}
+          >
             {!activeBook && <p className="mb-6 indent-8 text-justify opacity-70">{'\u672a\u9009\u62e9\u4e66\u7c4d\uff0c\u8bf7\u8fd4\u56de\u4e66\u67b6\u9009\u62e9\u4e00\u672c\u4e66\u3002'}</p>}
             {activeBook && isLoadingBookContent && <p className="mb-6 indent-8 text-justify opacity-70">{'\u6b63\u5728\u52a0\u8f7d\u6b63\u6587\u5185\u5bb9...'}</p>}
-            {activeBook && !isLoadingBookContent && selectedChapterIndex !== null && (
-              <h2 className="text-base font-bold mb-4 tracking-wide">{activeChapterTitle}</h2>
-            )}
             {activeBook && !isLoadingBookContent && paragraphs.length === 0 && (
               <p className="mb-6 indent-8 text-justify opacity-70">{'\u8fd9\u672c\u4e66\u8fd8\u6ca1\u6709\u6b63\u6587\u5185\u5bb9\u3002'}</p>
             )}
-            {activeBook && !isLoadingBookContent && paragraphs.map((paragraph, index) => (
+            {activeBook && !isLoadingBookContent && paragraphRenderData.map(({ segments }, index) => (
               <p key={index} className="mb-6 indent-8 text-justify">
-                {paragraph}
+                {segments.map(segment => (
+                  <span
+                    key={`${segment.start}-${segment.end}-${segment.color || 'plain'}`}
+                    data-reader-segment="1"
+                    data-start={segment.start}
+                    className={segment.color ? 'rounded-[0.14em]' : undefined}
+                    style={segment.color ? { backgroundColor: segment.color } : undefined}
+                  >
+                    {segment.text}
+                  </span>
+                ))}
               </p>
             ))}
           </article>
@@ -678,22 +1355,22 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         </div>
       </div>
 
-      {!isAiPanelOpen && hasUnreadMessages && (
-        <button
-          onClick={() => setIsAiPanelOpen(true)}
-          className="absolute bottom-6 right-6 bg-rose-400 text-white px-4 py-3 rounded-full shadow-lg hover:bg-rose-500 transition-all animate-bounce flex items-center gap-2 z-20"
-        >
-          <Sparkles size={18} />
-          <span className="text-sm font-medium">{'\u65b0\u6d88\u606f'}</span>
-        </button>
-      )}
-
-      {!isAiPanelOpen && !hasUnreadMessages && (
+      {!isAiPanelOpen && (
         <button
           onClick={() => setIsAiPanelOpen(true)}
           className="absolute bottom-6 right-6 w-12 h-12 neu-btn rounded-full z-20 text-rose-400"
         >
           <Sparkles size={20} />
+          {unreadMessageCount > 0 && (
+            <span
+              className={`absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full text-[10px] leading-none font-bold flex items-center justify-center ${
+                isDarkMode ? 'border border-slate-700 text-white' : 'border border-white/70 text-white'
+              }`}
+              style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }}
+            >
+              {unreadMessageCount}
+            </span>
+          )}
         </button>
       )}
 
