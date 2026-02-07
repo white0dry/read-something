@@ -72,6 +72,7 @@ type CaretDocument = Document & {
 const FLOATING_PANEL_TRANSITION_MS = 220;
 const HIGHIGHTER_CLICK_DELAY_MS = 220;
 const TYPOGRAPHY_COLOR_EDITOR_TRANSITION_MS = 180;
+const READER_APPEARANCE_STORAGE_KEY = 'app_reader_appearance';
 const DEFAULT_HIGHLIGHT_COLOR = '#FFE066';
 const PRESET_HIGHLIGHT_COLORS = ['#FFE066', '#FFD6A5', '#FFADAD', '#C7F9CC', '#A0C4FF', '#D7B5FF'];
 const PRESET_TEXT_COLORS = ['#1E293B', '#334155', '#475569', '#0F172A', '#9F1239', '#164E63'];
@@ -354,6 +355,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   const [isReaderFontDropdownOpen, setIsReaderFontDropdownOpen] = useState(false);
   const [activeTypographyColorEditor, setActiveTypographyColorEditor] = useState<TypographyColorKind | null>(null);
   const [closingTypographyColorEditor, setClosingTypographyColorEditor] = useState<TypographyColorKind | null>(null);
+  const [isReaderAppearanceHydrated, setIsReaderAppearanceHydrated] = useState(false);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const readerScrollRef = useRef<HTMLDivElement>(null);
@@ -651,7 +653,6 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
 
     const loadBookContent = async () => {
       if (!activeBook) {
-        const defaults = getDefaultReaderTypography(isDarkMode);
         setChapters([]);
         setSelectedChapterIndex(null);
         setBookText('');
@@ -659,9 +660,6 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         setHighlightColor(DEFAULT_HIGHLIGHT_COLOR);
         setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
         setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
-        setReaderTypography(defaults);
-        setReaderFontOptions(DEFAULT_READER_FONT_OPTIONS);
-        setSelectedReaderFontId(DEFAULT_READER_FONT_ID);
         setFontPanelMessage('');
         setFontUrlInput('');
         setFontFamilyInput('');
@@ -684,62 +682,6 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         const readerState = content?.readerState;
         const persistedColor = readerState?.highlightColor;
         const persistedRanges = readerState?.highlightsByChapter;
-        const typographyDefaults = getDefaultReaderTypography(isDarkMode);
-
-        const typographyState = readerState?.typographyStyle;
-        const normalizedTypography: ReaderTypographyStyle = {
-          fontSizePx: clamp(
-            typeof typographyState?.fontSizePx === 'number' ? typographyState.fontSizePx : typographyDefaults.fontSizePx,
-            14,
-            36
-          ),
-          lineHeight: clamp(
-            typeof typographyState?.lineHeight === 'number' ? typographyState.lineHeight : typographyDefaults.lineHeight,
-            1.2,
-            2.8
-          ),
-          textColor:
-            typeof typographyState?.textColor === 'string' && isValidHexColor(typographyState.textColor.toUpperCase())
-              ? typographyState.textColor.toUpperCase()
-              : typographyDefaults.textColor,
-          backgroundColor:
-            typeof typographyState?.backgroundColor === 'string' &&
-            isValidHexColor(typographyState.backgroundColor.toUpperCase())
-              ? typographyState.backgroundColor.toUpperCase()
-              : typographyDefaults.backgroundColor,
-        };
-
-        const persistedFontOptionsRaw = Array.isArray(readerState?.fontOptions) ? readerState.fontOptions : [];
-        const persistedFontOptions: ReaderFontOption[] = persistedFontOptionsRaw.reduce<ReaderFontOption[]>((acc, item) => {
-          if (!item || typeof item !== 'object') return acc;
-          const id = typeof item.id === 'string' ? item.id.trim() : '';
-          const label = typeof item.label === 'string' ? sanitizeFontFamily(item.label) : '';
-          const familyName = typeof item.family === 'string' ? normalizeStoredFontFamily(item.family) : '';
-          const sourceUrl = typeof item.sourceUrl === 'string' ? item.sourceUrl.trim() : '';
-          if (!id || !label || !familyName || !sourceUrl || !isValidFontSourceType(item.sourceType)) return acc;
-          acc.push({
-            id,
-            label,
-            family: `"${familyName}"`,
-            sourceType: item.sourceType,
-            sourceUrl,
-          });
-          return acc;
-        }, []);
-
-        const mergedFontOptions = [...persistedFontOptions, ...DEFAULT_READER_FONT_OPTIONS].reduce<ReaderFontOption[]>(
-          (acc, option) => {
-            const exists = acc.some(existing => existing.id === option.id || existing.family === option.family || existing.label === option.label);
-            if (!exists) acc.push(option);
-            return acc;
-          },
-          []
-        );
-
-        const persistedSelectedFontId = typeof readerState?.selectedFontId === 'string' ? readerState.selectedFontId : '';
-        const selectedFontId = mergedFontOptions.some(option => option.id === persistedSelectedFontId)
-          ? persistedSelectedFontId
-          : DEFAULT_READER_FONT_ID;
 
         if (cancelled) return;
 
@@ -755,17 +697,10 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
           setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
           setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
         }
-        setReaderTypography(normalizedTypography);
-        setReaderFontOptions(mergedFontOptions);
-        setSelectedReaderFontId(selectedFontId);
         setFontPanelMessage('');
         setFontUrlInput('');
         setFontFamilyInput('');
         hideFloatingPanelImmediately();
-
-        if (persistedFontOptions.length > 0) {
-          void Promise.allSettled(persistedFontOptions.map(option => ensureReaderFontResource(option)));
-        }
 
         if (resolvedChapters.length > 0) {
           setSelectedChapterIndex(0);
@@ -777,16 +712,12 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
       } catch (error) {
         console.error('Failed to load reader content:', error);
         if (!cancelled) {
-          const defaults = getDefaultReaderTypography(isDarkMode);
           setChapters([]);
           setSelectedChapterIndex(null);
           setHighlightRangesByChapter({});
           setHighlightColor(DEFAULT_HIGHLIGHT_COLOR);
           setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
           setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
-          setReaderTypography(defaults);
-          setReaderFontOptions(DEFAULT_READER_FONT_OPTIONS);
-          setSelectedReaderFontId(DEFAULT_READER_FONT_ID);
           setFontPanelMessage('');
           setFontUrlInput('');
           setFontFamilyInput('');
@@ -860,6 +791,95 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
       backgroundColor: prev.backgroundColor === prevDefaults.backgroundColor ? nextDefaults.backgroundColor : prev.backgroundColor,
     }));
   }, [isDarkMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const defaults = getDefaultReaderTypography(isDarkMode);
+
+    const hydrateReaderAppearance = async () => {
+      try {
+        const stored = localStorage.getItem(READER_APPEARANCE_STORAGE_KEY);
+        if (!stored) return;
+        const parsed = JSON.parse(stored) as Pick<ReaderBookState, 'typographyStyle' | 'fontOptions' | 'selectedFontId'>;
+
+        const typographyState = parsed?.typographyStyle;
+        const normalizedTypography: ReaderTypographyStyle = {
+          fontSizePx: clamp(
+            typeof typographyState?.fontSizePx === 'number' ? typographyState.fontSizePx : defaults.fontSizePx,
+            14,
+            36
+          ),
+          lineHeight: clamp(
+            typeof typographyState?.lineHeight === 'number' ? typographyState.lineHeight : defaults.lineHeight,
+            1.2,
+            2.8
+          ),
+          textColor:
+            typeof typographyState?.textColor === 'string' && isValidHexColor(typographyState.textColor.toUpperCase())
+              ? typographyState.textColor.toUpperCase()
+              : defaults.textColor,
+          backgroundColor:
+            typeof typographyState?.backgroundColor === 'string' &&
+            isValidHexColor(typographyState.backgroundColor.toUpperCase())
+              ? typographyState.backgroundColor.toUpperCase()
+              : defaults.backgroundColor,
+        };
+
+        const persistedFontOptionsRaw = Array.isArray(parsed?.fontOptions) ? parsed.fontOptions : [];
+        const persistedFontOptions: ReaderFontOption[] = persistedFontOptionsRaw.reduce<ReaderFontOption[]>((acc, item) => {
+          if (!item || typeof item !== 'object') return acc;
+          const id = typeof item.id === 'string' ? item.id.trim() : '';
+          const label = typeof item.label === 'string' ? sanitizeFontFamily(item.label) : '';
+          const familyName = typeof item.family === 'string' ? normalizeStoredFontFamily(item.family) : '';
+          const sourceUrl = typeof item.sourceUrl === 'string' ? item.sourceUrl.trim() : '';
+          if (!id || !label || !familyName || !sourceUrl || !isValidFontSourceType(item.sourceType)) return acc;
+          acc.push({
+            id,
+            label,
+            family: `"${familyName}"`,
+            sourceType: item.sourceType,
+            sourceUrl,
+          });
+          return acc;
+        }, []);
+
+        const mergedFontOptions = [...persistedFontOptions, ...DEFAULT_READER_FONT_OPTIONS].reduce<ReaderFontOption[]>(
+          (acc, option) => {
+            const exists = acc.some(existing => existing.id === option.id || existing.family === option.family || existing.label === option.label);
+            if (!exists) acc.push(option);
+            return acc;
+          },
+          []
+        );
+
+        const persistedSelectedFontId = typeof parsed?.selectedFontId === 'string' ? parsed.selectedFontId : '';
+        const selectedFontId = mergedFontOptions.some(option => option.id === persistedSelectedFontId)
+          ? persistedSelectedFontId
+          : DEFAULT_READER_FONT_ID;
+
+        if (cancelled) return;
+
+        setReaderTypography(normalizedTypography);
+        setReaderFontOptions(mergedFontOptions);
+        setSelectedReaderFontId(selectedFontId);
+
+        if (persistedFontOptions.length > 0) {
+          await Promise.allSettled(persistedFontOptions.map(option => ensureReaderFontResource(option)));
+        }
+      } catch (error) {
+        console.error('Failed to hydrate global reader appearance:', error);
+      }
+    };
+
+    void hydrateReaderAppearance().finally(() => {
+      if (cancelled) return;
+      setIsReaderAppearanceHydrated(true);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!isTypographyPanelOpen) {
@@ -957,22 +977,9 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     }
 
     persistReaderStateTimerRef.current = window.setTimeout(() => {
-      const persistedFontOptions: ReaderFontState[] = readerFontOptions
-        .filter(option => option.sourceType !== 'default' && typeof option.sourceUrl === 'string' && option.sourceUrl.trim().length > 0)
-        .map(option => ({
-          id: option.id,
-          label: option.label,
-          family: option.family,
-          sourceType: option.sourceType,
-          sourceUrl: option.sourceUrl!.trim(),
-        }));
-
       const readerState: ReaderBookState = {
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
-        typographyStyle: readerTypography,
-        fontOptions: persistedFontOptions,
-        selectedFontId: selectedReaderFontId,
       };
       saveBookReaderState(activeBook.id, readerState).catch((error) => {
         console.error('Failed to persist reader state:', error);
@@ -991,10 +998,33 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     hydratedBookId,
     highlightColor,
     highlightRangesByChapter,
-    readerTypography,
-    readerFontOptions,
-    selectedReaderFontId,
   ]);
+
+  useEffect(() => {
+    if (!isReaderAppearanceHydrated) return;
+
+    const persistedFontOptions: ReaderFontState[] = readerFontOptions
+      .filter(option => option.sourceType !== 'default' && typeof option.sourceUrl === 'string' && option.sourceUrl.trim().length > 0)
+      .map(option => ({
+        id: option.id,
+        label: option.label,
+        family: option.family,
+        sourceType: option.sourceType,
+        sourceUrl: option.sourceUrl!.trim(),
+      }));
+
+    const payload: Pick<ReaderBookState, 'typographyStyle' | 'fontOptions' | 'selectedFontId'> = {
+      typographyStyle: readerTypography,
+      fontOptions: persistedFontOptions,
+      selectedFontId: selectedReaderFontId,
+    };
+
+    try {
+      localStorage.setItem(READER_APPEARANCE_STORAGE_KEY, JSON.stringify(payload));
+    } catch (error) {
+      console.error('Failed to persist global reader appearance:', error);
+    }
+  }, [isReaderAppearanceHydrated, readerTypography, readerFontOptions, selectedReaderFontId]);
 
   const handleJumpToChapter = (index: number) => {
     if (selectedChapterIndex === null) {
