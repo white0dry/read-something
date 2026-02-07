@@ -71,6 +71,29 @@ const hexToRgb = (hex: string): RgbValue => {
 const rgbToHex = ({ r, g, b }: RgbValue) =>
   `#${[r, g, b].map(v => clamp(v, 0, 255).toString(16).padStart(2, '0')).join('').toUpperCase()}`;
 
+const resolveHighlightBackgroundColor = (hex: string, isDarkMode: boolean) => {
+  if (!isDarkMode) return hex;
+  const source = hexToRgb(hex);
+  const darkBase: RgbValue = { r: 26, g: 32, b: 44 };
+
+  const mixed: RgbValue = {
+    r: Math.round(source.r * 0.38 + darkBase.r * 0.62),
+    g: Math.round(source.g * 0.38 + darkBase.g * 0.62),
+    b: Math.round(source.b * 0.38 + darkBase.b * 0.62),
+  };
+
+  const luminance = 0.2126 * mixed.r + 0.7152 * mixed.g + 0.0722 * mixed.b;
+  const targetLuminance = 112;
+  if (luminance > targetLuminance) {
+    const factor = targetLuminance / luminance;
+    mixed.r = Math.round(clamp(mixed.r * factor, 0, 255));
+    mixed.g = Math.round(clamp(mixed.g * factor, 0, 255));
+    mixed.b = Math.round(clamp(mixed.b * factor, 0, 255));
+  }
+
+  return `rgba(${mixed.r}, ${mixed.g}, ${mixed.b}, 0.86)`;
+};
+
 const normalizeHexInput = (raw: string) => {
   const cleaned = raw.replace(/[^#0-9a-fA-F]/g, '').replace(/#/g, '');
   return `#${cleaned.slice(0, 6).toUpperCase()}`;
@@ -1120,6 +1143,10 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     }, 800);
   };
 
+  const isHighlighterVisualActive = isHighlightMode || isHighlighterClickPending;
+  const highlighterToggleColor = isHighlightMode ? highlightColor : '#64748B';
+  const highlighterToggleStyle = { color: highlighterToggleColor } as React.CSSProperties;
+
   return (
     <div
       className={`flex flex-col h-full min-h-0 relative overflow-hidden transition-colors duration-300 ${
@@ -1143,8 +1170,8 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
           </button>
           <button
             onClick={handleHighlighterButtonClick}
-            className={`w-10 h-10 neu-btn reader-tool-toggle rounded-full text-slate-500 hover:text-slate-700 ${(isHighlightMode || isHighlighterClickPending) ? 'reader-tool-active' : ''}`}
-            style={(isHighlightMode || isHighlighterClickPending) ? { color: highlightColor } : undefined}
+            className={`w-10 h-10 neu-btn reader-tool-toggle rounded-full ${isHighlighterVisualActive ? 'reader-tool-active' : ''}`}
+            style={highlighterToggleStyle}
             title={'\u8367\u5149\u7b14'}
           >
             <Highlighter size={18} />
@@ -1197,7 +1224,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
               <div className="flex-1 overflow-y-auto no-scrollbar px-1 pb-1">
                 <div className="mb-2 flex items-center gap-2">
                   <div className={`h-10 flex-1 rounded-xl p-1.5 ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
-                    <div className="w-full h-full rounded-lg border border-white/20" style={{ backgroundColor: rgbToHex(highlightColorDraft) }} />
+                    <div className="w-full h-full rounded-lg border border-white/20" style={{ backgroundColor: resolveHighlightBackgroundColor(rgbToHex(highlightColorDraft), isDarkMode) }} />
                   </div>
                   <input
                     type="text"
@@ -1317,7 +1344,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
                     data-reader-segment="1"
                     data-start={segment.start}
                     className={segment.color ? 'rounded-[0.14em]' : undefined}
-                    style={segment.color ? { backgroundColor: segment.color } : undefined}
+                    style={segment.color ? { backgroundColor: resolveHighlightBackgroundColor(segment.color, isDarkMode) } : undefined}
                   >
                     {segment.text}
                   </span>

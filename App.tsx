@@ -358,7 +358,11 @@ const App: React.FC = () => {
              headers: { 'Authorization': `Bearer ${apiConfig.apiKey}`, 'Content-Type': 'application/json' }
           });
         }
-        if (response && response.ok) showNotification('\u62c9\u53d6\u6a21\u578b\u6210\u529f', 'success');
+        if (response && response.ok) {
+          showNotification('\u62c9\u53d6\u6a21\u578b\u6210\u529f', 'success');
+        } else {
+          showNotification('\u62c9\u53d6\u6a21\u578b\u5931\u8d25', 'error');
+        }
       } catch (error) { 
         console.error("Auto-fetch failed", error);
         showNotification('\u62c9\u53d6\u6a21\u578b\u5931\u8d25', 'error');
@@ -418,7 +422,7 @@ const App: React.FC = () => {
       await saveBookContent(newBook.id, fullText, chapters);
       const compacted = compactBookForState({ ...newBook, fullText, chapters });
       setBooks(prev => [compacted, ...prev]);
-      showNotification('Book imported successfully');
+      showNotification('成功导入');
     } catch (error) {
       console.error('Failed to persist new book content:', error);
       showNotification('Failed to save book content', 'error');
@@ -433,7 +437,7 @@ const App: React.FC = () => {
       await saveBookContent(updatedBook.id, fullText, chapters);
       const compacted = compactBookForState({ ...updatedBook, fullText, chapters });
       setBooks(prev => prev.map(b => (b.id === updatedBook.id ? compacted : b)));
-      showNotification('Book updated');
+      showNotification('书本信息已更新');
     } catch (error) {
       console.error('Failed to persist updated book content:', error);
       showNotification('Failed to save changes', 'error');
@@ -448,7 +452,7 @@ const App: React.FC = () => {
     deleteBookContent(bookId).catch(err => console.error('Failed to delete deleted-book text content:', err));
 
     setBooks(prev => prev.filter(b => b.id !== bookId));
-    showNotification('Book deleted');
+    showNotification('书本已删除');
   };
 
   const appWrapperClass = `flex flex-col h-full font-sans overflow-hidden transition-colors duration-300 ${isDarkMode ? 'dark-mode bg-[#2d3748] text-slate-200' : 'bg-[#e0e5ec] text-slate-600'}`;
@@ -481,11 +485,11 @@ const App: React.FC = () => {
     >
       
       {/* Global Notification */}
-      <div 
+      <div
         className={`fixed left-1/2 -translate-x-1/2 z-50 transition-all duration-500 ease-out transform ${notification.show ? 'translate-y-0 opacity-100' : '-translate-y-20 opacity-0 pointer-events-none'}`}
         style={{ top: `${(appSettings.safeAreaTop || 0) + 24}px` }}
       >
-        <div className={`px-6 py-3 rounded-full flex items-center gap-3 shadow-[6px_6px_12px_rgba(0,0,0,0.1),-6px_-6px_12px_rgba(255,255,255,0.8)] border border-white/20 backdrop-blur-md ${isDarkMode ? 'bg-[#2d3748] text-slate-200 shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357]' : 'bg-[#e0e5ec] text-slate-600'}`}>
+        <div className={`px-6 py-3 rounded-full flex items-center gap-3 border backdrop-blur-md ${isDarkMode ? 'bg-[#2d3748] text-slate-200 border-slate-700/70 shadow-[6px_6px_12px_#232b39,-6px_-6px_12px_#374357]' : 'bg-[#e0e5ec] text-slate-600 border-white/20 shadow-[6px_6px_12px_rgba(0,0,0,0.1),-6px_-6px_12px_rgba(255,255,255,0.8)]'}`}>
            {notification.type === 'success' ? <CheckCircle2 size={20} className="text-emerald-500" /> : <AlertCircle size={20} className="text-rose-500" />}
            <span className="font-bold text-sm">{notification.message}</span>
         </div>

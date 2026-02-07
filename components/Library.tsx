@@ -1102,9 +1102,9 @@ const Library: React.FC<LibraryProps> = ({
             <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 pl-1">最近阅读</h2>
             <div 
               onClick={() => onOpenBook(recentBook)}
-              className={`${cardClass} p-5 flex gap-5 cursor-pointer active:scale-[0.975] active:translate-y-[1px] transition-[transform,box-shadow] duration-150 rounded-2xl relative group`}
+              className={`${cardClass} app-card-press p-5 flex gap-5 cursor-pointer rounded-2xl relative group`}
             >
-              <div className="w-20 h-28 flex-shrink-0 rounded-lg overflow-hidden shadow-md">
+              <div className="w-20 h-28 flex-shrink-0 rounded-lg overflow-hidden shadow-md app-card-press-media">
                 {recentBook.coverUrl ? (
                     <ResolvedImage src={recentBook.coverUrl} alt="Cover" className="w-full h-full object-cover opacity-90" />
                 ) : (
@@ -1239,9 +1239,9 @@ const Library: React.FC<LibraryProps> = ({
 
                {/* Grid Books */}
                {sortedBooks.map(book => (
-                 <div key={book.id} onClick={() => onOpenBook(book)} className="flex flex-col gap-3 cursor-pointer group active:scale-[0.98] active:translate-y-[1px] transition-transform duration-150">
-                   <div className={`relative aspect-[3/4] rounded-2xl overflow-hidden p-1 group-active:scale-[0.98] transition-transform duration-150 ${cardClass}`}>
-                     <div className="w-full h-full rounded-xl overflow-hidden opacity-90 hover:opacity-100 transition-opacity">
+                 <div key={book.id} onClick={() => onOpenBook(book)} className="flex flex-col gap-3 cursor-pointer group app-card-press">
+                   <div className={`relative aspect-[3/4] rounded-2xl overflow-hidden p-1 app-card-press-media ${cardClass}`}>
+                     <div className="w-full h-full rounded-xl overflow-hidden opacity-90 hover:opacity-100 transition-opacity app-card-press-media">
                         {book.coverUrl ? (
                              <ResolvedImage src={book.coverUrl} className="w-full h-full object-cover" alt={book.title} />
                         ) : (
@@ -1300,10 +1300,10 @@ const Library: React.FC<LibraryProps> = ({
                  <div 
                     key={book.id} 
                     onClick={() => onOpenBook(book)}
-                    className={`${cardClass} p-4 rounded-2xl flex items-stretch gap-4 group cursor-pointer active:scale-[0.985] active:translate-y-[1px] transition-transform duration-150`}
+                    className={`${cardClass} app-card-press p-4 rounded-2xl flex items-stretch gap-4 group cursor-pointer`}
                  >
                     {/* Cover Image instead of Icon */}
-                    <div className={`w-14 rounded-lg overflow-hidden flex-shrink-0 shadow-sm relative ${pressedClass} min-h-[4.5rem]`}>
+                    <div className={`w-14 rounded-lg overflow-hidden flex-shrink-0 shadow-sm relative ${pressedClass} min-h-[4.5rem] app-card-press-media`}>
                        {book.coverUrl ? (
                           <ResolvedImage src={book.coverUrl} className="w-full h-full object-cover absolute inset-0" alt={book.title} />
                        ) : (

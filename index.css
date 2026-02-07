@@ -241,6 +241,23 @@
         transform: none;
         box-shadow: inset 3px 3px 6px var(--neu-shadow-dark), inset -3px -3px 6px var(--neu-shadow-light);
       }
+
+      /* Card press feedback for clickable book cards */
+      .app-card-press {
+        transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 160ms ease, filter 160ms ease;
+        transform-origin: center;
+      }
+      .app-card-press:active {
+        transform: translateY(1px) scale(0.978);
+        box-shadow: inset 4px 4px 8px var(--neu-shadow-dark), inset -4px -4px 8px var(--neu-shadow-light);
+        filter: saturate(0.96);
+      }
+      .app-card-press-media {
+        transition: transform 160ms ease, opacity 160ms ease;
+      }
+      .app-card-press:active .app-card-press-media {
+        transform: scale(0.985);
+      }
       
       .neu-input {
         background: var(--neu-bg);
