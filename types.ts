@@ -9,9 +9,29 @@ export interface ReaderHighlightRange {
   color: string;
 }
 
+export interface ReaderTypographyState {
+  fontSizePx: number;
+  lineHeight: number;
+  textColor: string;
+  backgroundColor: string;
+}
+
+export type ReaderFontSourceType = 'css' | 'font';
+
+export interface ReaderFontState {
+  id: string;
+  label: string;
+  family: string;
+  sourceType: ReaderFontSourceType;
+  sourceUrl: string;
+}
+
 export interface ReaderBookState {
   highlightColor?: string;
   highlightsByChapter?: Record<string, ReaderHighlightRange[]>;
+  typographyStyle?: ReaderTypographyState;
+  fontOptions?: ReaderFontState[];
+  selectedFontId?: string;
 }
 
 export interface Book {

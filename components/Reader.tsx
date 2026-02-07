@@ -2,15 +2,18 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Bookmark,
+  Check,
   ChevronDown,
   Highlighter,
   List as ListIcon,
   MoreHorizontal,
+  RotateCcw,
+  Save,
   Send,
   Sparkles,
   Type,
 } from 'lucide-react';
-import { Book, Chapter, Message, ReaderBookState, ReaderHighlightRange } from '../types';
+import { Book, Chapter, Message, ReaderBookState, ReaderFontState, ReaderHighlightRange } from '../types';
 import { getBookContent, saveBookReaderState } from '../utils/bookContentStorage';
 
 interface ReaderProps {
@@ -21,7 +24,7 @@ interface ReaderProps {
 
 type ScrollTarget = 'top' | 'bottom';
 type ChapterSwitchDirection = 'next' | 'prev';
-type FloatingPanel = 'none' | 'toc' | 'highlighter';
+type FloatingPanel = 'none' | 'toc' | 'highlighter' | 'typography';
 
 interface RgbValue {
   r: number;
@@ -44,6 +47,23 @@ interface ParagraphSegment {
   color?: string;
 }
 
+interface ReaderTypographyStyle {
+  fontSizePx: number;
+  lineHeight: number;
+  textColor: string;
+  backgroundColor: string;
+}
+
+interface ReaderFontOption {
+  id: string;
+  label: string;
+  family: string;
+  sourceType: 'default' | 'css' | 'font';
+  sourceUrl?: string;
+}
+
+type TypographyColorKind = 'textColor' | 'backgroundColor';
+
 type CaretDocument = Document & {
   caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
   caretRangeFromPoint?: (x: number, y: number) => Range | null;
@@ -51,8 +71,32 @@ type CaretDocument = Document & {
 
 const FLOATING_PANEL_TRANSITION_MS = 220;
 const HIGHIGHTER_CLICK_DELAY_MS = 220;
+const TYPOGRAPHY_COLOR_EDITOR_TRANSITION_MS = 180;
 const DEFAULT_HIGHLIGHT_COLOR = '#FFE066';
 const PRESET_HIGHLIGHT_COLORS = ['#FFE066', '#FFD6A5', '#FFADAD', '#C7F9CC', '#A0C4FF', '#D7B5FF'];
+const PRESET_TEXT_COLORS = ['#1E293B', '#334155', '#475569', '#0F172A', '#9F1239', '#164E63'];
+const PRESET_BACKGROUND_COLORS = ['#F0F2F5', '#FFF7E8', '#F2FCEB', '#EAF5FF', '#1A202C', '#0F172A'];
+const DEFAULT_READER_FONT_ID = 'reader-font-serif-default';
+const DEFAULT_READER_FONT_OPTIONS: ReaderFontOption[] = [
+  {
+    id: DEFAULT_READER_FONT_ID,
+    label: '\u9ed8\u8ba4\u886c\u7ebf',
+    family: '"Noto Serif SC", Georgia, "Times New Roman", serif',
+    sourceType: 'default',
+  },
+  {
+    id: 'reader-font-sans-default',
+    label: '\u9ed8\u8ba4\u65e0\u886c\u7ebf',
+    family: '"Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif',
+    sourceType: 'default',
+  },
+  {
+    id: 'reader-font-mono-default',
+    label: '\u9ed8\u8ba4\u7b49\u5bbd',
+    family: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    sourceType: 'default',
+  },
+];
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -100,6 +144,33 @@ const normalizeHexInput = (raw: string) => {
 };
 
 const isValidHexColor = (value: string) => /^#[0-9A-F]{6}$/.test(value);
+
+const getDefaultReaderTypography = (darkMode: boolean): ReaderTypographyStyle => ({
+  fontSizePx: 19,
+  lineHeight: 1.95,
+  textColor: darkMode ? '#CBD5E1' : '#1E293B',
+  backgroundColor: darkMode ? '#1A202C' : '#F0F2F5',
+});
+
+const sanitizeFontFamily = (raw: string) => {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  return trimmed.replace(/["'`<>]/g, '').slice(0, 48);
+};
+
+const normalizeStoredFontFamily = (family: string) => {
+  const cleaned = family.trim();
+  if (!cleaned) return '';
+  if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+    return cleaned.slice(1, -1);
+  }
+  if (cleaned.startsWith("'") && cleaned.endsWith("'")) {
+    return cleaned.slice(1, -1);
+  }
+  return sanitizeFontFamily(cleaned.split(',')[0] || cleaned);
+};
+
+const isValidFontSourceType = (value: unknown): value is 'css' | 'font' => value === 'css' || value === 'font';
 
 const mergeSortedHighlightRanges = (ranges: TextHighlightRange[]) => {
   const merged: TextHighlightRange[] = [];
@@ -272,11 +343,23 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   const [isLoadingBookContent, setIsLoadingBookContent] = useState(false);
   const [readerScrollbar, setReaderScrollbar] = useState({ visible: false, top: 0, height: 40 });
   const [chapterTransitionClass, setChapterTransitionClass] = useState('');
+  const [readerTypography, setReaderTypography] = useState<ReaderTypographyStyle>(() => getDefaultReaderTypography(isDarkMode));
+  const [readerTextColorInput, setReaderTextColorInput] = useState(() => getDefaultReaderTypography(isDarkMode).textColor);
+  const [readerBgColorInput, setReaderBgColorInput] = useState(() => getDefaultReaderTypography(isDarkMode).backgroundColor);
+  const [readerFontOptions, setReaderFontOptions] = useState<ReaderFontOption[]>(DEFAULT_READER_FONT_OPTIONS);
+  const [selectedReaderFontId, setSelectedReaderFontId] = useState(DEFAULT_READER_FONT_ID);
+  const [fontUrlInput, setFontUrlInput] = useState('');
+  const [fontFamilyInput, setFontFamilyInput] = useState('');
+  const [fontPanelMessage, setFontPanelMessage] = useState('');
+  const [isReaderFontDropdownOpen, setIsReaderFontDropdownOpen] = useState(false);
+  const [activeTypographyColorEditor, setActiveTypographyColorEditor] = useState<TypographyColorKind | null>(null);
+  const [closingTypographyColorEditor, setClosingTypographyColorEditor] = useState<TypographyColorKind | null>(null);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const readerScrollRef = useRef<HTMLDivElement>(null);
   const readerScrollbarTrackRef = useRef<HTMLDivElement>(null);
   const readerArticleRef = useRef<HTMLElement>(null);
+  const readerFontDropdownRef = useRef<HTMLDivElement>(null);
   const chapterAutoSwitchLockRef = useRef(false);
   const lastReaderScrollTopRef = useRef(0);
   const touchStartYRef = useRef<number | null>(null);
@@ -290,8 +373,11 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   const chapterTransitioningRef = useRef(false);
   const isAiPanelOpenRef = useRef(isAiPanelOpen);
   const floatingPanelTimerRef = useRef<number | null>(null);
+  const typographyColorEditorTimerRef = useRef<number | null>(null);
   const persistReaderStateTimerRef = useRef<number | null>(null);
   const highlighterClickTimerRef = useRef<number | null>(null);
+  const fontObjectUrlsRef = useRef<string[]>([]);
+  const fontLinkNodesRef = useRef<HTMLLinkElement[]>([]);
   const highlightDragRef = useRef<{ active: boolean; pointerId: number | null; startIndex: number | null }>({
     active: false,
     pointerId: null,
@@ -300,6 +386,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
 
   const isTocOpen = activeFloatingPanel === 'toc';
   const isHighlighterPanelOpen = activeFloatingPanel === 'highlighter';
+  const isTypographyPanelOpen = activeFloatingPanel === 'typography';
   const isFloatingPanelVisible = activeFloatingPanel !== 'none';
 
   const scrollMessagesToBottom = (behavior: ScrollBehavior = 'auto') => {
@@ -458,10 +545,39 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     floatingPanelTimerRef.current = null;
   };
 
+  const clearTypographyColorEditorTimer = () => {
+    if (!typographyColorEditorTimerRef.current) return;
+    window.clearTimeout(typographyColorEditorTimerRef.current);
+    typographyColorEditorTimerRef.current = null;
+  };
+
+  const closeTypographyColorEditor = (kind: TypographyColorKind) => {
+    clearTypographyColorEditorTimer();
+    setActiveTypographyColorEditor(prev => (prev === kind ? null : prev));
+    setClosingTypographyColorEditor(kind);
+    typographyColorEditorTimerRef.current = window.setTimeout(() => {
+      setClosingTypographyColorEditor(prev => (prev === kind ? null : prev));
+      typographyColorEditorTimerRef.current = null;
+    }, TYPOGRAPHY_COLOR_EDITOR_TRANSITION_MS);
+  };
+
+  const toggleTypographyColorEditor = (kind: TypographyColorKind) => {
+    if (activeTypographyColorEditor === kind) {
+      closeTypographyColorEditor(kind);
+      return;
+    }
+    clearTypographyColorEditorTimer();
+    setClosingTypographyColorEditor(null);
+    setActiveTypographyColorEditor(kind);
+  };
+
   const hideFloatingPanelImmediately = () => {
     clearFloatingPanelTimer();
+    clearTypographyColorEditorTimer();
     setActiveFloatingPanel('none');
     setClosingFloatingPanel(null);
+    setActiveTypographyColorEditor(null);
+    setClosingTypographyColorEditor(null);
   };
 
   const commitHighlighterDraftColor = () => {
@@ -507,6 +623,14 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     openFloatingPanel('highlighter');
   };
 
+  const toggleTypographyPanel = () => {
+    if (isTypographyPanelOpen) {
+      closeFloatingPanel();
+      return;
+    }
+    openFloatingPanel('typography');
+  };
+
   useEffect(() => {
     isAiPanelOpenRef.current = isAiPanelOpen;
     if (isAiPanelOpen) {
@@ -527,6 +651,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
 
     const loadBookContent = async () => {
       if (!activeBook) {
+        const defaults = getDefaultReaderTypography(isDarkMode);
         setChapters([]);
         setSelectedChapterIndex(null);
         setBookText('');
@@ -534,6 +659,12 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         setHighlightColor(DEFAULT_HIGHLIGHT_COLOR);
         setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
         setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
+        setReaderTypography(defaults);
+        setReaderFontOptions(DEFAULT_READER_FONT_OPTIONS);
+        setSelectedReaderFontId(DEFAULT_READER_FONT_ID);
+        setFontPanelMessage('');
+        setFontUrlInput('');
+        setFontFamilyInput('');
         setIsReaderStateHydrated(false);
         setHydratedBookId(null);
         hideFloatingPanelImmediately();
@@ -553,6 +684,62 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         const readerState = content?.readerState;
         const persistedColor = readerState?.highlightColor;
         const persistedRanges = readerState?.highlightsByChapter;
+        const typographyDefaults = getDefaultReaderTypography(isDarkMode);
+
+        const typographyState = readerState?.typographyStyle;
+        const normalizedTypography: ReaderTypographyStyle = {
+          fontSizePx: clamp(
+            typeof typographyState?.fontSizePx === 'number' ? typographyState.fontSizePx : typographyDefaults.fontSizePx,
+            14,
+            36
+          ),
+          lineHeight: clamp(
+            typeof typographyState?.lineHeight === 'number' ? typographyState.lineHeight : typographyDefaults.lineHeight,
+            1.2,
+            2.8
+          ),
+          textColor:
+            typeof typographyState?.textColor === 'string' && isValidHexColor(typographyState.textColor.toUpperCase())
+              ? typographyState.textColor.toUpperCase()
+              : typographyDefaults.textColor,
+          backgroundColor:
+            typeof typographyState?.backgroundColor === 'string' &&
+            isValidHexColor(typographyState.backgroundColor.toUpperCase())
+              ? typographyState.backgroundColor.toUpperCase()
+              : typographyDefaults.backgroundColor,
+        };
+
+        const persistedFontOptionsRaw = Array.isArray(readerState?.fontOptions) ? readerState.fontOptions : [];
+        const persistedFontOptions: ReaderFontOption[] = persistedFontOptionsRaw.reduce<ReaderFontOption[]>((acc, item) => {
+          if (!item || typeof item !== 'object') return acc;
+          const id = typeof item.id === 'string' ? item.id.trim() : '';
+          const label = typeof item.label === 'string' ? sanitizeFontFamily(item.label) : '';
+          const familyName = typeof item.family === 'string' ? normalizeStoredFontFamily(item.family) : '';
+          const sourceUrl = typeof item.sourceUrl === 'string' ? item.sourceUrl.trim() : '';
+          if (!id || !label || !familyName || !sourceUrl || !isValidFontSourceType(item.sourceType)) return acc;
+          acc.push({
+            id,
+            label,
+            family: `"${familyName}"`,
+            sourceType: item.sourceType,
+            sourceUrl,
+          });
+          return acc;
+        }, []);
+
+        const mergedFontOptions = [...persistedFontOptions, ...DEFAULT_READER_FONT_OPTIONS].reduce<ReaderFontOption[]>(
+          (acc, option) => {
+            const exists = acc.some(existing => existing.id === option.id || existing.family === option.family || existing.label === option.label);
+            if (!exists) acc.push(option);
+            return acc;
+          },
+          []
+        );
+
+        const persistedSelectedFontId = typeof readerState?.selectedFontId === 'string' ? readerState.selectedFontId : '';
+        const selectedFontId = mergedFontOptions.some(option => option.id === persistedSelectedFontId)
+          ? persistedSelectedFontId
+          : DEFAULT_READER_FONT_ID;
 
         if (cancelled) return;
 
@@ -568,7 +755,17 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
           setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
           setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
         }
+        setReaderTypography(normalizedTypography);
+        setReaderFontOptions(mergedFontOptions);
+        setSelectedReaderFontId(selectedFontId);
+        setFontPanelMessage('');
+        setFontUrlInput('');
+        setFontFamilyInput('');
         hideFloatingPanelImmediately();
+
+        if (persistedFontOptions.length > 0) {
+          void Promise.allSettled(persistedFontOptions.map(option => ensureReaderFontResource(option)));
+        }
 
         if (resolvedChapters.length > 0) {
           setSelectedChapterIndex(0);
@@ -580,12 +777,19 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
       } catch (error) {
         console.error('Failed to load reader content:', error);
         if (!cancelled) {
+          const defaults = getDefaultReaderTypography(isDarkMode);
           setChapters([]);
           setSelectedChapterIndex(null);
           setHighlightRangesByChapter({});
           setHighlightColor(DEFAULT_HIGHLIGHT_COLOR);
           setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
           setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
+          setReaderTypography(defaults);
+          setReaderFontOptions(DEFAULT_READER_FONT_OPTIONS);
+          setSelectedReaderFontId(DEFAULT_READER_FONT_ID);
+          setFontPanelMessage('');
+          setFontUrlInput('');
+          setFontFamilyInput('');
           hideFloatingPanelImmediately();
           setBookText(activeBook.fullText || '');
         }
@@ -626,12 +830,56 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   useEffect(() => {
     return () => {
       clearFloatingPanelTimer();
+      clearTypographyColorEditorTimer();
       if (persistReaderStateTimerRef.current) {
         window.clearTimeout(persistReaderStateTimerRef.current);
       }
       if (highlighterClickTimerRef.current) {
         window.clearTimeout(highlighterClickTimerRef.current);
       }
+      fontObjectUrlsRef.current.forEach(url => {
+        URL.revokeObjectURL(url);
+      });
+      fontObjectUrlsRef.current = [];
+      fontLinkNodesRef.current.forEach(node => node.remove());
+      fontLinkNodesRef.current = [];
+    };
+  }, []);
+
+  useEffect(() => {
+    setReaderTextColorInput(readerTypography.textColor);
+    setReaderBgColorInput(readerTypography.backgroundColor);
+  }, [readerTypography.textColor, readerTypography.backgroundColor]);
+
+  useEffect(() => {
+    const prevDefaults = getDefaultReaderTypography(!isDarkMode);
+    const nextDefaults = getDefaultReaderTypography(isDarkMode);
+    setReaderTypography(prev => ({
+      ...prev,
+      textColor: prev.textColor === prevDefaults.textColor ? nextDefaults.textColor : prev.textColor,
+      backgroundColor: prev.backgroundColor === prevDefaults.backgroundColor ? nextDefaults.backgroundColor : prev.backgroundColor,
+    }));
+  }, [isDarkMode]);
+
+  useEffect(() => {
+    if (!isTypographyPanelOpen) {
+      clearTypographyColorEditorTimer();
+      setIsReaderFontDropdownOpen(false);
+      setActiveTypographyColorEditor(null);
+      setClosingTypographyColorEditor(null);
+    }
+  }, [isTypographyPanelOpen]);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!readerFontDropdownRef.current) return;
+      if (readerFontDropdownRef.current.contains(event.target as Node)) return;
+      setIsReaderFontDropdownOpen(false);
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
     };
   }, []);
 
@@ -709,9 +957,22 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     }
 
     persistReaderStateTimerRef.current = window.setTimeout(() => {
+      const persistedFontOptions: ReaderFontState[] = readerFontOptions
+        .filter(option => option.sourceType !== 'default' && typeof option.sourceUrl === 'string' && option.sourceUrl.trim().length > 0)
+        .map(option => ({
+          id: option.id,
+          label: option.label,
+          family: option.family,
+          sourceType: option.sourceType,
+          sourceUrl: option.sourceUrl!.trim(),
+        }));
+
       const readerState: ReaderBookState = {
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
+        typographyStyle: readerTypography,
+        fontOptions: persistedFontOptions,
+        selectedFontId: selectedReaderFontId,
       };
       saveBookReaderState(activeBook.id, readerState).catch((error) => {
         console.error('Failed to persist reader state:', error);
@@ -724,7 +985,16 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         persistReaderStateTimerRef.current = null;
       }
     };
-  }, [activeBook?.id, isReaderStateHydrated, hydratedBookId, highlightColor, highlightRangesByChapter]);
+  }, [
+    activeBook?.id,
+    isReaderStateHydrated,
+    hydratedBookId,
+    highlightColor,
+    highlightRangesByChapter,
+    readerTypography,
+    readerFontOptions,
+    selectedReaderFontId,
+  ]);
 
   const handleJumpToChapter = (index: number) => {
     if (selectedChapterIndex === null) {
@@ -1101,6 +1371,160 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
     closeFloatingPanel({ discardDraft: true });
   };
 
+  const updateReaderTypography = (patch: Partial<ReaderTypographyStyle>) => {
+    setReaderTypography(prev => ({ ...prev, ...patch }));
+  };
+
+  const handleReaderColorInput = (kind: TypographyColorKind, raw: string) => {
+    const normalized = normalizeHexInput(raw);
+    if (kind === 'textColor') {
+      setReaderTextColorInput(normalized);
+    } else {
+      setReaderBgColorInput(normalized);
+    }
+    if (isValidHexColor(normalized)) {
+      updateReaderTypography({ [kind]: normalized });
+    }
+  };
+
+  const handleReaderColorBlur = (kind: TypographyColorKind) => {
+    const current = kind === 'textColor' ? readerTextColorInput : readerBgColorInput;
+    if (isValidHexColor(current)) {
+      updateReaderTypography({ [kind]: current });
+      return;
+    }
+    if (kind === 'textColor') {
+      setReaderTextColorInput(readerTypography.textColor);
+    } else {
+      setReaderBgColorInput(readerTypography.backgroundColor);
+    }
+  };
+
+  const getReaderColorValue = (kind: TypographyColorKind) =>
+    kind === 'textColor' ? readerTypography.textColor : readerTypography.backgroundColor;
+
+  const setReaderColorValue = (kind: TypographyColorKind, color: string) => {
+    const normalized = normalizeHexInput(color);
+    if (!isValidHexColor(normalized)) return;
+    if (kind === 'textColor') {
+      setReaderTextColorInput(normalized);
+      updateReaderTypography({ textColor: normalized });
+    } else {
+      setReaderBgColorInput(normalized);
+      updateReaderTypography({ backgroundColor: normalized });
+    }
+  };
+
+  const updateReaderColorChannel = (kind: TypographyColorKind, channel: keyof RgbValue, value: number) => {
+    const currentHex = getReaderColorValue(kind);
+    const nextRgb = {
+      ...hexToRgb(currentHex),
+      [channel]: clamp(Number.isNaN(value) ? 0 : value, 0, 255),
+    };
+    setReaderColorValue(kind, rgbToHex(nextRgb));
+  };
+
+  const resetReaderFontSize = () => {
+    const defaults = getDefaultReaderTypography(isDarkMode);
+    updateReaderTypography({ fontSizePx: defaults.fontSizePx });
+  };
+
+  const resetReaderLineHeight = () => {
+    const defaults = getDefaultReaderTypography(isDarkMode);
+    updateReaderTypography({ lineHeight: defaults.lineHeight });
+  };
+
+  const resetReaderColor = (kind: TypographyColorKind) => {
+    const defaults = getDefaultReaderTypography(isDarkMode);
+    const value = kind === 'textColor' ? defaults.textColor : defaults.backgroundColor;
+    setReaderColorValue(kind, value);
+  };
+
+  const appendReaderFontOption = (option: ReaderFontOption) => {
+    const existing = readerFontOptions.find(item => item.family === option.family || item.label === option.label);
+    if (existing) {
+      setSelectedReaderFontId(existing.id);
+      return;
+    }
+    setReaderFontOptions(prev => [option, ...prev]);
+    setSelectedReaderFontId(option.id);
+  };
+
+  const registerFontFaceFromSource = async (fontFamily: string, sourceUrl: string) => {
+    const fontFace = new FontFace(fontFamily, `url("${sourceUrl}")`);
+    const loaded = await fontFace.load();
+    document.fonts.add(loaded);
+  };
+
+  const ensureReaderFontResource = async (option: ReaderFontOption) => {
+    if (option.sourceType === 'default' || !option.sourceUrl) return;
+
+    if (option.sourceType === 'css') {
+      const existingFromRef = fontLinkNodesRef.current.find(node => node.href === option.sourceUrl);
+      if (existingFromRef) return;
+      const existingInDocument = Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')).find(
+        node => node.href === option.sourceUrl
+      );
+      if (existingInDocument) return;
+
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = option.sourceUrl;
+      link.dataset.readerFont = '1';
+      document.head.appendChild(link);
+      fontLinkNodesRef.current.push(link);
+      return;
+    }
+
+    const fontFamilyName = normalizeStoredFontFamily(option.family) || sanitizeFontFamily(option.label);
+    if (!fontFamilyName) return;
+    await registerFontFaceFromSource(fontFamilyName, option.sourceUrl);
+  };
+
+  const handleApplyFontUrl = async () => {
+    const url = fontUrlInput.trim();
+    const fontFamily = sanitizeFontFamily(fontFamilyInput);
+    if (!fontFamily) {
+      setFontPanelMessage('\u8bf7\u8f93\u5165\u5b57\u4f53\u540d\u79f0');
+      return;
+    }
+    if (!url) {
+      setFontPanelMessage('\u8bf7\u8f93\u5165\u5b57\u4f53\u94fe\u63a5');
+      return;
+    }
+
+    try {
+      const parsed = new URL(url);
+      const isCssSource = parsed.hostname.includes('fonts.googleapis.com') || /\.css($|\?)/i.test(parsed.pathname);
+      const nextOption: ReaderFontOption = {
+        id: `reader-font-url-${Date.now()}`,
+        label: fontFamily,
+        family: `"${fontFamily}"`,
+        sourceType: isCssSource ? 'css' : 'font',
+        sourceUrl: url,
+      };
+      await ensureReaderFontResource(nextOption);
+      appendReaderFontOption(nextOption);
+      setFontPanelMessage('\u5df2\u4fdd\u5b58\u5b57\u4f53');
+      setIsReaderFontDropdownOpen(false);
+    } catch (error) {
+      setFontPanelMessage('\u5b57\u4f53\u94fe\u63a5\u65e0\u6548\u6216\u52a0\u8f7d\u5931\u8d25');
+      console.error('Failed to apply font URL:', error);
+    }
+  };
+
+  const resetReaderFontOnly = () => {
+    setSelectedReaderFontId(DEFAULT_READER_FONT_ID);
+    setFontPanelMessage('\u5df2\u91cd\u7f6e\u5b57\u4f53');
+  };
+
+  const resetReaderTypography = () => {
+    const defaults = getDefaultReaderTypography(isDarkMode);
+    setReaderTypography(defaults);
+    setSelectedReaderFontId(DEFAULT_READER_FONT_ID);
+    setFontPanelMessage('\u5df2\u6062\u590d\u9ed8\u8ba4\u6b63\u6587\u6837\u5f0f');
+  };
+
   const handleSimulateAiMessage = () => {
     if (!isAiPanelOpenRef.current) {
       setUnreadMessageCount(prev => Math.min(99, prev + 1));
@@ -1146,6 +1570,119 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
   const isHighlighterVisualActive = isHighlightMode || isHighlighterClickPending;
   const highlighterToggleColor = isHighlightMode ? highlightColor : '#64748B';
   const highlighterToggleStyle = { color: highlighterToggleColor } as React.CSSProperties;
+  const typographyToggleStyle = { color: '#64748B' } as React.CSSProperties;
+  const typographyInputClass = `h-8 rounded-md px-2 text-[11px] outline-none ${isDarkMode ? 'bg-[#111827] text-slate-200 placeholder-slate-500' : 'bg-white/70 text-slate-700 placeholder-slate-400'}`;
+  const typographySelectTriggerClass = `w-full h-8 rounded-md px-2 flex items-center justify-between cursor-pointer transition-all active:scale-[0.99] ${isDarkMode ? 'bg-[#111827] text-slate-200' : 'bg-white/70 text-slate-700'}`;
+  const typographyIconButtonClass = `w-8 h-8 rounded-full flex items-center justify-center transition-all ${isDarkMode ? 'bg-[#111827] text-slate-300 hover:text-white' : 'neu-btn text-slate-500 hover:text-slate-700'}`;
+  const selectedReaderFontFamily =
+    readerFontOptions.find(option => option.id === selectedReaderFontId)?.family ||
+    DEFAULT_READER_FONT_OPTIONS[0].family;
+  const readerScrollStyle = {
+    touchAction: isHighlightMode ? 'none' : 'pan-y',
+    backgroundColor: readerTypography.backgroundColor,
+  } as React.CSSProperties;
+  const readerArticleStyle = {
+    fontSize: `${readerTypography.fontSizePx}px`,
+    lineHeight: readerTypography.lineHeight,
+    color: readerTypography.textColor,
+    fontFamily: selectedReaderFontFamily,
+    ['--tw-prose-body' as string]: readerTypography.textColor,
+    ['--tw-prose-headings' as string]: readerTypography.textColor,
+    ['--tw-prose-links' as string]: readerTypography.textColor,
+    ['--tw-prose-bold' as string]: readerTypography.textColor,
+    ['--tw-prose-counters' as string]: readerTypography.textColor,
+    ['--tw-prose-bullets' as string]: readerTypography.textColor,
+  } as React.CSSProperties;
+  const renderTypographyColorEditor = (kind: TypographyColorKind, label: string) => {
+    const colorValue = getReaderColorValue(kind);
+    const inputValue = kind === 'textColor' ? readerTextColorInput : readerBgColorInput;
+    const presetColors = kind === 'textColor' ? PRESET_TEXT_COLORS : PRESET_BACKGROUND_COLORS;
+    const colorRgb = hexToRgb(colorValue);
+    const isClosing = closingTypographyColorEditor === kind;
+    const shouldRenderPanel = activeTypographyColorEditor === kind || isClosing;
+
+    return (
+      <div className={`rounded-xl p-2 ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
+        <div className="flex items-center gap-2">
+          <span className="w-14 text-[11px] font-semibold text-slate-500">{label}</span>
+          <button
+            type="button"
+            onClick={() => toggleTypographyColorEditor(kind)}
+            className="h-8 w-10 rounded-lg shrink-0"
+            style={{ backgroundColor: colorValue }}
+            title={label}
+          />
+          <input
+            type="text"
+            value={inputValue}
+            onChange={(e) => handleReaderColorInput(kind, e.target.value)}
+            onBlur={() => handleReaderColorBlur(kind)}
+            maxLength={7}
+            spellCheck={false}
+            className={`flex-1 font-mono uppercase text-center ${typographyInputClass}`}
+          />
+          <button
+            type="button"
+            onClick={() => resetReaderColor(kind)}
+            className={typographyIconButtonClass}
+            title={`重置${label}`}
+          >
+            <RotateCcw size={13} />
+          </button>
+        </div>
+
+        {shouldRenderPanel && (
+          <div className={`mt-1.5 rounded-lg p-1.5 space-y-2 ${isClosing ? 'reader-flyout-exit' : 'reader-flyout-enter'}`}>
+            <div className="grid grid-cols-6 gap-1.5">
+              {presetColors.map(color => (
+                <button
+                  key={`${kind}-${color}`}
+                  type="button"
+                  onClick={() => setReaderColorValue(kind, color)}
+                  className={`h-6 rounded-md transition-transform hover:scale-[1.03] active:scale-[0.98] ${
+                    colorValue.toUpperCase() === color ? 'ring-2 ring-rose-400/70' : ''
+                  }`}
+                  style={{ backgroundColor: color }}
+                  aria-label={`${kind}-preset-${color}`}
+                />
+              ))}
+            </div>
+
+            <div className="space-y-1.5">
+              {(['r', 'g', 'b'] as const).map(channel => (
+                <div key={`${kind}-${channel}`} className="flex items-center gap-2">
+                  <span className="w-4 text-[10px] font-bold uppercase text-slate-500">{channel}</span>
+                  <div className="relative flex-1 h-2">
+                    <div className={`absolute inset-0 rounded-full ${isDarkMode ? 'bg-slate-700' : 'bg-black/10'}`} />
+                    <div
+                      className="absolute inset-y-0 left-0 rounded-full bg-rose-300"
+                      style={{ width: `${(colorRgb[channel] / 255) * 100}%` }}
+                    />
+                    <input
+                      type="range"
+                      min="0"
+                      max="255"
+                      value={colorRgb[channel]}
+                      onChange={(e) => updateReaderColorChannel(kind, channel, parseInt(e.target.value, 10))}
+                      className="app-range absolute top-1/2 -translate-y-1/2 left-0 w-full h-5 bg-transparent appearance-none cursor-pointer z-10"
+                    />
+                  </div>
+                  <input
+                    type="number"
+                    min="0"
+                    max="255"
+                    value={colorRgb[channel]}
+                    onChange={(e) => updateReaderColorChannel(kind, channel, parseInt(e.target.value || '0', 10))}
+                    className={`w-11 h-6 text-center text-[10px] rounded-md outline-none ${isDarkMode ? 'bg-[#111827] text-slate-200' : 'bg-white/70 text-slate-700'} [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div
@@ -1176,10 +1713,15 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
           >
             <Highlighter size={18} />
           </button>
-          <button className="w-10 h-10 neu-btn rounded-full text-slate-500 hover:text-slate-700">
+          <button
+            onClick={toggleTypographyPanel}
+            className={`w-10 h-10 neu-btn reader-tool-toggle rounded-full ${isTypographyPanelOpen ? 'reader-tool-active' : ''}`}
+            style={typographyToggleStyle}
+            title={'\u6587\u5b57\u6837\u5f0f'}
+          >
             <Type size={18} />
           </button>
-          <button className="w-10 h-10 neu-btn rounded-full text-slate-500 hover:text-slate-700">
+          <button className="w-10 h-10 neu-btn rounded-full" style={typographyToggleStyle}>
             <MoreHorizontal size={18} />
           </button>
         </div>
@@ -1303,6 +1845,186 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
               </div>
             </div>
           )}
+          {isTypographyPanelOpen && (
+            <div className={`absolute z-30 top-16 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[32vh] overflow-hidden rounded-2xl p-2 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${closingFloatingPanel === 'typography' ? 'reader-flyout-exit' : 'reader-flyout-enter'} flex flex-col`}>
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 py-1">
+                {'\u6587\u5b57\u6837\u5f0f'}
+              </div>
+              <div className="flex-1 overflow-y-auto no-scrollbar px-1 pb-1 space-y-2">
+                <div className={`rounded-xl p-2 ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
+                  <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500">
+                    <span>{'\u5b57\u53f7'}</span>
+                    <div className="flex items-center gap-2">
+                      <span>{`${readerTypography.fontSizePx}px`}</span>
+                      <button
+                        type="button"
+                        onClick={resetReaderFontSize}
+                        className={typographyIconButtonClass}
+                        title={'\u91cd\u7f6e\u5b57\u53f7'}
+                      >
+                        <RotateCcw size={13} />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-1.5 flex items-center">
+                    <div className="relative flex-1 h-2">
+                      <div className={`absolute inset-0 rounded-full ${isDarkMode ? 'bg-slate-700' : 'bg-black/10'}`} />
+                      <div
+                        className="absolute inset-y-0 left-0 rounded-full bg-rose-300"
+                        style={{ width: `${((readerTypography.fontSizePx - 14) / (36 - 14)) * 100}%` }}
+                      />
+                      <input
+                        type="range"
+                        min="14"
+                        max="36"
+                        step="1"
+                        value={readerTypography.fontSizePx}
+                        onChange={(e) => updateReaderTypography({ fontSizePx: parseInt(e.target.value, 10) })}
+                        className="app-range absolute top-1/2 -translate-y-1/2 left-0 w-full h-5 bg-transparent appearance-none cursor-pointer z-10"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className={`rounded-xl p-2 ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
+                  <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500">
+                    <span>{'\u884c\u8ddd'}</span>
+                    <div className="flex items-center gap-2">
+                      <span>{readerTypography.lineHeight.toFixed(2)}</span>
+                      <button
+                        type="button"
+                        onClick={resetReaderLineHeight}
+                        className={typographyIconButtonClass}
+                        title={'\u91cd\u7f6e\u884c\u8ddd'}
+                      >
+                        <RotateCcw size={13} />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-1.5 flex items-center">
+                    <div className="relative flex-1 h-2">
+                      <div className={`absolute inset-0 rounded-full ${isDarkMode ? 'bg-slate-700' : 'bg-black/10'}`} />
+                      <div
+                        className="absolute inset-y-0 left-0 rounded-full bg-rose-300"
+                        style={{ width: `${((readerTypography.lineHeight - 1.2) / (2.8 - 1.2)) * 100}%` }}
+                      />
+                      <input
+                        type="range"
+                        min="1.2"
+                        max="2.8"
+                        step="0.05"
+                        value={readerTypography.lineHeight}
+                        onChange={(e) => updateReaderTypography({ lineHeight: parseFloat(e.target.value) })}
+                        className="app-range absolute top-1/2 -translate-y-1/2 left-0 w-full h-5 bg-transparent appearance-none cursor-pointer z-10"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {renderTypographyColorEditor('textColor', '\u6587\u5b57\u989c\u8272')}
+                {renderTypographyColorEditor('backgroundColor', '\u80cc\u666f\u989c\u8272')}
+
+                <div className={`rounded-xl p-2 ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
+                  <div className="text-[11px] font-semibold text-slate-500">{'\u6b63\u6587\u5b57\u4f53'}</div>
+                  <div className="mt-1 relative" ref={readerFontDropdownRef}>
+                    <button
+                      type="button"
+                      onClick={() => setIsReaderFontDropdownOpen(prev => !prev)}
+                      className={typographySelectTriggerClass}
+                    >
+                      <span className="truncate text-[12px]">{readerFontOptions.find(option => option.id === selectedReaderFontId)?.label || '\u9009\u62e9\u5b57\u4f53'}</span>
+                      <ChevronDown size={14} className={`transition-transform ${isReaderFontDropdownOpen ? 'rotate-180' : ''}`} />
+                    </button>
+                    {isReaderFontDropdownOpen && (
+                      <div className={`absolute top-full left-0 right-0 mt-1 p-1.5 rounded-xl z-40 max-h-44 overflow-y-auto ${isDarkMode ? 'bg-[#111827] border border-slate-700 shadow-xl' : 'bg-[#e0e5ec] border border-white/60 shadow-xl'}`}>
+                        {readerFontOptions.map(option => {
+                          const isSelected = option.id === selectedReaderFontId;
+                          return (
+                            <button
+                              key={option.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedReaderFontId(option.id);
+                                setIsReaderFontDropdownOpen(false);
+                              }}
+                              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-xs ${
+                                isSelected
+                                  ? 'text-rose-400 bg-rose-400/10 font-semibold'
+                                  : isDarkMode
+                                  ? 'text-slate-300 hover:bg-slate-700/60'
+                                  : 'text-slate-600 hover:bg-slate-200/70'
+                              }`}
+                            >
+                              <span className={`w-4 h-4 rounded border flex items-center justify-center ${isSelected ? 'bg-rose-400 border-rose-400' : 'border-slate-400'}`}>
+                                {isSelected && <Check size={10} className="text-white" />}
+                              </span>
+                              <span className="truncate">{option.label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-2">
+                    <input
+                      type="text"
+                      value={fontFamilyInput}
+                      onChange={(e) => setFontFamilyInput(e.target.value)}
+                      placeholder={'\u5b57\u4f53\u540d\u79f0(\u5fc5\u586b)'}
+                      className={`w-full ${typographyInputClass}`}
+                    />
+                  </div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={fontUrlInput}
+                      onChange={(e) => setFontUrlInput(e.target.value)}
+                      placeholder={'.ttf,.otf\u7b49'}
+                      className={`flex-1 ${typographyInputClass}`}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleApplyFontUrl}
+                      className="w-8 h-8 rounded-full flex items-center justify-center text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all"
+                      title={'\u4fdd\u5b58\u5b57\u4f53'}
+                    >
+                      <Save size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={resetReaderFontOnly}
+                      className={typographyIconButtonClass}
+                      title={'\u91cd\u7f6e\u5b57\u4f53'}
+                    >
+                      <RotateCcw size={13} />
+                    </button>
+                  </div>
+                  {fontPanelMessage && (
+                    <div className={`mt-1 text-[10px] ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                      {fontPanelMessage}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-1 flex gap-2 px-1 pb-1">
+                <button
+                  type="button"
+                  onClick={resetReaderTypography}
+                  className={`flex-1 h-7 rounded-full text-[11px] font-bold ${isDarkMode ? 'bg-[#1a202c] text-slate-300 hover:text-slate-100' : 'neu-btn text-slate-500 hover:text-slate-700'}`}
+                >
+                  {'\u91cd\u7f6e'}
+                </button>
+                <button
+                  type="button"
+                  onClick={closeFloatingPanel}
+                  className="flex-1 h-7 rounded-full text-[11px] font-bold text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all"
+                >
+                  {'\u5e94\u7528'}
+                </button>
+              </div>
+            </div>
+          )}
         </>
       )}
 
@@ -1312,7 +2034,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
           className={`reader-scroll-panel reader-content-scroll h-full min-h-0 overflow-y-auto rounded-2xl shadow-inner transition-colors px-6 py-6 pb-24 ${
             isDarkMode ? 'bg-[#1a202c] shadow-[inset_0_2px_10px_rgba(0,0,0,0.5)]' : 'bg-[#f0f2f5] shadow-[inset_4px_4px_8px_#d1d9e6,inset_-4px_-4px_8px_#ffffff]'
           }`}
-          style={{ touchAction: isHighlightMode ? 'none' : 'pan-y' }}
+          style={readerScrollStyle}
           onScroll={handleReaderScroll}
           onWheel={handleReaderWheel}
           onTouchStart={handleReaderTouchStart}
@@ -1325,7 +2047,8 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
         >
           <article
             ref={readerArticleRef}
-            className={`prose prose-lg max-w-none font-serif leading-loose ${chapterTransitionClass} ${isDarkMode ? 'prose-invert text-slate-400' : 'text-slate-800'} ${isHighlightMode ? 'select-none cursor-crosshair' : ''}`}
+            className={`prose prose-lg max-w-none font-serif leading-loose ${chapterTransitionClass} ${isDarkMode ? 'prose-invert' : ''} ${isHighlightMode ? 'select-none cursor-crosshair' : ''}`}
+            style={readerArticleStyle}
             onPointerDown={handleReaderTextPointerDown}
             onPointerMove={handleReaderTextPointerMove}
             onPointerUp={handleReaderTextPointerUp}
