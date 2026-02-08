@@ -199,7 +199,7 @@ const App: React.FC = () => {
   const [userSignature, setUserSignature] = useState(() => {
     // Check for null strictly so we allow empty string as a valid signature
     const saved = localStorage.getItem('app_user_signature');
-    return saved !== null ? saved : "榛戝鏃犺鎬庢牱鎮犻暱 鐧芥樇鎬讳細鍒版潵";
+    return saved !== null ? saved : "黑夜无论怎样漫长 白昼总会到来";
   });
   
   const [activePersonaId, setActivePersonaId] = useState<string | null>(() => {
