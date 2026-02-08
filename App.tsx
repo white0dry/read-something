@@ -28,6 +28,7 @@ const DEFAULT_PRESETS: ApiPreset[] = [];
 const DEFAULT_THEME_COLOR = '#e28a9d';
 const FONT_BASELINE_MULTIPLIER = 1.2; // Old 120% is the new 100%
 const SAFE_AREA_DEFAULT_MIGRATION_KEY = 'app_safe_area_default_v2';
+const DAILY_READING_MS_STORAGE_KEY = 'app_daily_reading_ms';
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   activeCommentsEnabled: false,
@@ -111,6 +112,40 @@ const formatBookLastRead = (timestamp: number) => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
+const formatLocalDateKey = (timestamp: number) => {
+  const date = new Date(timestamp);
+  const pad = (value: number) => value.toString().padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+};
+
+const getNextDayStartTimestamp = (timestamp: number) => {
+  const date = new Date(timestamp);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime();
+};
+
+const appendReadingDurationByDay = (
+  source: Record<string, number>,
+  startedAt: number,
+  endedAt: number
+) => {
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt <= startedAt) {
+    return source;
+  }
+
+  const next = { ...source };
+  let cursor = startedAt;
+
+  while (cursor < endedAt) {
+    const nextDayStart = getNextDayStartTimestamp(cursor);
+    const segmentEnd = Math.min(endedAt, nextDayStart);
+    const dateKey = formatLocalDateKey(cursor);
+    next[dateKey] = (next[dateKey] || 0) + (segmentEnd - cursor);
+    cursor = segmentEnd;
+  }
+
+  return next;
+};
+
 const App: React.FC = () => {
   const VIEW_TRANSITION_MS = 260;
   const [currentView, setCurrentView] = useState<AppView>(AppView.LIBRARY);
@@ -128,6 +163,25 @@ const App: React.FC = () => {
   
   // Global Notification State
   const [notification, setNotification] = useState<Notification>({ show: false, message: '', type: 'success' });
+  const [dailyReadingMsByDate, setDailyReadingMsByDate] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem(DAILY_READING_MS_STORAGE_KEY);
+      if (!saved) return {};
+      const parsed = JSON.parse(saved);
+      if (!parsed || typeof parsed !== 'object') return {};
+      const normalized: Record<string, number> = {};
+      Object.entries(parsed).forEach(([key, value]) => {
+        if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+          normalized[key] = value;
+        }
+      });
+      return normalized;
+    } catch {
+      return {};
+    }
+  });
+  const readingSessionStartedAtRef = useRef<number | null>(null);
+  const dailyReadingMsByDateRef = useRef<Record<string, number>>(dailyReadingMsByDate);
 
   // --- PERSISTENT STATE ---
 
@@ -224,6 +278,63 @@ const App: React.FC = () => {
   // --- EFFECTS FOR PERSISTENCE ---
 
   useEffect(() => { safeSetStorageItem('app_dark_mode', JSON.stringify(isDarkMode)); }, [isDarkMode]);
+  useEffect(() => {
+    dailyReadingMsByDateRef.current = dailyReadingMsByDate;
+  }, [dailyReadingMsByDate]);
+  useEffect(() => {
+    safeSetStorageItem(DAILY_READING_MS_STORAGE_KEY, JSON.stringify(dailyReadingMsByDate));
+  }, [dailyReadingMsByDate]);
+  useEffect(() => {
+    const flushReadingSession = () => {
+      const openedAt = readingSessionStartedAtRef.current;
+      const closedAt = Date.now();
+      if (!openedAt || closedAt <= openedAt) return;
+
+      const next = appendReadingDurationByDay(dailyReadingMsByDateRef.current, openedAt, closedAt);
+      readingSessionStartedAtRef.current = null;
+      dailyReadingMsByDateRef.current = next;
+      setDailyReadingMsByDate(next);
+      safeSetStorageItem(DAILY_READING_MS_STORAGE_KEY, JSON.stringify(next));
+    };
+
+    window.addEventListener('pagehide', flushReadingSession);
+    window.addEventListener('beforeunload', flushReadingSession);
+
+    return () => {
+      window.removeEventListener('pagehide', flushReadingSession);
+      window.removeEventListener('beforeunload', flushReadingSession);
+    };
+  }, []);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const openedAt = readingSessionStartedAtRef.current;
+      if (!openedAt) return;
+
+      const now = Date.now();
+      let cursor = openedAt;
+      let next = dailyReadingMsByDateRef.current;
+      let changed = false;
+
+      while (cursor < now && formatLocalDateKey(cursor) !== formatLocalDateKey(now)) {
+        const boundary = getNextDayStartTimestamp(cursor);
+        const segmentEnd = Math.min(boundary, now);
+        next = appendReadingDurationByDay(next, cursor, segmentEnd);
+        cursor = segmentEnd;
+        changed = true;
+      }
+
+      if (changed) {
+        dailyReadingMsByDateRef.current = next;
+        setDailyReadingMsByDate(next);
+      }
+
+      readingSessionStartedAtRef.current = cursor;
+    }, 15000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
   useEffect(() => {
     document.documentElement.classList.toggle('dark-mode', isDarkMode);
     document.body.classList.toggle('dark-mode', isDarkMode);
@@ -487,6 +598,9 @@ const App: React.FC = () => {
     if (viewTransitionUnlockTimerRef.current) window.clearTimeout(viewTransitionUnlockTimerRef.current);
 
     viewTransitionTimerRef.current = window.setTimeout(() => {
+      if (nextView === AppView.READER) {
+        readingSessionStartedAtRef.current = Date.now();
+      }
       setActiveBook(nextView === AppView.READER ? nextBook : null);
       setCurrentView(nextView);
       setViewAnimationClass('app-view-enter-left');
@@ -514,6 +628,15 @@ const App: React.FC = () => {
   };
 
   const handleBackToLibrary = (snapshot?: ReaderSessionSnapshot) => {
+    const closedAt = snapshot?.lastReadAt || Date.now();
+    const openedAt = readingSessionStartedAtRef.current;
+    if (openedAt && closedAt > openedAt) {
+      const next = appendReadingDurationByDay(dailyReadingMsByDateRef.current, openedAt, closedAt);
+      dailyReadingMsByDateRef.current = next;
+      setDailyReadingMsByDate(next);
+    }
+    readingSessionStartedAtRef.current = null;
+
     if (snapshot) {
       setBooks(prev =>
         prev.map(book =>
@@ -636,7 +759,13 @@ const App: React.FC = () => {
             apiConfig={apiConfig}
           />
         )}
-        {currentView === AppView.STATS && <Stats isDarkMode={isDarkMode} />}
+        {currentView === AppView.STATS && (
+          <Stats
+            isDarkMode={isDarkMode}
+            dailyReadingMsByDate={dailyReadingMsByDate}
+            themeColor={appSettings.themeColor}
+          />
+        )}
         {currentView === AppView.SETTINGS && (
           <Settings 
             isDarkMode={isDarkMode} 

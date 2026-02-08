@@ -1391,7 +1391,7 @@ const Library: React.FC<LibraryProps> = ({
       {/* Edit Book Modal */}
       {isEditModalOpen && editingBook && (
         <ModalPortal>
-          <div className={`fixed inset-0 z-[100] flex items-center justify-center p-6 pb-28 bg-slate-500/20 backdrop-blur-sm ${closingModal === 'edit' ? 'app-fade-exit' : 'app-fade-enter'}`}>
+          <div className={`fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-500/20 backdrop-blur-sm ${closingModal === 'edit' ? 'app-fade-exit' : 'app-fade-enter'}`}>
           <div className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm rounded-2xl p-6 shadow-2xl border relative flex flex-col ${closingModal === 'edit' ? 'app-fade-exit' : 'app-fade-enter'}`} style={{ maxHeight: 'calc(var(--app-screen-height) - 9rem)' }}>
             <button onClick={closeEditModal} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
               <X size={20} />
@@ -1429,7 +1429,7 @@ const Library: React.FC<LibraryProps> = ({
       {/* Import Book Modal */}
       {isImportModalOpen && (
          <ModalPortal>
-           <div className={`fixed inset-0 z-[100] flex items-center justify-center p-6 pb-28 bg-slate-500/20 backdrop-blur-sm ${closingModal === 'import' ? 'app-fade-exit' : 'app-fade-enter'}`}>
+           <div className={`fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-500/20 backdrop-blur-sm ${closingModal === 'import' ? 'app-fade-exit' : 'app-fade-enter'}`}>
             <div className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm rounded-2xl p-6 shadow-2xl border relative flex flex-col ${closingModal === 'import' ? 'app-fade-exit' : 'app-fade-enter'}`} style={{ maxHeight: 'calc(var(--app-screen-height) - 9rem)' }}>
                <button onClick={closeImportModal} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
                   <X size={20} />

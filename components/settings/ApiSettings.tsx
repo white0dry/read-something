@@ -530,7 +530,7 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
       {/* Preset Name Modal */}
       {isPresetModalOpen && (
         <ModalPortal>
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-500/20 backdrop-blur-sm animate-fade-in">
+          <div className="fixed inset-0 z-[100] grid place-items-center p-6 bg-slate-500/20 backdrop-blur-sm animate-fade-in">
           <div className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm rounded-2xl p-6 shadow-2xl border relative`}>
             <button onClick={() => setIsPresetModalOpen(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
               <X size={20} />

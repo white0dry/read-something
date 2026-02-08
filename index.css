@@ -373,6 +373,54 @@
         animation: app-fade-out 220ms ease-in both;
       }
 
+      @keyframes stats-slide-in-left {
+        from {
+          opacity: 0;
+          transform: translateX(24px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+
+      @keyframes stats-slide-in-right {
+        from {
+          opacity: 0;
+          transform: translateX(-24px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+
+      .stats-slide-left {
+        animation: stats-slide-in-left 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        will-change: transform, opacity;
+      }
+
+      .stats-slide-right {
+        animation: stats-slide-in-right 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        will-change: transform, opacity;
+      }
+
+      .stats-swipe-surface {
+        touch-action: pan-y;
+        overscroll-behavior-x: contain;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      .stats-week-chart :focus,
+      .stats-week-chart :focus-visible {
+        outline: none !important;
+      }
+
+      .stats-week-chart .recharts-surface {
+        -webkit-tap-highlight-color: transparent;
+      }
+
       input[type='range'].app-range {
         -webkit-appearance: none;
         appearance: none;
