@@ -706,16 +706,23 @@ const App: React.FC = () => {
 
   // If in Reader mode
   if (currentView === AppView.READER) {
+    const readerWrapperStyle: React.CSSProperties = {
+      minHeight: 'var(--app-screen-height)',
+      height: 'var(--app-screen-height)',
+    };
     return (
       <div 
         className={appWrapperClass}
-        style={{ 
-          ...appWrapperStyle,
-          paddingBottom: `${manualSafeAreaBottom}px`
-        }}
+        style={readerWrapperStyle}
       >
         <div className={`flex-1 flex flex-col overflow-hidden ${viewAnimationClass}`}>
-          <Reader onBack={handleBackToLibrary} isDarkMode={isDarkMode} activeBook={activeBook} />
+          <Reader
+            onBack={handleBackToLibrary}
+            isDarkMode={isDarkMode}
+            activeBook={activeBook}
+            safeAreaTop={manualSafeAreaTop}
+            safeAreaBottom={manualSafeAreaBottom}
+          />
         </div>
       </div>
     );

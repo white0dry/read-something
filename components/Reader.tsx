@@ -29,6 +29,8 @@ interface ReaderProps {
   onBack: (snapshot?: ReaderSessionSnapshot) => void;
   isDarkMode: boolean;
   activeBook: Book | null;
+  safeAreaTop?: number;
+  safeAreaBottom?: number;
 }
 
 type ScrollTarget = 'top' | 'bottom';
@@ -415,7 +417,7 @@ const resolveNodeOffsetToIndex = (node: Node, offset: number, totalLength: numbe
   return clamp(start + resolvedOffset, 0, totalLength);
 };
 
-const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
+const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAreaTop = 0, safeAreaBottom = 0 }) => {
   const [isAiPanelOpen, setIsAiPanelOpen] = useState(true);
   const [isAiFabOpening, setIsAiFabOpening] = useState(false);
   const [unreadMessageCount, setUnreadMessageCount] = useState(0);
@@ -2027,6 +2029,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook }) => {
       className={`flex flex-col h-full min-h-0 relative overflow-hidden transition-colors duration-300 ${
         isDarkMode ? 'dark-mode bg-[#2d3748] text-slate-300' : 'bg-[#e0e5ec] text-slate-700'
       }`}
+      style={{ paddingTop: `${Math.max(0, safeAreaTop)}px`, paddingBottom: `${Math.max(0, safeAreaBottom)}px` }}
     >
       <div className={`flex items-center gap-3 p-4 z-10 transition-colors ${isDarkMode ? 'bg-[#2d3748]' : 'bg-[#e0e5ec]'}`}>
         <button onClick={handleBackClick} className="w-10 h-10 neu-btn rounded-full text-slate-500 hover:text-slate-700 shrink-0">
