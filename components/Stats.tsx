@@ -59,6 +59,17 @@ const mixRgb = (source: RgbColor, target: RgbColor, ratio: number): RgbColor => 
 });
 
 const rgbToCss = ({ r, g, b }: RgbColor) => `rgb(${r}, ${g}, ${b})`;
+const rgbToRgba = ({ r, g, b }: RgbColor, alpha: number) => `rgba(${r}, ${g}, ${b}, ${alpha})`;
+
+const parseRgbCss = (value: string): RgbColor | null => {
+  const match = value.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/);
+  if (!match) return null;
+  return {
+    r: clampByte(Number(match[1])),
+    g: clampByte(Number(match[2])),
+    b: clampByte(Number(match[3])),
+  };
+};
 
 const formatDateKey = (date: Date) => {
   const year = date.getFullYear();
@@ -169,6 +180,25 @@ const Stats: React.FC<StatsProps> = ({ isDarkMode, dailyReadingMsByDate = {}, th
     if (tier === 2) return colorPalette.tier2;
     if (tier === 3) return colorPalette.tier3;
     return 'transparent';
+  };
+
+  const resolveCalendarCellStyle = (tier: ReadingTier): React.CSSProperties | undefined => {
+    if (tier === 0) return undefined;
+
+    const baseColor = resolveTierColor(tier);
+    const parsedColor = parseRgbCss(baseColor);
+    if (!parsedColor) return { backgroundColor: baseColor };
+
+    const shadowLight = mixRgb(parsedColor, { r: 255, g: 255, b: 255 }, isDarkMode ? 0.14 : 0.5);
+    const shadowDark = mixRgb(parsedColor, { r: 0, g: 0, b: 0 }, isDarkMode ? 0.44 : 0.26);
+    const darkAlpha = isDarkMode ? 0.92 : 0.46;
+    const lightAlpha = isDarkMode ? 0.52 : 0.84;
+
+    return {
+      backgroundColor: baseColor,
+      // Keep the same recessed geometry, with mode-tuned tinted shadows for natural neumorphism.
+      boxShadow: `inset 3px 3px 6px ${rgbToRgba(shadowDark, darkAlpha)}, inset -3px -3px 6px ${rgbToRgba(shadowLight, lightAlpha)}`,
+    };
   };
 
   const weekStart = useMemo(() => addDays(getWeekStartMonday(now), weekOffset * 7), [now, weekOffset]);
@@ -435,9 +465,13 @@ const Stats: React.FC<StatsProps> = ({ isDarkMode, dailyReadingMsByDate = {}, th
             <span className={`text-xs font-semibold ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>{monthTitle}</span>
           </div>
 
-          <div className={`grid grid-cols-7 gap-2 mb-3 text-[11px] font-semibold ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+          <div className="grid grid-cols-7 gap-2 mb-3">
             {CALENDAR_WEEKDAYS.map(day => (
-              <div key={day} className="text-center">
+              <div
+                key={day}
+                className="text-center text-[10px] font-normal leading-none"
+                style={{ color: axisTextColor }}
+              >
                 {day}
               </div>
             ))}
@@ -449,12 +483,11 @@ const Stats: React.FC<StatsProps> = ({ isDarkMode, dailyReadingMsByDate = {}, th
                 return <div key={`blank-${index}`} className="aspect-square" />;
               }
 
-              const tierColor = resolveTierColor(cell.tier);
               return (
                 <div
                   key={`day-${index}`}
                   className={`aspect-square rounded-lg ${pressedClass} relative overflow-hidden flex items-center justify-center`}
-                  style={cell.tier > 0 ? { backgroundColor: tierColor } : undefined}
+                  style={resolveCalendarCellStyle(cell.tier)}
                 >
                   <span
                     className="relative z-[1] text-[10px] font-normal leading-none"

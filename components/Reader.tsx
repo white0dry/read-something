@@ -129,6 +129,11 @@ const isReaderAppearancePristine = (
 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const ENGLISH_LETTER_REGEX = /[A-Za-z]/;
+const WHITESPACE_REGEX = /\s/;
+
+const isEnglishLetter = (char: string | undefined) => !!char && ENGLISH_LETTER_REGEX.test(char);
+const isWhitespaceChar = (char: string | undefined) => !char || WHITESPACE_REGEX.test(char);
 
 const hexToRgb = (hex: string): RgbValue => {
   const normalized = hex.replace('#', '');
@@ -417,6 +422,52 @@ const resolveNodeOffsetToIndex = (node: Node, offset: number, totalLength: numbe
   return clamp(start + resolvedOffset, 0, totalLength);
 };
 
+const resolveSegmentElementFromTarget = (target: EventTarget | null) => {
+  if (!target) return null;
+  if (target instanceof Text) {
+    return target.parentElement?.closest('[data-reader-segment="1"]') as HTMLElement | null;
+  }
+  if (target instanceof HTMLElement) {
+    return target.closest('[data-reader-segment="1"]') as HTMLElement | null;
+  }
+  return null;
+};
+
+const resolveSegmentStart = (segmentElement: HTMLElement | null) => {
+  if (!segmentElement) return null;
+  const start = Number(segmentElement.dataset.start ?? Number.NaN);
+  if (Number.isNaN(start)) return null;
+  return start;
+};
+
+type PointerCaptureElement = Element & {
+  setPointerCapture?: (pointerId: number) => void;
+  releasePointerCapture?: (pointerId: number) => void;
+  hasPointerCapture?: (pointerId: number) => boolean;
+};
+
+const safeSetPointerCapture = (element: PointerCaptureElement, pointerId: number) => {
+  if (typeof element.setPointerCapture !== 'function') return false;
+  try {
+    element.setPointerCapture(pointerId);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const safeReleasePointerCapture = (element: PointerCaptureElement, pointerId: number) => {
+  if (typeof element.hasPointerCapture !== 'function' || typeof element.releasePointerCapture !== 'function') return false;
+  try {
+    if (element.hasPointerCapture(pointerId)) {
+      element.releasePointerCapture(pointerId);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAreaTop = 0, safeAreaBottom = 0 }) => {
   const [isAiPanelOpen, setIsAiPanelOpen] = useState(true);
   const [isAiFabOpening, setIsAiFabOpening] = useState(false);
@@ -489,6 +540,12 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
     pointerId: null,
     startIndex: null,
   });
+  const highlightTouchDragRef = useRef<{ active: boolean; touchId: number | null; startIndex: number | null }>({
+    active: false,
+    touchId: null,
+    startIndex: null,
+  });
+  const touchPointerDragActiveRef = useRef(false);
   const pendingRestorePositionRef = useRef<ReaderPositionState | null>(null);
   const latestReadingPositionRef = useRef<ReaderPositionState | null>(null);
 
@@ -520,7 +577,8 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
     const trackHeight = readerScrollbarTrackRef.current?.clientHeight || Math.max(48, clientHeight - 24);
     const thumbHeight = Math.max(36, Math.min(trackHeight, (clientHeight / scrollHeight) * trackHeight));
     const trackScrollable = Math.max(1, trackHeight - thumbHeight);
-    const thumbTop = (scrollTop / contentScrollable) * trackScrollable;
+    const clampedScrollTop = clamp(scrollTop, 0, contentScrollable);
+    const thumbTop = clamp((clampedScrollTop / contentScrollable) * trackScrollable, 0, trackScrollable);
 
     setReaderScrollbar({
       visible: true,
@@ -1183,6 +1241,8 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
     return paragraphMeta[paragraphMeta.length - 1].end;
   }, [paragraphMeta]);
 
+  const readerTextForHighlighting = useMemo(() => paragraphs.join('\n'), [paragraphs]);
+
   const highlightStorageKey = useMemo(() => {
     return selectedChapterIndex === null ? 'full' : `chapter-${selectedChapterIndex}`;
   }, [selectedChapterIndex]);
@@ -1208,12 +1268,16 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
   useEffect(() => {
     setPendingHighlightRange(null);
     highlightDragRef.current = { active: false, pointerId: null, startIndex: null };
+    highlightTouchDragRef.current = { active: false, touchId: null, startIndex: null };
+    touchPointerDragActiveRef.current = false;
   }, [highlightStorageKey]);
 
   useEffect(() => {
     if (!isHighlightMode) {
       setPendingHighlightRange(null);
       highlightDragRef.current = { active: false, pointerId: null, startIndex: null };
+      highlightTouchDragRef.current = { active: false, touchId: null, startIndex: null };
+      touchPointerDragActiveRef.current = false;
       window.getSelection()?.removeAllRanges();
     }
   }, [isHighlightMode]);
@@ -1461,7 +1525,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
 
     e.preventDefault();
     e.stopPropagation();
-    (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
+    safeSetPointerCapture(e.currentTarget as HTMLButtonElement, e.pointerId);
 
     const startY = e.clientY;
     const startScrollTop = scroller.scrollTop;
@@ -1489,7 +1553,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
     window.addEventListener('pointercancel', onUp);
   };
 
-  const getCharacterIndexFromPoint = (x: number, y: number) => {
+  const getCharacterIndexFromPoint = (x: number, y: number, fallbackTarget?: EventTarget | null) => {
     if (totalParagraphLength <= 0) return null;
 
     const doc = document as CaretDocument;
@@ -1517,12 +1581,74 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
     }
 
     const elementAtPoint = document.elementFromPoint(x, y) as HTMLElement | null;
-    const fallbackSegment = elementAtPoint?.closest('[data-reader-segment="1"]') as HTMLElement | null;
+    const fallbackSegment =
+      (elementAtPoint?.closest('[data-reader-segment="1"]') as HTMLElement | null) ||
+      resolveSegmentElementFromTarget(fallbackTarget ?? null);
     if (!fallbackSegment) return null;
 
-    const start = Number(fallbackSegment.dataset.start ?? Number.NaN);
-    if (Number.isNaN(start)) return null;
-    return clamp(start + (fallbackSegment.textContent?.length ?? 0), 0, totalParagraphLength);
+    const start = resolveSegmentStart(fallbackSegment);
+    if (start === null) return null;
+
+    const segmentTextLength = fallbackSegment.textContent?.length ?? 0;
+    const segmentRect = fallbackSegment.getBoundingClientRect();
+    const chooseTail = segmentRect.width > 1 && x > segmentRect.left + segmentRect.width / 2;
+    const segmentOffset = chooseTail ? segmentTextLength : 0;
+    return clamp(start + segmentOffset, 0, totalParagraphLength);
+  };
+
+  const resolveEnglishWordBoundary = (index: number, side: 'start' | 'end') => {
+    if (!readerTextForHighlighting) {
+      return clamp(index, 0, totalParagraphLength);
+    }
+
+    const text = readerTextForHighlighting;
+    const textLength = text.length;
+    const clampedIndex = clamp(index, 0, textLength);
+    const rightChar = clampedIndex < textLength ? text[clampedIndex] : undefined;
+    const leftChar = clampedIndex > 0 ? text[clampedIndex - 1] : undefined;
+
+    let anchorCharIndex: number | null = null;
+    if (isEnglishLetter(rightChar)) {
+      anchorCharIndex = clampedIndex;
+    } else if (isEnglishLetter(leftChar)) {
+      anchorCharIndex = clampedIndex - 1;
+    }
+
+    if (anchorCharIndex === null) {
+      return clampedIndex;
+    }
+
+    let wordStart = anchorCharIndex;
+    while (wordStart > 0 && !isWhitespaceChar(text[wordStart - 1])) {
+      wordStart -= 1;
+    }
+
+    let wordEnd = anchorCharIndex + 1;
+    while (wordEnd < textLength && !isWhitespaceChar(text[wordEnd])) {
+      wordEnd += 1;
+    }
+
+    return side === 'start' ? wordStart : wordEnd;
+  };
+
+  const resolveHighlightStrokeBounds = (anchorIndex: number, focusIndex: number) => {
+    const rawStart = clamp(Math.min(anchorIndex, focusIndex), 0, totalParagraphLength);
+    const rawEnd = clamp(Math.max(anchorIndex, focusIndex), 0, totalParagraphLength);
+    if (rawEnd <= rawStart) {
+      return { start: rawStart, end: rawEnd };
+    }
+
+    const snappedStart = resolveEnglishWordBoundary(rawStart, 'start');
+    const snappedEnd = resolveEnglishWordBoundary(rawEnd, 'end');
+    return {
+      start: clamp(Math.min(snappedStart, snappedEnd), 0, totalParagraphLength),
+      end: clamp(Math.max(snappedStart, snappedEnd), 0, totalParagraphLength),
+    };
+  };
+
+  const buildHighlightStroke = (anchorIndex: number, focusIndex: number): TextHighlightRange => {
+    const { start, end } = resolveHighlightStrokeBounds(anchorIndex, focusIndex);
+    return { start, end, color: highlightColor };
   };
 
   const commitHighlightRange = (range: TextHighlightRange) => {
@@ -1537,13 +1663,30 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
   const clearHighlightDragState = () => {
     setPendingHighlightRange(null);
     highlightDragRef.current = { active: false, pointerId: null, startIndex: null };
+    touchPointerDragActiveRef.current = false;
+  };
+
+  const clearHighlightTouchDragState = () => {
+    setPendingHighlightRange(null);
+    highlightTouchDragRef.current = { active: false, touchId: null, startIndex: null };
+  };
+
+  const findTouchById = (touches: TouchList, touchId: number | null) => {
+    if (touchId === null) return null;
+    for (let i = 0; i < touches.length; i += 1) {
+      const touch = touches.item(i);
+      if (touch && touch.identifier === touchId) {
+        return touch;
+      }
+    }
+    return null;
   };
 
   const handleReaderTextPointerDown = (e: React.PointerEvent<HTMLElement>) => {
     if (!isHighlightMode) return;
     if (e.pointerType !== 'touch' && e.button !== 0) return;
 
-    const index = getCharacterIndexFromPoint(e.clientX, e.clientY);
+    const index = getCharacterIndexFromPoint(e.clientX, e.clientY, e.target);
     if (index === null) return;
 
     e.preventDefault();
@@ -1556,7 +1699,10 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
       startIndex: index,
     };
     setPendingHighlightRange({ start: index, end: index, color: highlightColor });
-    e.currentTarget.setPointerCapture(e.pointerId);
+    if (e.pointerType === 'touch') {
+      touchPointerDragActiveRef.current = true;
+    }
+    safeSetPointerCapture(e.currentTarget, e.pointerId);
   };
 
   const handleReaderTextPointerMove = (e: React.PointerEvent<HTMLElement>) => {
@@ -1565,17 +1711,13 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
     const dragState = highlightDragRef.current;
     if (!dragState.active || dragState.pointerId !== e.pointerId) return;
 
-    const index = getCharacterIndexFromPoint(e.clientX, e.clientY);
+    const index = getCharacterIndexFromPoint(e.clientX, e.clientY, e.target);
     if (index === null || dragState.startIndex === null) return;
 
     e.preventDefault();
     window.getSelection()?.removeAllRanges();
 
-    setPendingHighlightRange({
-      start: Math.min(dragState.startIndex, index),
-      end: Math.max(dragState.startIndex, index),
-      color: highlightColor,
-    });
+    setPendingHighlightRange(buildHighlightStroke(dragState.startIndex, index));
   };
 
   const handleReaderTextPointerUp = (e: React.PointerEvent<HTMLElement>) => {
@@ -1587,24 +1729,94 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
     e.preventDefault();
     window.getSelection()?.removeAllRanges();
 
-    const index = getCharacterIndexFromPoint(e.clientX, e.clientY) ?? dragState.startIndex;
+    const index = getCharacterIndexFromPoint(e.clientX, e.clientY, e.target) ?? dragState.startIndex;
     if (index !== null && dragState.startIndex !== null) {
-      const start = Math.min(dragState.startIndex, index);
-      const end = Math.max(dragState.startIndex, index);
-      commitHighlightRange({ start, end, color: highlightColor });
+      commitHighlightRange(buildHighlightStroke(dragState.startIndex, index));
     }
 
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    }
+    safeReleasePointerCapture(e.currentTarget, e.pointerId);
     clearHighlightDragState();
   };
 
   const handleReaderTextPointerCancel = (e: React.PointerEvent<HTMLElement>) => {
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    }
+    safeReleasePointerCapture(e.currentTarget, e.pointerId);
     clearHighlightDragState();
+  };
+
+  const handleReaderTextTouchStart = (e: React.TouchEvent<HTMLElement>) => {
+    if (!isHighlightMode) return;
+    if (touchPointerDragActiveRef.current) return;
+
+    const touch = e.changedTouches[0];
+    if (!touch) return;
+
+    const index = getCharacterIndexFromPoint(touch.clientX, touch.clientY, e.target);
+    if (index === null) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    window.getSelection()?.removeAllRanges();
+
+    highlightTouchDragRef.current = {
+      active: true,
+      touchId: touch.identifier,
+      startIndex: index,
+    };
+    setPendingHighlightRange({ start: index, end: index, color: highlightColor });
+  };
+
+  const handleReaderTextTouchMove = (e: React.TouchEvent<HTMLElement>) => {
+    if (!isHighlightMode) return;
+    if (touchPointerDragActiveRef.current) return;
+
+    const dragState = highlightTouchDragRef.current;
+    if (!dragState.active || dragState.touchId === null || dragState.startIndex === null) return;
+
+    const touch = findTouchById(e.touches, dragState.touchId) || findTouchById(e.changedTouches, dragState.touchId);
+    if (!touch) return;
+
+    const pointTarget = document.elementFromPoint(touch.clientX, touch.clientY);
+    const index = getCharacterIndexFromPoint(touch.clientX, touch.clientY, pointTarget);
+    if (index === null) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    window.getSelection()?.removeAllRanges();
+
+    setPendingHighlightRange(buildHighlightStroke(dragState.startIndex, index));
+  };
+
+  const handleReaderTextTouchEnd = (e: React.TouchEvent<HTMLElement>) => {
+    if (!isHighlightMode) return;
+    if (touchPointerDragActiveRef.current) return;
+
+    const dragState = highlightTouchDragRef.current;
+    if (!dragState.active || dragState.touchId === null || dragState.startIndex === null) return;
+
+    const touch = findTouchById(e.changedTouches, dragState.touchId);
+    const pointTarget = touch ? document.elementFromPoint(touch.clientX, touch.clientY) : e.target;
+    const index = touch
+      ? getCharacterIndexFromPoint(touch.clientX, touch.clientY, pointTarget)
+      : dragState.startIndex;
+    const resolvedIndex = index ?? dragState.startIndex;
+
+    e.preventDefault();
+    e.stopPropagation();
+    window.getSelection()?.removeAllRanges();
+
+    if (resolvedIndex !== null) {
+      commitHighlightRange(buildHighlightStroke(dragState.startIndex, resolvedIndex));
+    }
+
+    clearHighlightTouchDragState();
+  };
+
+  const handleReaderTextTouchCancel = (e: React.TouchEvent<HTMLElement>) => {
+    if (!isHighlightMode) return;
+    if (touchPointerDragActiveRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    clearHighlightTouchDragState();
   };
 
   const handleHighlighterButtonClick = () => {
@@ -2388,12 +2600,16 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
         >
           <article
             ref={readerArticleRef}
-            className={`prose prose-lg max-w-none font-serif leading-loose ${chapterTransitionClass} ${isDarkMode ? 'prose-invert' : ''} ${isHighlightMode ? 'select-none cursor-crosshair' : ''}`}
+            className={`prose prose-lg max-w-none font-serif leading-loose ${chapterTransitionClass} ${isDarkMode ? 'prose-invert' : ''} ${isHighlightMode ? 'cursor-crosshair' : ''}`}
             style={readerArticleStyle}
             onPointerDown={handleReaderTextPointerDown}
             onPointerMove={handleReaderTextPointerMove}
             onPointerUp={handleReaderTextPointerUp}
             onPointerCancel={handleReaderTextPointerCancel}
+            onTouchStart={handleReaderTextTouchStart}
+            onTouchMove={handleReaderTextTouchMove}
+            onTouchEnd={handleReaderTextTouchEnd}
+            onTouchCancel={handleReaderTextTouchCancel}
           >
             {!activeBook && <p className="mb-6 indent-8 text-justify opacity-70">{'\u672a\u9009\u62e9\u4e66\u7c4d\uff0c\u8bf7\u8fd4\u56de\u4e66\u67b6\u9009\u62e9\u4e00\u672c\u4e66\u3002'}</p>}
             {activeBook && isLoadingBookContent && <p className="mb-6 indent-8 text-justify opacity-70">{'\u6b63\u5728\u52a0\u8f7d\u6b63\u6587\u5185\u5bb9...'}</p>}
@@ -2419,7 +2635,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
         </div>
 
         {readerScrollbar.visible && (
-          <div ref={readerScrollbarTrackRef} className="absolute right-1.5 top-3 bottom-3 w-2 z-10 pointer-events-none">
+          <div ref={readerScrollbarTrackRef} className="absolute right-1.5 top-3 bottom-3 w-2 z-10 pointer-events-none overflow-hidden rounded-full">
             <button
               type="button"
               aria-label="reader-scrollbar-thumb"
