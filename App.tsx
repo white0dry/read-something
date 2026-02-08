@@ -796,10 +796,10 @@ const App: React.FC = () => {
 
       {/* Bottom Navigation */}
       <nav 
-        className={`h-20 flex items-center justify-around absolute w-full z-40 pb-2 px-6 transition-colors ${isDarkMode ? 'bg-[#2d3748]' : 'bg-[#e0e5ec]'}`}
-        style={{ bottom: `${manualSafeAreaBottom}px` }}
+        className="absolute left-0 right-0 z-40 px-6 pointer-events-none"
+        style={{ bottom: `${manualSafeAreaBottom + 8}px` }}
       >
-        <div className={`flex w-full justify-around items-center py-3 px-2 rounded-2xl ${isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357]' : 'neu-flat'}`}>
+        <div className={`flex w-full justify-around items-center py-3 px-2 rounded-2xl pointer-events-auto ${isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357]' : 'neu-flat'}`}>
           <button 
             onClick={() => transitionToView(AppView.LIBRARY)}
             disabled={isViewTransitioning}
