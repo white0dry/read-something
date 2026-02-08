@@ -8,6 +8,7 @@
         --neu-shadow-dark: #a3b1c6;
         --neu-highlight: #e28a9d; 
         --app-font-scale: 1;
+        --app-screen-height: 100vh;
         
         /* Default Theme Colors (Rose-ish) - Will be overridden by JS */
         --theme-50: 253 242 244;
@@ -21,6 +22,12 @@
         --theme-800: 134 54 74;
         --theme-900: 113 48 65;
       }
+
+      @supports (height: 100dvh) {
+        :root {
+          --app-screen-height: 100dvh;
+        }
+      }
       
       /* Dark mode variables */
       .dark-mode {
@@ -32,15 +39,22 @@
       }
 
       /* Fix Scrollbars & Layout */
+      html,
+      body,
+      #root {
+        width: 100%;
+        min-height: var(--app-screen-height);
+        height: var(--app-screen-height);
+      }
+
       html, body {
-        height: 100%;
+        margin: 0;
+        padding: 0;
         overflow: hidden; /* Prevent body scroll */
+        overscroll-behavior: none;
         background-color: var(--neu-bg);
         color: var(--neu-text);
         transition: background-color 0.3s ease, color 0.3s ease, font-size 0.3s ease;
-      }
-      #root {
-        height: 100%;
       }
 
       /* Custom scrollbar for a cleaner look */

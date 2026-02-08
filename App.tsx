@@ -27,6 +27,7 @@ const DEFAULT_PRESETS: ApiPreset[] = [];
 // Default Rose Color
 const DEFAULT_THEME_COLOR = '#e28a9d';
 const FONT_BASELINE_MULTIPLIER = 1.2; // Old 120% is the new 100%
+const SAFE_AREA_DEFAULT_MIGRATION_KEY = 'app_safe_area_default_v2';
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   activeCommentsEnabled: false,
@@ -36,7 +37,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   themeColor: DEFAULT_THEME_COLOR,
   fontSizeScale: 1.0,
   safeAreaTop: 0,
-  safeAreaBottom: 10
+  safeAreaBottom: 0
 };
 
 const BUILT_IN_SAMPLE_COVER_URLS = new Set([
@@ -227,6 +228,78 @@ const App: React.FC = () => {
     document.documentElement.classList.toggle('dark-mode', isDarkMode);
     document.body.classList.toggle('dark-mode', isDarkMode);
   }, [isDarkMode]);
+  useEffect(() => {
+    const iosNavigator = window.navigator as Navigator & { standalone?: boolean };
+    const isIOSDevice = /iPad|iPhone|iPod/.test(iosNavigator.userAgent) || (iosNavigator.platform === 'MacIntel' && iosNavigator.maxTouchPoints > 1);
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || iosNavigator.standalone === true;
+
+    const readSafeAreaInsetBottom = () => {
+      const probe = document.createElement('div');
+      probe.style.position = 'fixed';
+      probe.style.left = '0';
+      probe.style.right = '0';
+      probe.style.bottom = '0';
+      probe.style.height = '0';
+      probe.style.paddingBottom = 'env(safe-area-inset-bottom)';
+      probe.style.visibility = 'hidden';
+      probe.style.pointerEvents = 'none';
+      document.body.appendChild(probe);
+      const inset = parseFloat(window.getComputedStyle(probe).paddingBottom || '0');
+      probe.remove();
+      return Number.isFinite(inset) ? inset : 0;
+    };
+
+    const resolveScreenHeight = () => {
+      const isLandscape = window.matchMedia('(orientation: landscape)').matches;
+      const screenHeight = isLandscape ? window.screen.width : window.screen.height;
+      return Number.isFinite(screenHeight) && screenHeight > 0 ? screenHeight : 0;
+    };
+
+    const syncAppScreenHeight = () => {
+      const visualHeight = window.visualViewport?.height ?? 0;
+      const innerHeight = window.innerHeight || 0;
+      const clientHeight = document.documentElement.clientHeight || 0;
+      let nextHeight = Math.max(visualHeight, innerHeight, clientHeight);
+
+      // iOS standalone can report a viewport that excludes the bottom home-indicator zone.
+      // Expand by safe-area inset and clamp to physical CSS screen height to avoid overshoot.
+      if (isIOSDevice && isStandalone) {
+        const safeAreaBottom = readSafeAreaInsetBottom();
+        const screenHeight = resolveScreenHeight();
+        const expandedHeight = nextHeight + safeAreaBottom;
+        nextHeight = screenHeight > 0 ? Math.min(screenHeight, expandedHeight) : expandedHeight;
+      }
+
+      document.documentElement.style.setProperty('--app-screen-height', `${nextHeight}px`);
+    };
+
+    syncAppScreenHeight();
+    window.addEventListener('resize', syncAppScreenHeight);
+    window.addEventListener('orientationchange', syncAppScreenHeight);
+    window.visualViewport?.addEventListener('resize', syncAppScreenHeight);
+
+    return () => {
+      window.removeEventListener('resize', syncAppScreenHeight);
+      window.removeEventListener('orientationchange', syncAppScreenHeight);
+      window.visualViewport?.removeEventListener('resize', syncAppScreenHeight);
+    };
+  }, []);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(SAFE_AREA_DEFAULT_MIGRATION_KEY)) return;
+      setAppSettings(prev => {
+        const top = prev.safeAreaTop || 0;
+        const bottom = prev.safeAreaBottom || 0;
+        if (top === 0 && bottom === 10) {
+          return { ...prev, safeAreaBottom: 0 };
+        }
+        return prev;
+      });
+      localStorage.setItem(SAFE_AREA_DEFAULT_MIGRATION_KEY, '1');
+    } catch {
+      // no-op: localStorage might be unavailable in private contexts
+    }
+  }, []);
   useEffect(() => {
     const compactedBooks = books.map(compactBookForState);
     safeSetStorageItem('app_books', JSON.stringify(compactedBooks));
@@ -499,7 +572,14 @@ const App: React.FC = () => {
     showNotification('书本已删除');
   };
 
-  const appWrapperClass = `flex flex-col h-full font-sans overflow-hidden transition-colors duration-300 ${isDarkMode ? 'dark-mode bg-[#2d3748] text-slate-200' : 'bg-[#e0e5ec] text-slate-600'}`;
+  const manualSafeAreaTop = Math.max(0, appSettings.safeAreaTop || 0);
+  const manualSafeAreaBottom = Math.max(0, appSettings.safeAreaBottom || 0);
+  const appWrapperClass = `relative flex flex-col h-full font-sans overflow-hidden transition-colors duration-300 ${isDarkMode ? 'dark-mode bg-[#2d3748] text-slate-200' : 'bg-[#e0e5ec] text-slate-600'}`;
+  const appWrapperStyle: React.CSSProperties = {
+    minHeight: 'var(--app-screen-height)',
+    height: 'var(--app-screen-height)',
+    paddingTop: `${manualSafeAreaTop}px`
+  };
 
   // If in Reader mode
   if (currentView === AppView.READER) {
@@ -507,8 +587,8 @@ const App: React.FC = () => {
       <div 
         className={appWrapperClass}
         style={{ 
-          paddingTop: `${appSettings.safeAreaTop || 0}px`, 
-          paddingBottom: `${appSettings.safeAreaBottom || 0}px` 
+          ...appWrapperStyle,
+          paddingBottom: `${manualSafeAreaBottom}px`
         }}
       >
         <div className={`flex-1 flex flex-col overflow-hidden ${viewAnimationClass}`}>
@@ -521,17 +601,13 @@ const App: React.FC = () => {
   return (
     <div 
       className={appWrapperClass}
-      style={{ 
-        paddingTop: `${appSettings.safeAreaTop || 0}px`, 
-        // We apply bottom padding to the main container to ensure content isn't hidden behind the floating nav
-        paddingBottom: `${appSettings.safeAreaBottom || 0}px` 
-      }}
+      style={appWrapperStyle}
     >
       
       {/* Global Notification */}
       <div
         className={`fixed left-1/2 -translate-x-1/2 z-50 transition-all duration-500 ease-out transform ${notification.show ? 'translate-y-0 opacity-100' : '-translate-y-20 opacity-0 pointer-events-none'}`}
-        style={{ top: `${(appSettings.safeAreaTop || 0) + 24}px` }}
+        style={{ top: `${manualSafeAreaTop + 24}px` }}
       >
         <div className={`px-6 py-3 rounded-full flex items-center gap-3 border backdrop-blur-md ${isDarkMode ? 'bg-[#2d3748] text-slate-200 border-slate-700/70 shadow-[6px_6px_12px_#232b39,-6px_-6px_12px_#374357]' : 'bg-[#e0e5ec] text-slate-600 border-white/20 shadow-[6px_6px_12px_rgba(0,0,0,0.1),-6px_-6px_12px_rgba(255,255,255,0.8)]'}`}>
            {notification.type === 'success' ? <CheckCircle2 size={20} className="text-emerald-500" /> : <AlertCircle size={20} className="text-rose-500" />}
@@ -592,7 +668,7 @@ const App: React.FC = () => {
       {/* Bottom Navigation */}
       <nav 
         className={`h-20 flex items-center justify-around absolute w-full z-40 pb-2 px-6 transition-colors ${isDarkMode ? 'bg-[#2d3748]' : 'bg-[#e0e5ec]'}`}
-        style={{ bottom: `${appSettings.safeAreaBottom || 0}px` }}
+        style={{ bottom: `${manualSafeAreaBottom}px` }}
       >
         <div className={`flex w-full justify-around items-center py-3 px-2 rounded-2xl ${isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357]' : 'neu-flat'}`}>
           <button 
