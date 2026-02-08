@@ -14,6 +14,7 @@ export interface ReaderTypographyState {
   lineHeight: number;
   textColor: string;
   backgroundColor: string;
+  textAlign?: 'left' | 'center' | 'justify';
 }
 
 export type ReaderFontSourceType = 'css' | 'font';

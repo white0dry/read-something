@@ -1,5 +1,8 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlignCenter,
+  AlignJustify,
+  AlignLeft,
   ArrowLeft,
   Bookmark,
   Check,
@@ -63,6 +66,7 @@ interface ReaderTypographyStyle {
   lineHeight: number;
   textColor: string;
   backgroundColor: string;
+  textAlign: ReaderTextAlign;
 }
 
 interface ReaderFontOption {
@@ -74,6 +78,7 @@ interface ReaderFontOption {
 }
 
 type TypographyColorKind = 'textColor' | 'backgroundColor';
+type ReaderTextAlign = 'left' | 'center' | 'justify';
 
 type CaretDocument = Document & {
   caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
@@ -90,6 +95,11 @@ const PRESET_HIGHLIGHT_COLORS = ['#FFE066', '#FFD6A5', '#FFADAD', '#C7F9CC', '#A
 const PRESET_TEXT_COLORS = ['#1E293B', '#334155', '#475569', '#0F172A', '#9F1239', '#164E63'];
 const PRESET_BACKGROUND_COLORS = ['#F0F2F5', '#FFF7E8', '#F2FCEB', '#EAF5FF', '#1A202C', '#0F172A'];
 const DEFAULT_READER_FONT_ID = 'reader-font-serif-default';
+const READER_TEXT_ALIGN_OPTIONS: Array<{ value: ReaderTextAlign; label: string; icon: React.ComponentType<{ size?: number }> }> = [
+  { value: 'left', label: '\u5c45\u5de6', icon: AlignLeft },
+  { value: 'center', label: '\u5c45\u4e2d', icon: AlignCenter },
+  { value: 'justify', label: '\u4e24\u7aef\u5bf9\u9f50', icon: AlignJustify },
+];
 const DEFAULT_READER_FONT_OPTIONS: ReaderFontOption[] = [
   {
     id: DEFAULT_READER_FONT_ID,
@@ -113,27 +123,19 @@ const DEFAULT_READER_FONT_OPTIONS: ReaderFontOption[] = [
 
 const isSameHexColor = (left: string, right: string) => left.trim().toUpperCase() === right.trim().toUpperCase();
 
-const isReaderAppearancePristine = (
-  typography: ReaderTypographyStyle,
-  selectedFontId: string,
-  darkMode: boolean
-) => {
-  const defaults = getDefaultReaderTypography(darkMode);
-  return (
-    typography.fontSizePx === defaults.fontSizePx &&
-    Math.abs(typography.lineHeight - defaults.lineHeight) < 0.001 &&
-    isSameHexColor(typography.textColor, defaults.textColor) &&
-    isSameHexColor(typography.backgroundColor, defaults.backgroundColor) &&
-    selectedFontId === DEFAULT_READER_FONT_ID
-  );
-};
-
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const ENGLISH_LETTER_REGEX = /[A-Za-z]/;
 const WHITESPACE_REGEX = /\s/;
 
 const isEnglishLetter = (char: string | undefined) => !!char && ENGLISH_LETTER_REGEX.test(char);
 const isWhitespaceChar = (char: string | undefined) => !char || WHITESPACE_REGEX.test(char);
+const isValidReaderTextAlign = (value: unknown): value is ReaderTextAlign =>
+  value === 'left' || value === 'center' || value === 'justify';
+const normalizeReaderTextAlign = (value: unknown, fallback: ReaderTextAlign): ReaderTextAlign => {
+  if (isValidReaderTextAlign(value)) return value;
+  if (value === 'right') return 'justify';
+  return fallback;
+};
 
 const hexToRgb = (hex: string): RgbValue => {
   const normalized = hex.replace('#', '');
@@ -185,6 +187,7 @@ const getDefaultReaderTypography = (darkMode: boolean): ReaderTypographyStyle =>
   lineHeight: 1.95,
   textColor: darkMode ? '#CBD5E1' : '#1E293B',
   backgroundColor: darkMode ? '#1A202C' : '#F0F2F5',
+  textAlign: 'left',
 });
 
 const sanitizeFontFamily = (raw: string) => {
@@ -1072,11 +1075,6 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
     const prevDefaults = getDefaultReaderTypography(prevMode);
     const nextDefaults = getDefaultReaderTypography(isDarkMode);
     setReaderTypography(prev => {
-      const isPristine = isReaderAppearancePristine(prev, selectedReaderFontId, prevMode);
-      if (isPristine) {
-        return nextDefaults;
-      }
-
       const nextTextColor = isSameHexColor(prev.textColor, prevDefaults.textColor) ? nextDefaults.textColor : prev.textColor;
       const nextBackgroundColor = isSameHexColor(prev.backgroundColor, prevDefaults.backgroundColor)
         ? nextDefaults.backgroundColor
@@ -1125,6 +1123,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
             isValidHexColor(typographyState.backgroundColor.toUpperCase())
               ? typographyState.backgroundColor.toUpperCase()
               : defaults.backgroundColor,
+          textAlign: normalizeReaderTextAlign(typographyState?.textAlign, defaults.textAlign),
         };
 
         const persistedFontOptionsRaw = Array.isArray(parsed?.fontOptions) ? parsed.fontOptions : [];
@@ -1158,10 +1157,19 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
         const selectedFontId = mergedFontOptions.some(option => option.id === persistedSelectedFontId)
           ? persistedSelectedFontId
           : DEFAULT_READER_FONT_ID;
-        const isPristineInAnyMode =
-          isReaderAppearancePristine(normalizedTypography, selectedFontId, false) ||
-          isReaderAppearancePristine(normalizedTypography, selectedFontId, true);
-        const hydratedTypography = isPristineInAnyMode ? defaults : normalizedTypography;
+        const lightDefaults = getDefaultReaderTypography(false);
+        const darkDefaults = getDefaultReaderTypography(true);
+        const shouldFollowDefaultTextColor =
+          isSameHexColor(normalizedTypography.textColor, lightDefaults.textColor) ||
+          isSameHexColor(normalizedTypography.textColor, darkDefaults.textColor);
+        const shouldFollowDefaultBackgroundColor =
+          isSameHexColor(normalizedTypography.backgroundColor, lightDefaults.backgroundColor) ||
+          isSameHexColor(normalizedTypography.backgroundColor, darkDefaults.backgroundColor);
+        const hydratedTypography: ReaderTypographyStyle = {
+          ...normalizedTypography,
+          textColor: shouldFollowDefaultTextColor ? defaults.textColor : normalizedTypography.textColor,
+          backgroundColor: shouldFollowDefaultBackgroundColor ? defaults.backgroundColor : normalizedTypography.backgroundColor,
+        };
 
         if (cancelled) return;
 
@@ -2126,6 +2134,19 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
   const typographyInputClass = `h-8 rounded-md px-2 text-[11px] outline-none ${isDarkMode ? 'bg-[#111827] text-slate-200 placeholder-slate-500' : 'bg-white/70 text-slate-700 placeholder-slate-400'}`;
   const typographySelectTriggerClass = `w-full h-8 rounded-md px-2 flex items-center justify-between cursor-pointer transition-all active:scale-[0.99] ${isDarkMode ? 'bg-[#111827] text-slate-200' : 'bg-white/70 text-slate-700'}`;
   const typographyIconButtonClass = `w-8 h-8 rounded-full flex items-center justify-center transition-all ${isDarkMode ? 'bg-[#111827] text-slate-300 hover:text-white' : 'neu-btn text-slate-500 hover:text-slate-700'}`;
+  const getTypographyAlignButtonClass = (value: ReaderTextAlign) => {
+    const isActive = readerTypography.textAlign === value;
+    if (isDarkMode) {
+      return `h-8 flex-1 rounded-lg flex items-center justify-center gap-1.5 text-[11px] font-semibold transition-all active:scale-[0.98] ${
+        isActive
+          ? 'bg-[#111827] text-rose-300 shadow-[inset_3px_3px_6px_#0b1220,inset_-3px_-3px_6px_#1f2937]'
+          : 'bg-[#111827] text-slate-300 hover:text-white shadow-[3px_3px_6px_#0b1220,-3px_-3px_6px_#1f2937]'
+      }`;
+    }
+    return `h-8 flex-1 rounded-lg flex items-center justify-center gap-1.5 text-[11px] font-semibold transition-all active:scale-[0.98] ${
+      isActive ? 'neu-pressed text-rose-400' : 'neu-btn text-slate-500 hover:text-slate-700'
+    }`;
+  };
   const selectedReaderFontFamily =
     readerFontOptions.find(option => option.id === selectedReaderFontId)?.family ||
     DEFAULT_READER_FONT_OPTIONS[0].family;
@@ -2138,6 +2159,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
     lineHeight: readerTypography.lineHeight,
     color: readerTypography.textColor,
     fontFamily: selectedReaderFontFamily,
+    textAlign: readerTypography.textAlign,
     ['--tw-prose-body' as string]: readerTypography.textColor,
     ['--tw-prose-headings' as string]: readerTypography.textColor,
     ['--tw-prose-links' as string]: readerTypography.textColor,
@@ -2405,6 +2427,25 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
               </div>
               <div className="flex-1 overflow-y-auto no-scrollbar px-1 pb-1 space-y-2">
                 <div className={`rounded-xl p-2 ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
+                  <div className="text-[11px] font-semibold text-slate-500">{'\u6587\u5b57\u5bf9\u9f50'}</div>
+                  <div className="mt-1.5 flex items-center gap-2">
+                    {READER_TEXT_ALIGN_OPTIONS.map(({ value, label, icon: Icon }) => (
+                      <button
+                        key={`reader-text-align-${value}`}
+                        type="button"
+                        onClick={() => updateReaderTypography({ textAlign: value })}
+                        className={getTypographyAlignButtonClass(value)}
+                        title={label}
+                        aria-label={`reader-text-align-${value}`}
+                      >
+                        <Icon size={14} />
+                        <span>{label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className={`rounded-xl p-2 ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
                   <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500">
                     <span>{'\u5b57\u53f7'}</span>
                     <div className="flex items-center gap-2">
@@ -2611,13 +2652,13 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
             onTouchEnd={handleReaderTextTouchEnd}
             onTouchCancel={handleReaderTextTouchCancel}
           >
-            {!activeBook && <p className="mb-6 indent-8 text-justify opacity-70">{'\u672a\u9009\u62e9\u4e66\u7c4d\uff0c\u8bf7\u8fd4\u56de\u4e66\u67b6\u9009\u62e9\u4e00\u672c\u4e66\u3002'}</p>}
-            {activeBook && isLoadingBookContent && <p className="mb-6 indent-8 text-justify opacity-70">{'\u6b63\u5728\u52a0\u8f7d\u6b63\u6587\u5185\u5bb9...'}</p>}
+            {!activeBook && <p className="mb-6 indent-8 opacity-70">{'\u672a\u9009\u62e9\u4e66\u7c4d\uff0c\u8bf7\u8fd4\u56de\u4e66\u67b6\u9009\u62e9\u4e00\u672c\u4e66\u3002'}</p>}
+            {activeBook && isLoadingBookContent && <p className="mb-6 indent-8 opacity-70">{'\u6b63\u5728\u52a0\u8f7d\u6b63\u6587\u5185\u5bb9...'}</p>}
             {activeBook && !isLoadingBookContent && paragraphs.length === 0 && (
-              <p className="mb-6 indent-8 text-justify opacity-70">{'\u8fd9\u672c\u4e66\u8fd8\u6ca1\u6709\u6b63\u6587\u5185\u5bb9\u3002'}</p>
+              <p className="mb-6 indent-8 opacity-70">{'\u8fd9\u672c\u4e66\u8fd8\u6ca1\u6709\u6b63\u6587\u5185\u5bb9\u3002'}</p>
             )}
             {activeBook && !isLoadingBookContent && paragraphRenderData.map(({ segments }, index) => (
-              <p key={index} className="mb-6 indent-8 text-justify">
+              <p key={index} className="mb-6 indent-8">
                 {segments.map(segment => (
                   <span
                     key={`${segment.start}-${segment.end}-${segment.color || 'plain'}`}
