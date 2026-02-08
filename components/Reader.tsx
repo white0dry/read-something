@@ -98,7 +98,7 @@ const DEFAULT_READER_FONT_ID = 'reader-font-serif-default';
 const READER_TEXT_ALIGN_OPTIONS: Array<{ value: ReaderTextAlign; label: string; icon: React.ComponentType<{ size?: number }> }> = [
   { value: 'left', label: '\u5c45\u5de6', icon: AlignLeft },
   { value: 'center', label: '\u5c45\u4e2d', icon: AlignCenter },
-  { value: 'justify', label: '\u4e24\u7aef\u5bf9\u9f50', icon: AlignJustify },
+  { value: 'justify', label: '\u4e24\u7aef', icon: AlignJustify },
 ];
 const DEFAULT_READER_FONT_OPTIONS: ReaderFontOption[] = [
   {
@@ -2427,7 +2427,7 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
               </div>
               <div className="flex-1 overflow-y-auto no-scrollbar px-1 pb-1 space-y-2">
                 <div className={`rounded-xl p-2 ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
-                  <div className="text-[11px] font-semibold text-slate-500">{'\u6587\u5b57\u5bf9\u9f50'}</div>
+                  <div className="text-[11px] font-semibold text-slate-500">{'\u5bf9\u9f50'}</div>
                   <div className="mt-1.5 flex items-center gap-2">
                     {READER_TEXT_ALIGN_OPTIONS.map(({ value, label, icon: Icon }) => (
                       <button
