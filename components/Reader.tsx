@@ -601,9 +601,15 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
     const chapterLength = chapterText.length;
 
     const scroller = readerScrollRef.current;
+    const hasScroller = Boolean(scroller);
     const scrollableHeight = scroller ? Math.max(0, scroller.scrollHeight - scroller.clientHeight) : 0;
     const scrollTop = scroller ? scroller.scrollTop : lastReaderScrollTopRef.current;
-    const scrollRatio = scrollableHeight > 0 ? clamp(scrollTop / scrollableHeight, 0, 1) : 0;
+    const noScrollableContent = hasScroller && scrollableHeight <= 1;
+    const scrollRatio = noScrollableContent
+      ? (chapterLength > 0 ? 1 : 0)
+      : scrollableHeight > 0
+        ? clamp(scrollTop / scrollableHeight, 0, 1)
+        : 0;
 
     const chapterCharOffset = chapterLength > 0 ? clamp(Math.round(chapterLength * scrollRatio), 0, chapterLength) : 0;
     const totalLength = getTotalTextLength(chapters, bookText);

@@ -1,11 +1,20 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Cell, LabelList } from 'recharts';
-import { Flame, Clock, BookOpen, Calendar } from 'lucide-react';
+import { Flame, Clock, BookOpen, Calendar, Search, Check, X } from 'lucide-react';
+import ModalPortal from './ModalPortal';
 
 interface StatsProps {
   isDarkMode?: boolean;
   dailyReadingMsByDate?: Record<string, number>;
   themeColor?: string;
+  completedBookCount?: number;
+  completedBookIds?: string[];
+  books?: Array<{
+    id: string;
+    title: string;
+    author?: string;
+    tags?: string[];
+  }>;
 }
 
 const HOURS_CAP = 8;
@@ -29,6 +38,10 @@ interface TouchGestureState {
 
 const SWIPE_DECISION_THRESHOLD = 10;
 const SWIPE_TRIGGER_THRESHOLD = 42;
+const CARD_TAP_THRESHOLD = 10;
+const GOAL_BOOK_IDS_STORAGE_KEY = 'app_stats_goal_book_ids';
+
+type SummaryCardKey = 'streak' | 'duration' | 'completed' | 'goal';
 
 const clampByte = (value: number) => Math.max(0, Math.min(255, Math.round(value)));
 
@@ -69,6 +82,14 @@ const parseRgbCss = (value: string): RgbColor | null => {
     g: clampByte(Number(match[2])),
     b: clampByte(Number(match[3])),
   };
+};
+
+const resolveModeAccentColor = (hexColor: string, isDarkMode?: boolean) => {
+  const base = hexToRgb(hexColor);
+  const adjusted = isDarkMode
+    ? mixRgb(base, { r: 255, g: 255, b: 255 }, 0.16)
+    : mixRgb(base, { r: 0, g: 0, b: 0 }, 0.08);
+  return rgbToCss(adjusted);
 };
 
 const formatDateKey = (date: Date) => {
@@ -125,10 +146,23 @@ const getMonthlyCells = (monthStart: Date, dailyReadingMsByDate: Record<string, 
 const formatMonthDay = (date: Date) =>
   `${`${date.getMonth() + 1}`.padStart(2, '0')}/${`${date.getDate()}`.padStart(2, '0')}`;
 
-const Stats: React.FC<StatsProps> = ({ isDarkMode, dailyReadingMsByDate = {}, themeColor }) => {
+const Stats: React.FC<StatsProps> = ({
+  isDarkMode,
+  dailyReadingMsByDate = {},
+  themeColor,
+  completedBookCount = 0,
+  completedBookIds = [],
+  books = [],
+}) => {
   const containerClass = isDarkMode ? 'bg-[#2d3748] text-slate-200' : 'neu-bg text-slate-600';
   const cardClass = isDarkMode ? 'bg-[#2d3748] shadow-[6px_6px_12px_#232b39,-6px_-6px_12px_#374357]' : 'neu-flat';
   const pressedClass = isDarkMode ? 'bg-[#2d3748] shadow-[inset_3px_3px_6px_#232b39,inset_-3px_-3px_6px_#374357]' : 'neu-pressed';
+  const goalSearchInputClass = isDarkMode
+    ? 'bg-[#2d3748] shadow-[inset_3px_3px_6px_#232b39,inset_-3px_-3px_6px_#374357]'
+    : 'neu-pressed';
+  const btnClass = isDarkMode
+    ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357] text-slate-200'
+    : 'neu-btn';
   const headingClass = isDarkMode ? 'text-slate-200' : 'text-slate-700';
   const axisTextColor = isDarkMode ? '#94a3b8' : '#64748b';
   const [weekOffset, setWeekOffset] = useState(0);
@@ -136,12 +170,60 @@ const Stats: React.FC<StatsProps> = ({ isDarkMode, dailyReadingMsByDate = {}, th
   const [chartWidth, setChartWidth] = useState(0);
   const [weekSlideClass, setWeekSlideClass] = useState('');
   const [monthSlideClass, setMonthSlideClass] = useState('');
+  const [pressedCard, setPressedCard] = useState<SummaryCardKey | null>(null);
+  const [openCardModal, setOpenCardModal] = useState<SummaryCardKey | null>(null);
+  const [goalBookSearchKeyword, setGoalBookSearchKeyword] = useState('');
+  const [goalBookIds, setGoalBookIds] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(GOAL_BOOK_IDS_STORAGE_KEY);
+      if (!saved) return [];
+      const parsed = JSON.parse(saved);
+      if (!Array.isArray(parsed)) return [];
+      const unique = new Set<string>();
+      parsed.forEach((item) => {
+        if (typeof item === 'string' && item.trim()) unique.add(item);
+      });
+      return Array.from(unique);
+    } catch {
+      return [];
+    }
+  });
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const weekPointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const monthPointerStartRef = useRef<{ x: number; y: number } | null>(null);
+  const cardTouchStartRef = useRef<{ cardKey: SummaryCardKey; x: number; y: number } | null>(null);
   const weekTouchGestureRef = useRef<TouchGestureState | null>(null);
   const monthTouchGestureRef = useRef<TouchGestureState | null>(null);
   const now = useMemo(() => new Date(), []);
+  const todayDateKey = useMemo(() => formatDateKey(now), [now]);
+  const durationAccentColor = useMemo(() => resolveModeAccentColor('#7DA0F2', isDarkMode), [isDarkMode]);
+  const completedAccentColor = useMemo(() => resolveModeAccentColor('#A7DCBD', isDarkMode), [isDarkMode]);
+  const goalAccentColor = useMemo(() => resolveModeAccentColor('#8B7AB8', isDarkMode), [isDarkMode]);
+  const totalCompletedBookCount = useMemo(
+    () => Math.max(completedBookCount, completedBookIds.length),
+    [completedBookCount, completedBookIds]
+  );
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(GOAL_BOOK_IDS_STORAGE_KEY, JSON.stringify(goalBookIds));
+    } catch {
+      // no-op: localStorage may be unavailable in some contexts.
+    }
+  }, [goalBookIds]);
+
+  useEffect(() => {
+    if (books.length === 0) {
+      setGoalBookIds((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
+
+    const validBookIds = new Set(books.map((book) => book.id));
+    setGoalBookIds((prev) => {
+      const next = prev.filter((id) => validBookIds.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [books]);
 
   useEffect(() => {
     const element = chartContainerRef.current;
@@ -202,6 +284,139 @@ const Stats: React.FC<StatsProps> = ({ isDarkMode, dailyReadingMsByDate = {}, th
   };
 
   const weekStart = useMemo(() => addDays(getWeekStartMonday(now), weekOffset * 7), [now, weekOffset]);
+  const goalBookLabelById = useMemo(() => {
+    const next = new Map<string, string>();
+    const duplicateCounter = new Map<string, number>();
+
+    books.forEach((book) => {
+      const baseLabel = (book.title || '未命名书籍').trim() || '未命名书籍';
+      const duplicateCount = duplicateCounter.get(baseLabel) || 0;
+      duplicateCounter.set(baseLabel, duplicateCount + 1);
+      const displayLabel = duplicateCount === 0 ? baseLabel : `${baseLabel} (${book.id.slice(-4)})`;
+      next.set(book.id, displayLabel);
+    });
+
+    return next;
+  }, [books]);
+  const goalBookItems = useMemo(
+    () =>
+      books.map((book) => ({
+        id: book.id,
+        label: goalBookLabelById.get(book.id) || '未命名书籍',
+        title: (book.title || '').trim(),
+        author: (book.author || '').trim(),
+        tags: Array.isArray(book.tags) ? book.tags : [],
+      })),
+    [books, goalBookLabelById]
+  );
+  const normalizedGoalBookSearch = goalBookSearchKeyword.trim().toLowerCase();
+  const filteredGoalBookItems = useMemo(() => {
+    if (!normalizedGoalBookSearch) return goalBookItems;
+    return goalBookItems.filter((book) => {
+      const searchableText = [book.label, book.title, book.author, book.tags.join(' ')].join(' ').toLowerCase();
+      return searchableText.includes(normalizedGoalBookSearch);
+    });
+  }, [goalBookItems, normalizedGoalBookSearch]);
+  const toggleGoalBookSelection = (bookId: string) => {
+    setGoalBookIds((prev) => (prev.includes(bookId) ? prev.filter((id) => id !== bookId) : [...prev, bookId]));
+  };
+  const completedBookIdSet = useMemo(() => new Set(completedBookIds), [completedBookIds]);
+  const goalCompletedCount = useMemo(
+    () => goalBookIds.filter((id) => completedBookIdSet.has(id)).length,
+    [goalBookIds, completedBookIdSet]
+  );
+  const goalTotalCount = goalBookIds.length;
+  const goalProgressPercent = goalTotalCount > 0 ? (goalCompletedCount / goalTotalCount) * 100 : 0;
+  const modalTitleMap: Record<SummaryCardKey, string> = {
+    streak: '连续阅读',
+    duration: '累计时长',
+    completed: '累计读完',
+    goal: '设定目标',
+  };
+  const consecutiveReadingDays = useMemo(() => {
+    let streak = 0;
+    let cursor = getDateStart(now);
+
+    while (true) {
+      const key = formatDateKey(cursor);
+      const durationMs = dailyReadingMsByDate[key] || 0;
+      if (durationMs <= 0) break;
+      streak += 1;
+      cursor = addDays(cursor, -1);
+    }
+
+    return streak;
+  }, [dailyReadingMsByDate, now]);
+  const cumulativeReadingHours = useMemo(() => {
+    const totalMs = Object.values(dailyReadingMsByDate).reduce<number>((sum, value) => {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+        return sum;
+      }
+      return sum + value;
+    }, 0);
+    return totalMs / (1000 * 60 * 60);
+  }, [dailyReadingMsByDate]);
+  const closeCardModal = () => {
+    setOpenCardModal(null);
+    setGoalBookSearchKeyword('');
+  };
+  const releaseCardPress = (cardKey: SummaryCardKey) => {
+    setPressedCard((prev) => (prev === cardKey ? null : prev));
+  };
+  const getCardClassName = (cardKey: SummaryCardKey) => {
+    return `${pressedCard === cardKey ? pressedClass : cardClass} p-4 flex flex-col justify-between h-28 rounded-2xl transition-all duration-100 active:scale-[0.98] border-none text-left`;
+  };
+  const getCardEvents = (cardKey: SummaryCardKey) => ({
+    onPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (event.pointerType === 'touch') return;
+      setPressedCard(cardKey);
+    },
+    onPointerUp: (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (event.pointerType === 'touch') return;
+      releaseCardPress(cardKey);
+    },
+    onPointerCancel: () => releaseCardPress(cardKey),
+    onPointerLeave: () => releaseCardPress(cardKey),
+    onTouchStart: (event: React.TouchEvent<HTMLButtonElement>) => {
+      const point = event.touches[0];
+      if (!point) return;
+      cardTouchStartRef.current = { cardKey, x: point.clientX, y: point.clientY };
+      setPressedCard(cardKey);
+    },
+    onTouchMove: (event: React.TouchEvent<HTMLButtonElement>) => {
+      const start = cardTouchStartRef.current;
+      const point = event.touches[0];
+      if (!start || !point || start.cardKey !== cardKey) return;
+      const movedTooFar =
+        Math.abs(point.clientX - start.x) > CARD_TAP_THRESHOLD ||
+        Math.abs(point.clientY - start.y) > CARD_TAP_THRESHOLD;
+      if (movedTooFar) {
+        cardTouchStartRef.current = null;
+        releaseCardPress(cardKey);
+      }
+    },
+    onTouchEnd: (event: React.TouchEvent<HTMLButtonElement>) => {
+      const start = cardTouchStartRef.current;
+      cardTouchStartRef.current = null;
+      releaseCardPress(cardKey);
+
+      const point = event.changedTouches[0];
+      if (!start || !point || start.cardKey !== cardKey) return;
+
+      const isTap =
+        Math.abs(point.clientX - start.x) <= CARD_TAP_THRESHOLD &&
+        Math.abs(point.clientY - start.y) <= CARD_TAP_THRESHOLD;
+      if (!isTap) return;
+
+      event.preventDefault();
+      setOpenCardModal(cardKey);
+    },
+    onTouchCancel: () => {
+      cardTouchStartRef.current = null;
+      releaseCardPress(cardKey);
+    },
+    onClick: () => setOpenCardModal(cardKey),
+  });
   const weekData = useMemo(() => {
     return WEEKDAY_LABELS.map((label, index) => {
       const date = addDays(weekStart, index);
@@ -336,37 +551,134 @@ const Stats: React.FC<StatsProps> = ({ isDarkMode, dailyReadingMsByDate = {}, th
 
       {/* Summary Cards */}
       <div className="grid grid-cols-2 gap-5 mb-8">
-        <div className={`${cardClass} p-4 flex flex-col justify-between h-28 rounded-2xl`}>
+        <button type="button" className={getCardClassName('streak')} {...getCardEvents('streak')}>
            <div className="flex items-center gap-2 text-rose-400">
              <Flame size={20} />
-             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">连续打卡</span>
+             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">连续阅读</span>
            </div>
-           <div className={`text-2xl font-black ${headingClass}`}>12 <span className="text-sm font-normal text-slate-400">天</span></div>
-        </div>
-        <div className={`${cardClass} p-4 flex flex-col justify-between h-28 rounded-2xl`}>
-           <div className="flex items-center gap-2 text-blue-400">
+           <div className={`text-2xl font-black ${headingClass}`}>{consecutiveReadingDays} <span className="text-sm font-normal text-slate-400">天</span></div>
+        </button>
+        <button type="button" className={getCardClassName('duration')} {...getCardEvents('duration')}>
+           <div className="flex items-center gap-2" style={{ color: durationAccentColor }}>
              <Clock size={20} />
-             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">总时长</span>
+             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">累计时长</span>
            </div>
-           <div className={`text-2xl font-black ${headingClass}`}>48.5 <span className="text-sm font-normal text-slate-400">h</span></div>
-        </div>
-        <div className={`${cardClass} p-4 flex flex-col justify-between h-28 rounded-2xl`}>
-           <div className="flex items-center gap-2 text-emerald-400">
+           <div className={`text-2xl font-black ${headingClass}`}>{cumulativeReadingHours.toFixed(1)} <span className="text-sm font-normal text-slate-400">h</span></div>
+        </button>
+        <button type="button" className={getCardClassName('completed')} {...getCardEvents('completed')}>
+           <div className="flex items-center gap-2" style={{ color: completedAccentColor }}>
              <BookOpen size={20} />
-             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">已读完</span>
+             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">累计读完</span>
            </div>
-           <div className={`text-2xl font-black ${headingClass}`}>3 <span className="text-sm font-normal text-slate-400">本</span></div>
-        </div>
-        <div className={`${cardClass} p-4 flex flex-col justify-between h-28 rounded-2xl`}>
-           <div className="flex items-center gap-2 text-violet-400">
+           <div className={`text-2xl font-black ${headingClass}`}>{totalCompletedBookCount} <span className="text-sm font-normal text-slate-400">本</span></div>
+        </button>
+        <button type="button" className={getCardClassName('goal')} {...getCardEvents('goal')}>
+           <div className="flex items-center gap-2" style={{ color: goalAccentColor }}>
              <Calendar size={20} />
-             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">目标</span>
+             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">设定目标</span>
+           </div>
+           <div className="mt-1 flex justify-end">
+             <span className="text-sm font-normal text-slate-400">{goalCompletedCount}/{goalTotalCount}</span>
            </div>
            <div className={`w-full h-3 rounded-full overflow-hidden p-[3px] mt-2 ${pressedClass}`}>
-              <div className="h-full bg-violet-400 rounded-full w-[15%]" />
+              <div className="h-full rounded-full" style={{ backgroundColor: goalAccentColor, width: `${goalProgressPercent}%` }} />
            </div>
-        </div>
+        </button>
       </div>
+
+      {openCardModal && (
+        <ModalPortal>
+          <div
+            className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-slate-500/20 backdrop-blur-sm animate-fade-in"
+            onClick={closeCardModal}
+          >
+            <div
+              className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm h-[20rem] rounded-2xl p-6 border relative flex flex-col`}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={closeCardModal}
+                className={`absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-600 ${btnClass}`}
+              >
+                <X size={16} />
+              </button>
+
+              <h3 className={`text-lg font-bold mb-5 text-center ${headingClass}`}>{modalTitleMap[openCardModal]}</h3>
+
+              {openCardModal === 'goal' ? (
+                <div className="flex-1 min-h-0 flex flex-col">
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">目标书籍 (多选)</label>
+                    <span className="text-[10px] text-slate-400">{goalBookIds.length}/{books.length}</span>
+                  </div>
+
+                  <div className={`mt-3 rounded-xl px-3 py-2 flex items-center gap-2 ${goalSearchInputClass}`}>
+                    <Search size={14} className="text-slate-400 flex-shrink-0" />
+                    <input
+                      type="text"
+                      value={goalBookSearchKeyword}
+                      onChange={(event) => setGoalBookSearchKeyword(event.target.value)}
+                      placeholder="搜索书名 / 作者 / 标签..."
+                      className={`w-full bg-transparent outline-none text-sm ${isDarkMode ? 'text-slate-200 placeholder:text-slate-500' : 'text-slate-600 placeholder:text-slate-400'}`}
+                    />
+                    {goalBookSearchKeyword && (
+                      <button
+                        type="button"
+                        onClick={() => setGoalBookSearchKeyword('')}
+                        className="text-slate-400 hover:text-slate-500"
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className={`mt-3 flex-1 min-h-0 rounded-xl p-2 overflow-y-auto no-scrollbar ${isDarkMode ? 'bg-black/20' : 'bg-slate-100/50'}`}>
+                    {filteredGoalBookItems.length > 0 ? (
+                      <div className="space-y-1">
+                        {filteredGoalBookItems.map((book) => {
+                          const isSelected = goalBookIds.includes(book.id);
+                          const metaText = [book.author, book.tags.join(' / ')].filter(Boolean).join(' · ');
+                          return (
+                            <button
+                              key={book.id}
+                              type="button"
+                              onClick={() => toggleGoalBookSelection(book.id)}
+                              className={`w-full flex items-center gap-2 px-2 py-2 rounded-lg text-sm transition-colors ${
+                                isSelected
+                                  ? 'text-rose-400 font-bold bg-rose-400/10'
+                                  : isDarkMode
+                                    ? 'text-slate-300 hover:bg-slate-700/70'
+                                    : 'text-slate-600 hover:bg-white/80'
+                              }`}
+                            >
+                              <div className={`w-4 h-4 rounded border flex items-center justify-center ${isSelected ? 'bg-rose-400 border-rose-400' : 'border-slate-400'}`}>
+                                {isSelected && <Check size={10} className="text-white" />}
+                              </div>
+                              <div className="min-w-0 flex-1 text-left">
+                                <div className="truncate">{book.label}</div>
+                                {metaText && <div className="truncate text-[10px] font-normal text-slate-400 mt-0.5">{metaText}</div>}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-xs text-slate-400">
+                        {books.length === 0 ? '暂无书籍' : '无符合条件的书籍'}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex-1 flex items-center justify-center">
+                  <span className={`text-base font-bold ${headingClass}`}>开发中</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </ModalPortal>
+      )}
 
       {/* Chart */}
       <div
@@ -483,17 +795,24 @@ const Stats: React.FC<StatsProps> = ({ isDarkMode, dailyReadingMsByDate = {}, th
                 return <div key={`blank-${index}`} className="aspect-square" />;
               }
 
+              const cellDateKey = formatDateKey(new Date(monthStart.getFullYear(), monthStart.getMonth(), cell.day));
+              const isTodayCell = cellDateKey === todayDateKey;
+
               return (
                 <div
                   key={`day-${index}`}
-                  className={`aspect-square rounded-lg ${pressedClass} relative overflow-hidden flex items-center justify-center`}
+                  className={`aspect-square rounded-lg ${pressedClass} relative flex items-center justify-center`}
                   style={resolveCalendarCellStyle(cell.tier)}
                 >
-                  <span
-                    className="relative z-[1] text-[10px] font-normal leading-none"
-                    style={{ color: axisTextColor }}
-                  >
+                  <span className="relative z-[1] inline-flex items-center justify-center text-[10px] font-normal leading-none" style={{ color: axisTextColor }}>
                     {cell.day}
+                    {isTodayCell && (
+                      <span
+                        className="absolute left-1/2 top-full mt-[2px] -translate-x-1/2 block w-[3px] h-[3px] rounded-full"
+                        style={{ backgroundColor: axisTextColor }}
+                        aria-hidden
+                      />
+                    )}
                   </span>
                 </div>
               );

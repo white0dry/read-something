@@ -29,6 +29,7 @@ const DEFAULT_THEME_COLOR = '#e28a9d';
 const FONT_BASELINE_MULTIPLIER = 1.2; // Old 120% is the new 100%
 const SAFE_AREA_DEFAULT_MIGRATION_KEY = 'app_safe_area_default_v2';
 const DAILY_READING_MS_STORAGE_KEY = 'app_daily_reading_ms';
+const COMPLETED_BOOK_IDS_STORAGE_KEY = 'app_completed_book_ids';
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   activeCommentsEnabled: false,
@@ -180,6 +181,24 @@ const App: React.FC = () => {
       return {};
     }
   });
+  const [completedBookIds, setCompletedBookIds] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(COMPLETED_BOOK_IDS_STORAGE_KEY);
+      if (!saved) return [];
+      const parsed = JSON.parse(saved);
+      if (!Array.isArray(parsed)) return [];
+
+      const uniqueIds = new Set<string>();
+      parsed.forEach((item) => {
+        if (typeof item === 'string' && item.trim()) {
+          uniqueIds.add(item);
+        }
+      });
+      return Array.from(uniqueIds);
+    } catch {
+      return [];
+    }
+  });
   const readingSessionStartedAtRef = useRef<number | null>(null);
   const dailyReadingMsByDateRef = useRef<Record<string, number>>(dailyReadingMsByDate);
 
@@ -284,6 +303,21 @@ const App: React.FC = () => {
   useEffect(() => {
     safeSetStorageItem(DAILY_READING_MS_STORAGE_KEY, JSON.stringify(dailyReadingMsByDate));
   }, [dailyReadingMsByDate]);
+  useEffect(() => {
+    safeSetStorageItem(COMPLETED_BOOK_IDS_STORAGE_KEY, JSON.stringify(completedBookIds));
+  }, [completedBookIds]);
+  useEffect(() => {
+    if (books.length === 0) return;
+    setCompletedBookIds((prev) => {
+      const next = new Set(prev);
+      books.forEach((book) => {
+        if (book.progress >= 100) {
+          next.add(book.id);
+        }
+      });
+      return next.size === prev.length ? prev : Array.from(next);
+    });
+  }, [books]);
   useEffect(() => {
     const flushReadingSession = () => {
       const openedAt = readingSessionStartedAtRef.current;
@@ -650,6 +684,9 @@ const App: React.FC = () => {
             : book
         )
       );
+      if (snapshot.progress >= 100) {
+        setCompletedBookIds(prev => (prev.includes(snapshot.bookId) ? prev : [...prev, snapshot.bookId]));
+      }
     }
     transitionToView(AppView.LIBRARY);
   };
@@ -662,6 +699,9 @@ const App: React.FC = () => {
       await saveBookContent(newBook.id, fullText, chapters);
       const compacted = compactBookForState({ ...newBook, fullText, chapters });
       setBooks(prev => [compacted, ...prev]);
+      if (newBook.progress >= 100) {
+        setCompletedBookIds(prev => (prev.includes(newBook.id) ? prev : [...prev, newBook.id]));
+      }
       showNotification('成功导入');
     } catch (error) {
       console.error('Failed to persist new book content:', error);
@@ -677,6 +717,9 @@ const App: React.FC = () => {
       await saveBookContent(updatedBook.id, fullText, chapters);
       const compacted = compactBookForState({ ...updatedBook, fullText, chapters });
       setBooks(prev => prev.map(b => (b.id === updatedBook.id ? compacted : b)));
+      if (updatedBook.progress >= 100) {
+        setCompletedBookIds(prev => (prev.includes(updatedBook.id) ? prev : [...prev, updatedBook.id]));
+      }
       showNotification('书本信息已更新');
     } catch (error) {
       console.error('Failed to persist updated book content:', error);
@@ -771,6 +814,9 @@ const App: React.FC = () => {
             isDarkMode={isDarkMode}
             dailyReadingMsByDate={dailyReadingMsByDate}
             themeColor={appSettings.themeColor}
+            completedBookCount={completedBookIds.length}
+            completedBookIds={completedBookIds}
+            books={books}
           />
         )}
         {currentView === AppView.SETTINGS && (
