@@ -2,6 +2,10 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Cell, LabelList } from 'recharts';
 import { Flame, Clock, BookOpen, Calendar, Search, Check, X } from 'lucide-react';
 import ModalPortal from './ModalPortal';
+import ResolvedImage from './ResolvedImage';
+import { Book } from '../types';
+
+type StatsBook = Pick<Book, 'id' | 'title' | 'author' | 'coverUrl' | 'tags' | 'progress' | 'lastReadAt'>;
 
 interface StatsProps {
   isDarkMode?: boolean;
@@ -9,12 +13,10 @@ interface StatsProps {
   themeColor?: string;
   completedBookCount?: number;
   completedBookIds?: string[];
-  books?: Array<{
-    id: string;
-    title: string;
-    author?: string;
-    tags?: string[];
-  }>;
+  completedAtByBookId?: Record<string, number>;
+  readingMsByBookId?: Record<string, number>;
+  activeCharacterNickname?: string;
+  books?: StatsBook[];
 }
 
 const HOURS_CAP = 8;
@@ -40,6 +42,7 @@ const SWIPE_DECISION_THRESHOLD = 10;
 const SWIPE_TRIGGER_THRESHOLD = 42;
 const CARD_TAP_THRESHOLD = 10;
 const GOAL_BOOK_IDS_STORAGE_KEY = 'app_stats_goal_book_ids';
+const DEFAULT_CHARACTER_NICKNAME = '\u89d2\u8272';
 
 type SummaryCardKey = 'streak' | 'duration' | 'completed' | 'goal';
 
@@ -146,12 +149,23 @@ const getMonthlyCells = (monthStart: Date, dailyReadingMsByDate: Record<string, 
 const formatMonthDay = (date: Date) =>
   `${`${date.getMonth() + 1}`.padStart(2, '0')}/${`${date.getDate()}`.padStart(2, '0')}`;
 
+const formatDateText = (timestamp: number) => {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 const Stats: React.FC<StatsProps> = ({
   isDarkMode,
   dailyReadingMsByDate = {},
   themeColor,
   completedBookCount = 0,
   completedBookIds = [],
+  completedAtByBookId = {},
+  readingMsByBookId = {},
+  activeCharacterNickname = DEFAULT_CHARACTER_NICKNAME,
   books = [],
 }) => {
   const containerClass = isDarkMode ? 'bg-[#2d3748] text-slate-200' : 'neu-bg text-slate-600';
@@ -199,10 +213,22 @@ const Stats: React.FC<StatsProps> = ({
   const durationAccentColor = useMemo(() => resolveModeAccentColor('#7DA0F2', isDarkMode), [isDarkMode]);
   const completedAccentColor = useMemo(() => resolveModeAccentColor('#A7DCBD', isDarkMode), [isDarkMode]);
   const goalAccentColor = useMemo(() => resolveModeAccentColor('#8B7AB8', isDarkMode), [isDarkMode]);
+  const modalMetaAccentColor = useMemo(
+    () => resolveModeAccentColor(normalizeHexColor(themeColor), isDarkMode),
+    [themeColor, isDarkMode]
+  );
   const totalCompletedBookCount = useMemo(
     () => Math.max(completedBookCount, completedBookIds.length),
     [completedBookCount, completedBookIds]
   );
+  const normalizedCharacterNickname = activeCharacterNickname.trim() || DEFAULT_CHARACTER_NICKNAME;
+  const booksById = useMemo(() => {
+    const next = new Map<string, StatsBook>();
+    books.forEach((book) => {
+      next.set(book.id, book);
+    });
+    return next;
+  }, [books]);
 
   useEffect(() => {
     try {
@@ -327,10 +353,39 @@ const Stats: React.FC<StatsProps> = ({
   );
   const goalTotalCount = goalBookIds.length;
   const goalProgressPercent = goalTotalCount > 0 ? (goalCompletedCount / goalTotalCount) * 100 : 0;
+  const recentCompletedBooks = useMemo(() => {
+    const completedIdSet = new Set(completedBookIds);
+    return books
+      .map((book) => {
+        if (!completedIdSet.has(book.id) && book.progress < 100) return null;
+        const fallbackReachedAt =
+          book.progress >= 100 && typeof book.lastReadAt === 'number' && Number.isFinite(book.lastReadAt)
+            ? book.lastReadAt
+            : 0;
+        const reachedAt = completedAtByBookId[book.id] || fallbackReachedAt;
+        if (!reachedAt || !Number.isFinite(reachedAt) || reachedAt <= 0) return null;
+        return { book, reachedAt };
+      })
+      .filter((item): item is { book: StatsBook; reachedAt: number } => Boolean(item))
+      .sort((a, b) => b.reachedAt - a.reachedAt)
+      .slice(0, 5);
+  }, [books, completedBookIds, completedAtByBookId]);
+  const longestReadingBooks = useMemo(() => {
+    return Object.entries(readingMsByBookId)
+      .map(([bookId, readingMs]) => {
+        const book = booksById.get(bookId);
+        if (!book) return null;
+        if (typeof readingMs !== 'number' || !Number.isFinite(readingMs) || readingMs <= 0) return null;
+        return { book, readingMs };
+      })
+      .filter((item): item is { book: StatsBook; readingMs: number } => Boolean(item))
+      .sort((a, b) => b.readingMs - a.readingMs)
+      .slice(0, 5);
+  }, [booksById, readingMsByBookId]);
   const modalTitleMap: Record<SummaryCardKey, string> = {
-    streak: '连续阅读',
-    duration: '累计时长',
-    completed: '累计读完',
+    streak: `${normalizedCharacterNickname}便签`,
+    duration: '阅读最久',
+    completed: '最近读完',
     goal: '设定目标',
   };
   const consecutiveReadingDays = useMemo(() => {
@@ -606,7 +661,17 @@ const Stats: React.FC<StatsProps> = ({
 
               <h3 className={`text-lg font-bold mb-5 text-center ${headingClass}`}>{modalTitleMap[openCardModal]}</h3>
 
-              {openCardModal === 'goal' ? (
+              {openCardModal === 'streak' ? (
+                <div className="flex-1 min-h-0 flex items-center justify-center">
+                      <div className={`stats-note-wrap ${isDarkMode ? 'bg-[#1f2937]/70' : 'bg-white/60'}`}>
+                        <span className="stats-note-tape stats-note-tape-left" aria-hidden />
+                        <span className="stats-note-tape stats-note-tape-right" aria-hidden />
+                        <div className="stats-note-paper">
+                          <div className="stats-note-content no-scrollbar" />
+                        </div>
+                      </div>
+                    </div>
+              ) : openCardModal === 'goal' ? (
                 <div className="flex-1 min-h-0 flex flex-col">
                   <div className="flex items-center justify-between gap-3">
                     <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">目标书籍 (多选)</label>
@@ -670,10 +735,66 @@ const Stats: React.FC<StatsProps> = ({
                     )}
                   </div>
                 </div>
-              ) : (
-                <div className="flex-1 flex items-center justify-center">
-                  <span className={`text-base font-bold ${headingClass}`}>开发中</span>
+              ) : openCardModal === 'completed' ? (
+                <div className={`flex-1 min-h-0 rounded-xl p-2 overflow-y-auto no-scrollbar ${isDarkMode ? 'bg-black/20' : 'bg-slate-100/50'}`}>
+                  {recentCompletedBooks.length > 0 ? (
+                    <div className="space-y-2">
+                      {recentCompletedBooks.map((item) => (
+                        <div key={item.book.id} className={`flex items-center gap-3 rounded-xl p-2 ${isDarkMode ? 'hover:bg-slate-700/60' : 'hover:bg-white/80'}`}>
+                          <div className={`w-10 h-14 rounded-md overflow-hidden flex-shrink-0 ${pressedClass}`}>
+                            {item.book.coverUrl ? (
+                              <ResolvedImage src={item.book.coverUrl} className="w-full h-full object-cover" alt={item.book.title} />
+                            ) : (
+                              <div className={`w-full h-full flex items-center justify-center ${isDarkMode ? 'bg-slate-700' : 'bg-slate-200'}`}>
+                                <BookOpen size={14} className="text-slate-400" />
+                              </div>
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className={`truncate text-sm font-bold ${headingClass}`}>{item.book.title}</div>
+                            <div className="truncate text-[11px] text-slate-400">{item.book.author?.trim() || '未知作者'}</div>
+                            <div className="text-[10px] mt-0.5" style={{ color: modalMetaAccentColor }}>
+                              达成日期 {formatDateText(item.reachedAt)}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-xs text-slate-400">暂无读完记录</div>
+                  )}
                 </div>
+              ) : openCardModal === 'duration' ? (
+                <div className={`flex-1 min-h-0 rounded-xl p-2 overflow-y-auto no-scrollbar ${isDarkMode ? 'bg-black/20' : 'bg-slate-100/50'}`}>
+                  {longestReadingBooks.length > 0 ? (
+                    <div className="space-y-2">
+                      {longestReadingBooks.map((item) => (
+                        <div key={item.book.id} className={`flex items-center gap-3 rounded-xl p-2 ${isDarkMode ? 'hover:bg-slate-700/60' : 'hover:bg-white/80'}`}>
+                          <div className={`w-10 h-14 rounded-md overflow-hidden flex-shrink-0 ${pressedClass}`}>
+                            {item.book.coverUrl ? (
+                              <ResolvedImage src={item.book.coverUrl} className="w-full h-full object-cover" alt={item.book.title} />
+                            ) : (
+                              <div className={`w-full h-full flex items-center justify-center ${isDarkMode ? 'bg-slate-700' : 'bg-slate-200'}`}>
+                                <BookOpen size={14} className="text-slate-400" />
+                              </div>
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className={`truncate text-sm font-bold ${headingClass}`}>{item.book.title}</div>
+                            <div className="truncate text-[11px] text-slate-400">{item.book.author?.trim() || '未知作者'}</div>
+                            <div className="text-[10px] mt-0.5" style={{ color: modalMetaAccentColor }}>
+                              累计阅读 {(item.readingMs / (1000 * 60 * 60)).toFixed(1)}h
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-xs text-slate-400">暂无阅读时长记录</div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex-1" />
               )}
             </div>
           </div>

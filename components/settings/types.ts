@@ -33,6 +33,7 @@ export interface ThemeClasses {
   headingClass: string;
   cardClass: string;
   pressedClass: string;
+  sectionIconClass: string;
   inputClass: string;
   btnClass: string;
   activeBorderClass: string;
@@ -41,4 +42,4 @@ export interface ThemeClasses {
   isDarkMode: boolean;
 }
 
-export { ApiProvider, ApiConfig, ApiPreset, AppSettings };
+export type { ApiProvider, ApiConfig, ApiPreset, AppSettings };

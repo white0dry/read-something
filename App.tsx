@@ -30,6 +30,8 @@ const FONT_BASELINE_MULTIPLIER = 1.2; // Old 120% is the new 100%
 const SAFE_AREA_DEFAULT_MIGRATION_KEY = 'app_safe_area_default_v2';
 const DAILY_READING_MS_STORAGE_KEY = 'app_daily_reading_ms';
 const COMPLETED_BOOK_IDS_STORAGE_KEY = 'app_completed_book_ids';
+const COMPLETED_BOOK_REACHED_AT_STORAGE_KEY = 'app_completed_book_reached_at';
+const READING_MS_BY_BOOK_ID_STORAGE_KEY = 'app_reading_ms_by_book_id';
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   activeCommentsEnabled: false,
@@ -147,6 +149,20 @@ const appendReadingDurationByDay = (
   return next;
 };
 
+const appendReadingDurationForBook = (
+  source: Record<string, number>,
+  bookId: string | null,
+  durationMs: number
+) => {
+  if (!bookId || !Number.isFinite(durationMs) || durationMs <= 0) {
+    return source;
+  }
+  return {
+    ...source,
+    [bookId]: Math.max(0, source[bookId] || 0) + durationMs,
+  };
+};
+
 const App: React.FC = () => {
   const VIEW_TRANSITION_MS = 260;
   const [currentView, setCurrentView] = useState<AppView>(AppView.LIBRARY);
@@ -199,8 +215,46 @@ const App: React.FC = () => {
       return [];
     }
   });
+  const [completedAtByBookId, setCompletedAtByBookId] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem(COMPLETED_BOOK_REACHED_AT_STORAGE_KEY);
+      if (!saved) return {};
+      const parsed = JSON.parse(saved);
+      if (!parsed || typeof parsed !== 'object') return {};
+
+      const normalized: Record<string, number> = {};
+      Object.entries(parsed).forEach(([key, value]) => {
+        if (typeof key === 'string' && key.trim() && typeof value === 'number' && Number.isFinite(value) && value > 0) {
+          normalized[key] = value;
+        }
+      });
+      return normalized;
+    } catch {
+      return {};
+    }
+  });
+  const [readingMsByBookId, setReadingMsByBookId] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem(READING_MS_BY_BOOK_ID_STORAGE_KEY);
+      if (!saved) return {};
+      const parsed = JSON.parse(saved);
+      if (!parsed || typeof parsed !== 'object') return {};
+
+      const normalized: Record<string, number> = {};
+      Object.entries(parsed).forEach(([key, value]) => {
+        if (typeof key === 'string' && key.trim() && typeof value === 'number' && Number.isFinite(value) && value > 0) {
+          normalized[key] = value;
+        }
+      });
+      return normalized;
+    } catch {
+      return {};
+    }
+  });
   const readingSessionStartedAtRef = useRef<number | null>(null);
+  const readingSessionBookIdRef = useRef<string | null>(null);
   const dailyReadingMsByDateRef = useRef<Record<string, number>>(dailyReadingMsByDate);
+  const readingMsByBookIdRef = useRef<Record<string, number>>(readingMsByBookId);
 
   // --- PERSISTENT STATE ---
 
@@ -301,11 +355,20 @@ const App: React.FC = () => {
     dailyReadingMsByDateRef.current = dailyReadingMsByDate;
   }, [dailyReadingMsByDate]);
   useEffect(() => {
+    readingMsByBookIdRef.current = readingMsByBookId;
+  }, [readingMsByBookId]);
+  useEffect(() => {
     safeSetStorageItem(DAILY_READING_MS_STORAGE_KEY, JSON.stringify(dailyReadingMsByDate));
   }, [dailyReadingMsByDate]);
   useEffect(() => {
     safeSetStorageItem(COMPLETED_BOOK_IDS_STORAGE_KEY, JSON.stringify(completedBookIds));
   }, [completedBookIds]);
+  useEffect(() => {
+    safeSetStorageItem(COMPLETED_BOOK_REACHED_AT_STORAGE_KEY, JSON.stringify(completedAtByBookId));
+  }, [completedAtByBookId]);
+  useEffect(() => {
+    safeSetStorageItem(READING_MS_BY_BOOK_ID_STORAGE_KEY, JSON.stringify(readingMsByBookId));
+  }, [readingMsByBookId]);
   useEffect(() => {
     if (books.length === 0) return;
     setCompletedBookIds((prev) => {
@@ -317,6 +380,33 @@ const App: React.FC = () => {
       });
       return next.size === prev.length ? prev : Array.from(next);
     });
+    setCompletedAtByBookId((prev) => {
+      const validBookIds = new Set(books.map((book) => book.id));
+      let changed = false;
+      const next: Record<string, number> = {};
+
+      Object.entries(prev).forEach(([bookId, reachedAt]) => {
+        if (!validBookIds.has(bookId)) {
+          changed = true;
+          return;
+        }
+        if (typeof reachedAt !== 'number' || !Number.isFinite(reachedAt) || reachedAt <= 0) {
+          changed = true;
+          return;
+        }
+        next[bookId] = reachedAt;
+      });
+
+      books.forEach((book) => {
+        if (book.progress < 100 || next[book.id]) return;
+        if (typeof book.lastReadAt === 'number' && Number.isFinite(book.lastReadAt) && book.lastReadAt > 0) {
+          next[book.id] = book.lastReadAt;
+          changed = true;
+        }
+      });
+
+      return changed ? next : prev;
+    });
   }, [books]);
   useEffect(() => {
     const flushReadingSession = () => {
@@ -324,11 +414,17 @@ const App: React.FC = () => {
       const closedAt = Date.now();
       if (!openedAt || closedAt <= openedAt) return;
 
+      const sessionBookId = readingSessionBookIdRef.current;
       const next = appendReadingDurationByDay(dailyReadingMsByDateRef.current, openedAt, closedAt);
+      const nextByBook = appendReadingDurationForBook(readingMsByBookIdRef.current, sessionBookId, closedAt - openedAt);
       readingSessionStartedAtRef.current = null;
+      readingSessionBookIdRef.current = null;
       dailyReadingMsByDateRef.current = next;
+      readingMsByBookIdRef.current = nextByBook;
       setDailyReadingMsByDate(next);
+      setReadingMsByBookId(nextByBook);
       safeSetStorageItem(DAILY_READING_MS_STORAGE_KEY, JSON.stringify(next));
+      safeSetStorageItem(READING_MS_BY_BOOK_ID_STORAGE_KEY, JSON.stringify(nextByBook));
     };
 
     window.addEventListener('pagehide', flushReadingSession);
@@ -360,6 +456,10 @@ const App: React.FC = () => {
       if (changed) {
         dailyReadingMsByDateRef.current = next;
         setDailyReadingMsByDate(next);
+        const sessionBookId = readingSessionBookIdRef.current;
+        const nextByBook = appendReadingDurationForBook(readingMsByBookIdRef.current, sessionBookId, cursor - openedAt);
+        readingMsByBookIdRef.current = nextByBook;
+        setReadingMsByBookId(nextByBook);
       }
 
       readingSessionStartedAtRef.current = cursor;
@@ -632,8 +732,11 @@ const App: React.FC = () => {
     if (viewTransitionUnlockTimerRef.current) window.clearTimeout(viewTransitionUnlockTimerRef.current);
 
     viewTransitionTimerRef.current = window.setTimeout(() => {
-      if (nextView === AppView.READER) {
+      if (nextView === AppView.READER && nextBook) {
         readingSessionStartedAtRef.current = Date.now();
+        readingSessionBookIdRef.current = nextBook.id;
+      } else if (nextView !== AppView.READER) {
+        readingSessionBookIdRef.current = null;
       }
       setActiveBook(nextView === AppView.READER ? nextBook : null);
       setCurrentView(nextView);
@@ -664,14 +767,22 @@ const App: React.FC = () => {
   const handleBackToLibrary = (snapshot?: ReaderSessionSnapshot) => {
     const closedAt = snapshot?.lastReadAt || Date.now();
     const openedAt = readingSessionStartedAtRef.current;
+    const sessionBookId = snapshot?.bookId || readingSessionBookIdRef.current;
     if (openedAt && closedAt > openedAt) {
       const next = appendReadingDurationByDay(dailyReadingMsByDateRef.current, openedAt, closedAt);
+      const nextByBook = appendReadingDurationForBook(readingMsByBookIdRef.current, sessionBookId, closedAt - openedAt);
       dailyReadingMsByDateRef.current = next;
+      readingMsByBookIdRef.current = nextByBook;
       setDailyReadingMsByDate(next);
+      setReadingMsByBookId(nextByBook);
     }
     readingSessionStartedAtRef.current = null;
+    readingSessionBookIdRef.current = null;
 
     if (snapshot) {
+      const previousBook = books.find((book) => book.id === snapshot.bookId);
+      const reached100Now = snapshot.progress >= 100 && (previousBook?.progress || 0) < 100;
+
       setBooks(prev =>
         prev.map(book =>
           book.id === snapshot.bookId
@@ -686,6 +797,12 @@ const App: React.FC = () => {
       );
       if (snapshot.progress >= 100) {
         setCompletedBookIds(prev => (prev.includes(snapshot.bookId) ? prev : [...prev, snapshot.bookId]));
+        if (reached100Now) {
+          setCompletedAtByBookId((prev) => ({
+            ...prev,
+            [snapshot.bookId]: snapshot.lastReadAt,
+          }));
+        }
       }
     }
     transitionToView(AppView.LIBRARY);
@@ -701,6 +818,10 @@ const App: React.FC = () => {
       setBooks(prev => [compacted, ...prev]);
       if (newBook.progress >= 100) {
         setCompletedBookIds(prev => (prev.includes(newBook.id) ? prev : [...prev, newBook.id]));
+        const reachedAt = typeof newBook.lastReadAt === 'number' && newBook.lastReadAt > 0
+          ? newBook.lastReadAt
+          : Date.now();
+        setCompletedAtByBookId((prev) => ({ ...prev, [newBook.id]: reachedAt }));
       }
       showNotification('成功导入');
     } catch (error) {
@@ -712,6 +833,8 @@ const App: React.FC = () => {
   const handleUpdateBook = async (updatedBook: Book) => {
     const fullText = updatedBook.fullText || '';
     const chapters = updatedBook.chapters || [];
+    const previousBook = books.find((book) => book.id === updatedBook.id);
+    const reached100Now = updatedBook.progress >= 100 && (previousBook?.progress || 0) < 100;
 
     try {
       await saveBookContent(updatedBook.id, fullText, chapters);
@@ -719,6 +842,12 @@ const App: React.FC = () => {
       setBooks(prev => prev.map(b => (b.id === updatedBook.id ? compacted : b)));
       if (updatedBook.progress >= 100) {
         setCompletedBookIds(prev => (prev.includes(updatedBook.id) ? prev : [...prev, updatedBook.id]));
+        if (reached100Now) {
+          const reachedAt = typeof updatedBook.lastReadAt === 'number' && updatedBook.lastReadAt > 0
+            ? updatedBook.lastReadAt
+            : Date.now();
+          setCompletedAtByBookId((prev) => ({ ...prev, [updatedBook.id]: reachedAt }));
+        }
       }
       showNotification('书本信息已更新');
     } catch (error) {
@@ -735,8 +864,27 @@ const App: React.FC = () => {
     deleteBookContent(bookId).catch(err => console.error('Failed to delete deleted-book text content:', err));
 
     setBooks(prev => prev.filter(b => b.id !== bookId));
+    setCompletedBookIds(prev => prev.filter(id => id !== bookId));
+    setCompletedAtByBookId((prev) => {
+      if (!(bookId in prev)) return prev;
+      const next = { ...prev };
+      delete next[bookId];
+      return next;
+    });
+    setReadingMsByBookId((prev) => {
+      if (!(bookId in prev)) return prev;
+      const next = { ...prev };
+      delete next[bookId];
+      return next;
+    });
     showNotification('书本已删除');
   };
+
+  const activeCharacterNickname = (() => {
+    const activeCharacter = characters.find((item) => item.id === activeCharacterId);
+    if (!activeCharacter) return '\u89d2\u8272';
+    return activeCharacter.nickname || activeCharacter.name || '\u89d2\u8272';
+  })();
 
   const manualSafeAreaTop = Math.max(0, appSettings.safeAreaTop || 0);
   const manualSafeAreaBottom = Math.max(0, appSettings.safeAreaBottom || 0);
@@ -816,6 +964,9 @@ const App: React.FC = () => {
             themeColor={appSettings.themeColor}
             completedBookCount={completedBookIds.length}
             completedBookIds={completedBookIds}
+            completedAtByBookId={completedAtByBookId}
+            readingMsByBookId={readingMsByBookId}
+            activeCharacterNickname={activeCharacterNickname}
             books={books}
           />
         )}

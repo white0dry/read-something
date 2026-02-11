@@ -69,6 +69,11 @@ const Library: React.FC<LibraryProps> = ({
   const pressedClass = isDarkMode ? 'bg-[#2d3748] shadow-[inset_3px_3px_6px_#232b39,inset_-3px_-3px_6px_#374357]' : 'neu-pressed';
   const inputClass = isDarkMode ? 'bg-[#2d3748] shadow-[inset_3px_3px_6px_#232b39,inset_-3px_-3px_6px_#374357] text-slate-200 placeholder-slate-500' : 'neu-pressed text-slate-600 placeholder-slate-400';
   const btnClass = isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357] text-slate-200' : 'neu-btn';
+  const compactEditButtonClass = `w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-400 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-all duration-150 active:scale-95 ${
+    isDarkMode
+      ? `${btnClass} active:shadow-[inset_2px_2px_4px_#232b39,inset_-2px_-2px_4px_#374357]`
+      : `${btnClass} active:shadow-[inset_2px_2px_4px_#c3c8ce,inset_-2px_-2px_4px_#fdffff]`
+  }`;
 
   // State for signature editing
   const [isEditingSig, setIsEditingSig] = useState(false);
@@ -277,7 +282,15 @@ const Library: React.FC<LibraryProps> = ({
   };
 
   // --- Filtering & Searching & Sorting Logic ---
-  const allTags = Array.from(new Set(books.flatMap(b => b.tags || [])));
+  const allTags: string[] = Array.from(
+    new Set(
+      books.flatMap((book) =>
+        Array.isArray(book.tags)
+          ? book.tags.filter((tag): tag is string => typeof tag === 'string' && tag.trim().length > 0)
+          : []
+      )
+    )
+  );
   const filteredBooks = books.filter(book => {
     const matchesSearch = 
       book.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -1157,7 +1170,7 @@ const Library: React.FC<LibraryProps> = ({
               {/* Edit Button for Recent Book */}
               <button 
                 onClick={(e) => openEditModal(e, recentBook)}
-                className={`absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity hover:text-rose-400 ${isDarkMode ? 'bg-black/20 text-slate-200' : 'bg-white/50 text-slate-600'}`}
+                className={`absolute top-4 right-4 ${compactEditButtonClass}`}
               >
                 <Edit2 size={16} />
               </button>
@@ -1377,7 +1390,7 @@ const Library: React.FC<LibraryProps> = ({
                     <div className="flex flex-col justify-center">
                         <button 
                             onClick={(e) => openEditModal(e, book)}
-                            className={`w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-400 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity ${btnClass}`}
+                            className={compactEditButtonClass}
                          >
                             <Edit2 size={14} />
                          </button>

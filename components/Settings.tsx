@@ -94,6 +94,7 @@ const Settings: React.FC<SettingsProps> = ({
     headingClass: isDarkMode ? 'text-slate-200' : 'text-slate-700',
     cardClass: isDarkMode ? 'bg-[#2d3748] shadow-[6px_6px_12px_#232b39,-6px_-6px_12px_#374357]' : 'neu-flat',
     pressedClass: isDarkMode ? 'bg-[#2d3748] shadow-[inset_3px_3px_6px_#232b39,inset_-3px_-3px_6px_#374357]' : 'neu-pressed',
+    sectionIconClass: `w-12 h-12 rounded-full flex items-center justify-center ${isDarkMode ? 'bg-[#2d3748] shadow-[inset_3px_3px_6px_#232b39,inset_-3px_-3px_6px_#374357]' : 'neu-pressed'}`,
     inputClass: isDarkMode ? 'bg-[#2d3748] shadow-[inset_3px_3px_6px_#232b39,inset_-3px_-3px_6px_#374357] text-slate-200 placeholder-slate-500' : 'neu-pressed text-slate-600 placeholder-slate-400',
     btnClass: isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357] text-slate-200' : 'neu-btn',
     activeBorderClass: 'border-2 border-rose-300 relative z-20',
@@ -102,7 +103,7 @@ const Settings: React.FC<SettingsProps> = ({
     isDarkMode
   };
 
-  const { containerClass, animationClass, cardClass, headingClass, pressedClass, inputClass, btnClass } = theme;
+  const { containerClass, animationClass, cardClass, headingClass, pressedClass, sectionIconClass, inputClass, btnClass } = theme;
 
   // --- Helpers ---
   useEffect(() => {
@@ -375,7 +376,7 @@ const Settings: React.FC<SettingsProps> = ({
              className="p-3 rounded-xl flex items-center justify-between cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 active:scale-[0.98] transition-all"
            >
              <div className="flex items-center gap-4">
-               <div className={`w-12 h-12 rounded-full flex items-center justify-center text-rose-400 ${pressedClass}`}>
+               <div className={`${sectionIconClass} text-rose-400`}>
                  <UserCircle size={22} />
                </div>
                <div>
@@ -396,7 +397,7 @@ const Settings: React.FC<SettingsProps> = ({
              className="p-3 rounded-xl flex items-center justify-between cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 active:scale-[0.98] transition-all"
           >
              <div className="flex items-center gap-4">
-               <div className={`w-12 h-12 rounded-full flex items-center justify-center text-rose-400 ${pressedClass}`}>
+               <div className={`${sectionIconClass} text-rose-400`}>
                  <FeatherIcon size={22} />
                </div>
                <div>
@@ -417,7 +418,7 @@ const Settings: React.FC<SettingsProps> = ({
              className="p-3 rounded-xl flex items-center justify-between cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 active:scale-[0.98] transition-all"
           >
              <div className="flex items-center gap-4">
-               <div className={`w-12 h-12 rounded-full flex items-center justify-center text-rose-400 ${pressedClass}`}>
+               <div className={`${sectionIconClass} text-rose-400`}>
                  <Book size={22} />
                </div>
                <div>
@@ -527,7 +528,7 @@ const Settings: React.FC<SettingsProps> = ({
               className="p-3 rounded-xl flex items-center justify-between cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 active:scale-[0.98] transition-all"
            >
               <div className="flex items-center gap-4">
-                <div className={`w-12 h-12 rounded-full flex items-center justify-center text-blue-400 ${pressedClass}`}>
+                <div className={`${sectionIconClass} text-blue-400`}>
                   <Key size={22} />
                 </div>
                 <span className={`font-bold ${headingClass}`}>API 配置</span>
@@ -545,7 +546,7 @@ const Settings: React.FC<SettingsProps> = ({
               className="p-3 rounded-xl flex items-center justify-between cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 active:scale-[0.98] transition-all"
            >
               <div className="flex items-center gap-4">
-                <div className={`w-12 h-12 rounded-full flex items-center justify-center text-slate-400 ${pressedClass}`}>
+                <div className={`${sectionIconClass} text-slate-400`}>
                   <HardDrive size={22} />
                 </div>
                 <span className={`font-bold ${headingClass}`}>储存分析</span>
@@ -563,7 +564,7 @@ const Settings: React.FC<SettingsProps> = ({
              className="p-3 rounded-xl flex items-center justify-between cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 active:scale-[0.98] transition-all"
            >
               <div className="flex items-center gap-4">
-                <div className={`w-12 h-12 rounded-full flex items-center justify-center text-rose-400 ${pressedClass}`}>
+                <div className={`${sectionIconClass} text-rose-400`}>
                   <Palette size={22} />
                 </div>
                 <span className={`font-bold ${headingClass}`}>外观偏好</span>
