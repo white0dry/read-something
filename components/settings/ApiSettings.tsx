@@ -165,6 +165,67 @@ const PROVIDERS: { key: ApiProvider; label: string; defaultEndpoint: string; ico
   { key: 'CUSTOM', label: '自定义', defaultEndpoint: '', icon: Server },
 ];
 
+const MODEL_CACHE_STORAGE_KEY = 'app_api_models_cache_v1';
+
+interface ModelCacheEntry {
+  models: string[];
+  updatedAt: number;
+}
+
+type ModelCacheStore = Record<string, ModelCacheEntry>;
+
+const normalizeEndpoint = (value: string) => value.trim().replace(/\/+$/, '');
+const normalizeModelList = (models: string[]) =>
+  Array.from(new Set(models.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean)));
+
+const fingerprintText = (value: string) => {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+};
+
+const buildModelCacheKey = (provider: ApiProvider, endpoint: string, apiKey: string) => {
+  const normalizedApiKey = apiKey.trim();
+  if (!normalizedApiKey) return '';
+  const normalizedEndpoint = normalizeEndpoint(endpoint) || 'default';
+  return `${provider}::${normalizedEndpoint}::${fingerprintText(normalizedApiKey)}`;
+};
+
+const safeReadModelCache = (): ModelCacheStore => {
+  try {
+    const raw = localStorage.getItem(MODEL_CACHE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object') return {};
+
+    const normalized: ModelCacheStore = {};
+    Object.entries(parsed).forEach(([key, value]) => {
+      if (!key || !value || typeof value !== 'object') return;
+      const entry = value as Partial<ModelCacheEntry>;
+      const models = normalizeModelList(Array.isArray(entry.models) ? entry.models : []);
+      if (models.length === 0) return;
+      normalized[key] = {
+        models,
+        updatedAt: Number.isFinite(Number(entry.updatedAt)) ? Number(entry.updatedAt) : Date.now(),
+      };
+    });
+    return normalized;
+  } catch {
+    return {};
+  }
+};
+
+const safeSaveModelCache = (store: ModelCacheStore) => {
+  try {
+    localStorage.setItem(MODEL_CACHE_STORAGE_KEY, JSON.stringify(store));
+  } catch {
+    // ignore cache persistence failures
+  }
+};
+
 const ApiSettings: React.FC<ApiSettingsProps> = ({
   config,
   setConfig,
@@ -184,6 +245,28 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
   const [isPresetModalOpen, setIsPresetModalOpen] = useState(false);
   const [presetNameInput, setPresetNameInput] = useState('');
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
+  const normalizedEndpoint = normalizeEndpoint(config.endpoint);
+  const modelCacheKey = buildModelCacheKey(config.provider, normalizedEndpoint, config.apiKey);
+
+  useEffect(() => {
+    if (!modelCacheKey) {
+      setAvailableModels([]);
+      setFetchStatus('IDLE');
+      return;
+    }
+
+    const cacheStore = safeReadModelCache();
+    const cacheEntry = cacheStore[modelCacheKey];
+    if (!cacheEntry || cacheEntry.models.length === 0) {
+      setAvailableModels([]);
+      setFetchStatus('IDLE');
+      return;
+    }
+
+    setAvailableModels(cacheEntry.models);
+    setFetchStatus('SUCCESS');
+    setConfig((prev) => (prev.model ? prev : { ...prev, model: cacheEntry.models[0] }));
+  }, [modelCacheKey, setConfig]);
 
   const handleProviderChange = (val: string) => {
     const provider = val as ApiProvider;
@@ -210,7 +293,7 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
 
     try {
       let models: string[] = [];
-      const endpoint = config.endpoint.replace(/\/+$/, ''); // Remove trailing slash
+      const endpoint = normalizedEndpoint;
 
       if (config.provider === 'GEMINI') {
         // Google Gemini REST API
@@ -256,17 +339,28 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
         }
       }
 
-      if (models.length === 0) {
+      const normalizedModels = normalizeModelList(models);
+
+      if (normalizedModels.length === 0) {
         throw new Error("API 返回了空模型列表");
       }
 
-      setAvailableModels(models);
+      if (modelCacheKey) {
+        const cacheStore = safeReadModelCache();
+        cacheStore[modelCacheKey] = {
+          models: normalizedModels,
+          updatedAt: Date.now(),
+        };
+        safeSaveModelCache(cacheStore);
+      }
+
+      setAvailableModels(normalizedModels);
       setFetchStatus('SUCCESS');
       
       // Auto-select first model if valid AND currently no model selected.
       // If a model is already selected (e.g. manually typed or from preset), keep it.
-      if (!config.model && models.length > 0) {
-        setConfig(prev => ({ ...prev, model: models[0] }));
+      if (!config.model && normalizedModels.length > 0) {
+        setConfig(prev => ({ ...prev, model: normalizedModels[0] }));
       }
 
     } catch (err: any) {
@@ -330,8 +424,26 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
 
   const loadPreset = (preset: ApiPreset) => {
     setConfig({ ...preset.config });
-    setFetchStatus('IDLE');
-    setAvailableModels([]); // Reset models as we didn't fetch for this preset yet
+    const presetCacheKey = buildModelCacheKey(
+      preset.config.provider,
+      preset.config.endpoint,
+      preset.config.apiKey
+    );
+    if (!presetCacheKey) {
+      setFetchStatus('IDLE');
+      setAvailableModels([]);
+      return;
+    }
+
+    const cacheEntry = safeReadModelCache()[presetCacheKey];
+    if (!cacheEntry || cacheEntry.models.length === 0) {
+      setFetchStatus('IDLE');
+      setAvailableModels([]);
+      return;
+    }
+
+    setFetchStatus('SUCCESS');
+    setAvailableModels(cacheEntry.models);
   };
 
   const deletePreset = (id: string) => {

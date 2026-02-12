@@ -913,6 +913,12 @@ const App: React.FC = () => {
             activeBook={activeBook}
             safeAreaTop={manualSafeAreaTop}
             safeAreaBottom={manualSafeAreaBottom}
+            apiConfig={apiConfig}
+            personas={personas}
+            activePersonaId={activePersonaId}
+            characters={characters}
+            activeCharacterId={activeCharacterId}
+            worldBookEntries={worldBookEntries}
           />
         </div>
       </div>

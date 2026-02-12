@@ -435,7 +435,7 @@ const Settings: React.FC<SettingsProps> = ({
 
           {/* Auto Parse Toggle */}
           <div className="p-3 flex items-center justify-between">
-             <span className={`text-sm font-bold ml-2 ${headingClass}`}>主动解析高亮内容</span>
+             <span className={`text-sm font-bold ml-2 ${headingClass}`}>主动高亮内容</span>
              {renderToggle(appSettings.autoParseEnabled, () => updateSetting('autoParseEnabled', !appSettings.autoParseEnabled))}
           </div>
 

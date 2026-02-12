@@ -267,6 +267,20 @@
         transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease;
       }
 
+      @keyframes reader-typing-breath {
+        0%,
+        100% {
+          opacity: 0.45;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+
+      .reader-typing-breath {
+        animation: reader-typing-breath 1.4s ease-in-out infinite;
+      }
+
       /* Card press feedback for clickable book cards */
       .app-card-press {
         transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 160ms ease, filter 160ms ease;

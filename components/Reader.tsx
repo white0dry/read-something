@@ -12,26 +12,32 @@ import {
   MoreHorizontal,
   RotateCcw,
   Save,
-  Send,
-  Sparkles,
   Type,
 } from 'lucide-react';
 import {
+  ApiConfig,
   Book,
   Chapter,
-  Message,
   ReaderBookState,
   ReaderFontState,
   ReaderHighlightRange,
   ReaderPositionState,
   ReaderSessionSnapshot,
 } from '../types';
+import { Character, Persona, WorldBookEntry } from './settings/types';
 import { getBookContent, saveBookReaderState } from '../utils/bookContentStorage';
+import ReaderMessagePanel from './ReaderMessagePanel';
 
 interface ReaderProps {
   onBack: (snapshot?: ReaderSessionSnapshot) => void;
   isDarkMode: boolean;
   activeBook: Book | null;
+  apiConfig: ApiConfig;
+  personas: Persona[];
+  activePersonaId: string | null;
+  characters: Character[];
+  activeCharacterId: string | null;
+  worldBookEntries: WorldBookEntry[];
   safeAreaTop?: number;
   safeAreaBottom?: number;
 }
@@ -88,7 +94,6 @@ type CaretDocument = Document & {
 const FLOATING_PANEL_TRANSITION_MS = 220;
 const HIGHIGHTER_CLICK_DELAY_MS = 220;
 const TYPOGRAPHY_COLOR_EDITOR_TRANSITION_MS = 180;
-const AI_FAB_OPEN_DELAY_MS = 120;
 const READER_APPEARANCE_STORAGE_KEY = 'app_reader_appearance';
 const DEFAULT_HIGHLIGHT_COLOR = '#FFE066';
 const PRESET_HIGHLIGHT_COLORS = ['#FFE066', '#FFD6A5', '#FFADAD', '#C7F9CC', '#A0C4FF', '#D7B5FF'];
@@ -471,10 +476,19 @@ const safeReleasePointerCapture = (element: PointerCaptureElement, pointerId: nu
   }
 };
 
-const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAreaTop = 0, safeAreaBottom = 0 }) => {
-  const [isAiPanelOpen, setIsAiPanelOpen] = useState(true);
-  const [isAiFabOpening, setIsAiFabOpening] = useState(false);
-  const [unreadMessageCount, setUnreadMessageCount] = useState(0);
+const Reader: React.FC<ReaderProps> = ({
+  onBack,
+  isDarkMode,
+  activeBook,
+  apiConfig,
+  personas,
+  activePersonaId,
+  characters,
+  activeCharacterId,
+  worldBookEntries,
+  safeAreaTop = 0,
+  safeAreaBottom = 0,
+}) => {
   const [activeFloatingPanel, setActiveFloatingPanel] = useState<FloatingPanel>('none');
   const [closingFloatingPanel, setClosingFloatingPanel] = useState<FloatingPanel | null>(null);
   const [isHighlightMode, setIsHighlightMode] = useState(false);
@@ -486,15 +500,6 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
   const [pendingHighlightRange, setPendingHighlightRange] = useState<TextHighlightRange | null>(null);
   const [isReaderStateHydrated, setIsReaderStateHydrated] = useState(false);
   const [hydratedBookId, setHydratedBookId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: '1',
-      sender: 'ai',
-      text: 'I am your reading assistant. Ask about plot, character, or details anytime.',
-      timestamp: new Date(),
-    },
-  ]);
-  const [inputText, setInputText] = useState('');
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [selectedChapterIndex, setSelectedChapterIndex] = useState<number | null>(null);
   const [bookText, setBookText] = useState('');
@@ -514,7 +519,6 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
   const [closingTypographyColorEditor, setClosingTypographyColorEditor] = useState<TypographyColorKind | null>(null);
   const [isReaderAppearanceHydrated, setIsReaderAppearanceHydrated] = useState(false);
 
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const readerScrollRef = useRef<HTMLDivElement>(null);
   const readerScrollbarTrackRef = useRef<HTMLDivElement>(null);
   const readerArticleRef = useRef<HTMLElement>(null);
@@ -530,12 +534,10 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
   const boundaryArmedAtRef = useRef(0);
   const chapterTransitionTimersRef = useRef<number[]>([]);
   const chapterTransitioningRef = useRef(false);
-  const isAiPanelOpenRef = useRef(isAiPanelOpen);
   const floatingPanelTimerRef = useRef<number | null>(null);
   const typographyColorEditorTimerRef = useRef<number | null>(null);
   const persistReaderStateTimerRef = useRef<number | null>(null);
   const highlighterClickTimerRef = useRef<number | null>(null);
-  const aiFabOpenTimerRef = useRef<number | null>(null);
   const fontObjectUrlsRef = useRef<string[]>([]);
   const fontLinkNodesRef = useRef<HTMLLinkElement[]>([]);
   const highlightDragRef = useRef<{ active: boolean; pointerId: number | null; startIndex: number | null }>({
@@ -556,14 +558,6 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
   const isHighlighterPanelOpen = activeFloatingPanel === 'highlighter';
   const isTypographyPanelOpen = activeFloatingPanel === 'typography';
   const isFloatingPanelVisible = activeFloatingPanel !== 'none';
-
-  const scrollMessagesToBottom = (behavior: ScrollBehavior = 'auto') => {
-    if (!messagesContainerRef.current) return;
-    messagesContainerRef.current.scrollTo({
-      top: messagesContainerRef.current.scrollHeight,
-      behavior,
-    });
-  };
 
   const refreshReaderScrollbar = () => {
     const scroller = readerScrollRef.current;
@@ -844,22 +838,6 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
   };
 
   useEffect(() => {
-    isAiPanelOpenRef.current = isAiPanelOpen;
-    if (isAiPanelOpen) {
-      setUnreadMessageCount(0);
-      setIsAiFabOpening(false);
-    }
-  }, [isAiPanelOpen]);
-
-  useEffect(() => {
-    if (!isAiPanelOpen) return;
-    const rafId = window.requestAnimationFrame(() => {
-      scrollMessagesToBottom('smooth');
-    });
-    return () => window.cancelAnimationFrame(rafId);
-  }, [messages, isAiPanelOpen]);
-
-  useEffect(() => {
     let cancelled = false;
 
     const loadBookContent = async () => {
@@ -1057,10 +1035,6 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
       }
       if (highlighterClickTimerRef.current) {
         window.clearTimeout(highlighterClickTimerRef.current);
-      }
-      if (aiFabOpenTimerRef.current) {
-        window.clearTimeout(aiFabOpenTimerRef.current);
-        aiFabOpenTimerRef.current = null;
       }
       fontObjectUrlsRef.current.forEach(url => {
         URL.revokeObjectURL(url);
@@ -2033,63 +2007,6 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
     setFontPanelMessage('\u5df2\u6062\u590d\u9ed8\u8ba4\u6b63\u6587\u6837\u5f0f');
   };
 
-  const handleSimulateAiMessage = () => {
-    if (!isAiPanelOpenRef.current) {
-      setUnreadMessageCount(prev => Math.min(99, prev + 1));
-    }
-
-    const newMsg: Message = {
-      id: Date.now().toString(),
-      sender: 'ai',
-      text: 'This passage has a key emotional turn. Check context before and after.',
-      timestamp: new Date(),
-    };
-
-    setMessages(prev => [...prev, newMsg]);
-  };
-
-  const handleSendMessage = () => {
-    if (!inputText.trim()) return;
-
-    const userMsg: Message = {
-      id: Date.now().toString(),
-      sender: 'user',
-      text: inputText,
-      timestamp: new Date(),
-    };
-
-    setMessages(prev => [...prev, userMsg]);
-    setInputText('');
-
-    window.setTimeout(() => {
-      const aiMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        sender: 'ai',
-        text: 'Got it. I can keep breaking down this section for you.',
-        timestamp: new Date(),
-      };
-      setMessages(prev => [...prev, aiMsg]);
-      if (!isAiPanelOpenRef.current) {
-        setUnreadMessageCount(prev => Math.min(99, prev + 1));
-      }
-    }, 800);
-  };
-
-  const handleOpenAiPanelFromFab = () => {
-    if (isAiPanelOpen || isAiFabOpening) return;
-
-    setIsAiFabOpening(true);
-    if (aiFabOpenTimerRef.current) {
-      window.clearTimeout(aiFabOpenTimerRef.current);
-    }
-
-    aiFabOpenTimerRef.current = window.setTimeout(() => {
-      setIsAiPanelOpen(true);
-      setIsAiFabOpening(false);
-      aiFabOpenTimerRef.current = null;
-    }, AI_FAB_OPEN_DELAY_MS);
-  };
-
   const buildReaderSessionSnapshot = (): ReaderSessionSnapshot | null => {
     if (!activeBook?.id) return null;
 
@@ -2640,10 +2557,6 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
           onTouchStart={handleReaderTouchStart}
           onTouchMove={handleReaderTouchMove}
           onTouchEnd={handleReaderTouchEnd}
-          onClick={() => {
-            if (isHighlightMode) return;
-            if (Math.random() > 0.7) handleSimulateAiMessage();
-          }}
         >
           <article
             ref={readerArticleRef}
@@ -2709,100 +2622,21 @@ const Reader: React.FC<ReaderProps> = ({ onBack, isDarkMode, activeBook, safeAre
         </div>
       </div>
 
-      {!isAiPanelOpen && (
-        <button
-          onClick={handleOpenAiPanelFromFab}
-          className={`reader-ai-fab absolute bottom-6 right-6 w-12 h-12 neu-btn rounded-full z-20 text-rose-400 ${
-            isAiFabOpening ? 'neu-btn-active' : ''
-          }`}
-        >
-          <Sparkles size={20} />
-          <span
-            className={`reader-ai-fab-badge absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full text-[10px] leading-none font-bold flex items-center justify-center ${
-              unreadMessageCount > 0 ? 'opacity-100 scale-100' : 'opacity-0 scale-50'
-            } ${isDarkMode ? 'border border-slate-700 text-white' : 'border border-white/70 text-white'}`}
-            style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }}
-            aria-hidden={unreadMessageCount <= 0}
-          >
-            {unreadMessageCount > 0 ? unreadMessageCount : ''}
-          </span>
-        </button>
-      )}
-
-      <div
-        className={`absolute bottom-0 left-0 right-0 h-[40vh] transition-[transform,opacity] duration-500 ease-in-out z-30 ${
-          isAiPanelOpen ? 'translate-y-0 opacity-100' : 'translate-y-full opacity-0 pointer-events-none'
-        } ${isDarkMode ? 'bg-[#2d3748] rounded-t-3xl shadow-[0_-5px_20px_rgba(0,0,0,0.4)]' : 'neu-flat rounded-t-3xl'}`}
-        style={{ boxShadow: isDarkMode ? '' : '0 -10px 20px -5px rgba(163,177,198, 0.4)' }}
-      >
-        <div className="h-8 flex items-center justify-center cursor-pointer opacity-60 hover:opacity-100" onClick={() => setIsAiPanelOpen(false)}>
-          <div className={`w-12 h-1.5 rounded-full ${isDarkMode ? 'bg-slate-600' : 'bg-slate-300'}`} />
-        </div>
-
-        <div className="flex flex-col h-[calc(100%-2rem)]">
-          <div className="px-6 pb-2 flex justify-between items-center mx-2">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-full neu-pressed flex items-center justify-center text-[10px] text-rose-400 font-bold border-2 border-transparent">
-                AI
-              </div>
-              <span className={`text-xs font-bold uppercase tracking-wider ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                {'\u5267\u60c5\u5206\u6790\u52a9\u624b'}
-              </span>
-            </div>
-            <button onClick={() => setIsAiPanelOpen(false)} className="w-8 h-8 neu-btn rounded-full text-slate-400 hover:text-slate-600">
-              <ChevronDown size={16} />
-            </button>
-          </div>
-
-          <div ref={messagesContainerRef} className="reader-scroll-panel flex-1 overflow-y-auto p-4 space-y-4 px-6" style={{ overflowAnchor: 'none' }}>
-            {messages.map(msg => (
-              <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div
-                  className={`max-w-[85%] px-5 py-3 text-sm leading-relaxed ${
-                    msg.sender === 'user'
-                      ? isDarkMode
-                        ? 'bg-rose-500 text-white rounded-2xl rounded-br-none shadow-md'
-                        : 'bg-rose-400 text-white rounded-2xl rounded-br-none shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
-                      : isDarkMode
-                      ? 'bg-[#1a202c] text-slate-300 rounded-2xl rounded-bl-none shadow-md'
-                      : 'neu-flat text-slate-700 rounded-2xl rounded-bl-none'
-                  }`}
-                >
-                  {msg.text}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="p-4 pb-6">
-            <div className={`flex items-center gap-3 rounded-full px-2 py-2 ${isDarkMode ? 'bg-[#1a202c] shadow-inner' : 'neu-pressed'}`}>
-              <input
-                type="text"
-                value={inputText}
-                onChange={e => setInputText(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleSendMessage()}
-                placeholder={'\u8be2\u95ee\u5173\u4e8e\u5267\u60c5\u3001\u4eba\u7269\u7684\u5185\u5bb9...'}
-                className={`flex-1 bg-transparent outline-none text-sm min-w-0 px-4 ${
-                  isDarkMode ? 'text-slate-200 placeholder-slate-600' : 'text-slate-700'
-                }`}
-              />
-              <button
-                onClick={handleSendMessage}
-                disabled={!inputText.trim()}
-                className={`p-2 rounded-full transition-all ${
-                  inputText.trim()
-                    ? isDarkMode
-                      ? 'bg-rose-400 text-white'
-                      : 'neu-flat text-rose-400 active:scale-95'
-                    : 'text-slate-400 opacity-50'
-                }`}
-              >
-                <Send size={18} />
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+      <ReaderMessagePanel
+        isDarkMode={isDarkMode}
+        apiConfig={apiConfig}
+        activeBook={activeBook}
+        personas={personas}
+        activePersonaId={activePersonaId}
+        characters={characters}
+        activeCharacterId={activeCharacterId}
+        worldBookEntries={worldBookEntries}
+        chapters={chapters}
+        bookText={bookText}
+        highlightRangesByChapter={highlightRangesByChapter}
+        readerContentRef={readerScrollRef}
+        getLatestReadingPosition={() => syncReadingPositionRef(Date.now()) || latestReadingPositionRef.current}
+      />
     </div>
   );
 };
