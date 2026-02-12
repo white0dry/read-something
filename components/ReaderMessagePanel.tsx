@@ -86,6 +86,7 @@ const PANEL_GRIP_HEIGHT_PX = 32;
 const DEFAULT_CHAR_IMG = 'https://i.postimg.cc/ZY3jJTK4/56163534-p0.jpg';
 const DEFAULT_USER_NAME = 'User';
 const DEFAULT_CHAR_NAME = 'Char';
+const ACTIVE_AI_GENERATION_KEYS = new Set<string>();
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const compactText = (value: string) => value.replace(/\s+/g, ' ').trim();
@@ -241,6 +242,18 @@ const safeSaveChatStore = (store: ReaderChatStore) => {
   }
 };
 
+const persistConversationMessagesToStore = (conversationKey: string, messages: ChatBubble[]) => {
+  if (!conversationKey) return;
+  const store = safeReadChatStore();
+  const existing = store[conversationKey] || defaultChatBucket();
+  store[conversationKey] = {
+    ...existing,
+    updatedAt: Date.now(),
+    messages,
+  };
+  safeSaveChatStore(store);
+};
+
 const ensureBubbleCount = (items: string[]) => {
   let lines = items.map(compactText).filter(Boolean);
   if (lines.length > 8) lines = lines.slice(0, 8);
@@ -375,6 +388,12 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const pendingDragHeightRef = useRef<number | null>(null);
   const keepBottomRafRef = useRef<number | null>(null);
   const isMountedRef = useRef(true);
+  const currentConversationKeyRef = useRef('');
+  const pendingGenerationRef = useRef<{
+    conversationKey: string;
+    committedMessages: ChatBubble[];
+    remainingMessages: ChatBubble[];
+  } | null>(null);
   const longPressMetaRef = useRef<{ bubbleId: string | null; x: number; y: number }>({
     bubbleId: null,
     x: 0,
@@ -422,10 +441,10 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     };
   }, [activeCharacter, worldBookEntries]);
 
-  const pendingUserMessages = useMemo(
-    () => messages.filter((message) => message.sender === 'user' && !message.sentToAi),
-    [messages]
-  );
+  const canSendToAi = useMemo(() => {
+    const last = messages[messages.length - 1];
+    return Boolean(last && last.sender === 'user');
+  }, [messages]);
 
   const quotedMessage = useMemo(
     () => messages.find((message) => message.id === quotedMessageId) || null,
@@ -518,6 +537,45 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     };
     safeSaveChatStore(store);
   }, [conversationKey, messages, chatHistorySummary, readingPrefixSummaryByBookId, isConversationHydrated]);
+
+  useEffect(() => {
+    const pending = pendingGenerationRef.current;
+    if (!pending || pending.conversationKey === conversationKey) return;
+    persistConversationMessagesToStore(pending.conversationKey, [
+      ...pending.committedMessages,
+      ...pending.remainingMessages,
+    ]);
+    pendingGenerationRef.current = null;
+  }, [conversationKey]);
+
+  useEffect(() => {
+    currentConversationKeyRef.current = conversationKey;
+    setIsAiLoading(ACTIVE_AI_GENERATION_KEYS.has(conversationKey));
+  }, [conversationKey]);
+
+  useEffect(() => {
+    if (!isAiLoading) return;
+    const syncFromStore = () => {
+      const storeBucket = safeReadChatStore()[conversationKey];
+      const storeMessages = Array.isArray(storeBucket?.messages) ? storeBucket.messages : [];
+      if (storeMessages.length > 0) {
+        setMessages((prev) => {
+          if (storeMessages.length <= prev.length) return prev;
+          const prevLastId = prev.length > 0 ? prev[prev.length - 1].id : '';
+          if (prevLastId && !storeMessages.some((item) => item.id === prevLastId)) return prev;
+          return storeMessages;
+        });
+      }
+
+      if (!ACTIVE_AI_GENERATION_KEYS.has(conversationKey)) {
+        setIsAiLoading(false);
+      }
+    };
+
+    syncFromStore();
+    const timer = window.setInterval(syncFromStore, 350);
+    return () => window.clearInterval(timer);
+  }, [conversationKey, isAiLoading]);
 
   const measurePanelBounds = useCallback(() => {
     const vh = getViewportHeight();
@@ -628,6 +686,14 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
+      const pending = pendingGenerationRef.current;
+      if (pending) {
+        persistConversationMessagesToStore(pending.conversationKey, [
+          ...pending.committedMessages,
+          ...pending.remainingMessages,
+        ]);
+        pendingGenerationRef.current = null;
+      }
       if (aiFabOpenTimerRef.current) {
         window.clearTimeout(aiFabOpenTimerRef.current);
       }
@@ -1029,16 +1095,22 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     if (isAiLoading) return;
     const regenerate = options?.regenerate === true;
     const pending = sourceMessages.filter((message) => message.sender === 'user' && !message.sentToAi);
-    if (!regenerate && pending.length === 0) {
+    const lastMessage = sourceMessages[sourceMessages.length - 1] || null;
+    const fallbackLatestUserMessage =
+      !regenerate && pending.length === 0 && lastMessage?.sender === 'user' ? lastMessage : null;
+    const effectivePending = fallbackLatestUserMessage ? [fallbackLatestUserMessage] : pending;
+    if (!regenerate && effectivePending.length === 0) {
       showToast('当前没有待发送的用户消息', 'info');
       return;
     }
 
+    const requestConversationKey = conversationKey;
+    ACTIVE_AI_GENERATION_KEYS.add(requestConversationKey);
     setIsAiLoading(true);
     setContextMenu(null);
 
     try {
-      const prompt = buildAiPrompt(sourceMessages, pending, regenerate);
+      const prompt = buildAiPrompt(sourceMessages, effectivePending, regenerate);
       const rawReply = await callAiModel(prompt);
       const bubbleLines = normalizeAiBubbleLines(rawReply);
       const generationId = `gen-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -1056,29 +1128,64 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         };
       });
 
-      const pendingIds = new Set(pending.map((item) => item.id));
+      const pendingIds = new Set(effectivePending.map((item) => item.id));
       const baseMessages = sourceMessages.map((message) =>
         pendingIds.has(message.id) ? { ...message, sentToAi: true } : message
       );
-      if (!isMountedRef.current) return;
+      pendingGenerationRef.current = {
+        conversationKey: requestConversationKey,
+        committedMessages: baseMessages,
+        remainingMessages: [...aiMessages],
+      };
+      if (!isMountedRef.current) {
+        const pendingGeneration = pendingGenerationRef.current;
+        if (pendingGeneration) {
+          persistConversationMessagesToStore(pendingGeneration.conversationKey, [
+            ...pendingGeneration.committedMessages,
+            ...pendingGeneration.remainingMessages,
+          ]);
+          pendingGenerationRef.current = null;
+        }
+        return;
+      }
       setMessages(baseMessages);
       queueKeepLastMessageVisible();
 
       for (let index = 0; index < aiMessages.length; index += 1) {
-        const aiMessage = aiMessages[index];
         await sleep(index === 0 ? AI_REPLY_FIRST_BUBBLE_DELAY_MS : AI_REPLY_BUBBLE_INTERVAL_MS);
-        if (!isMountedRef.current) return;
+        if (!isMountedRef.current) {
+          const pendingGeneration = pendingGenerationRef.current;
+          if (pendingGeneration) {
+            persistConversationMessagesToStore(pendingGeneration.conversationKey, [
+              ...pendingGeneration.committedMessages,
+              ...pendingGeneration.remainingMessages,
+            ]);
+            pendingGenerationRef.current = null;
+          }
+          return;
+        }
+        const aiMessage = aiMessages[index];
+        const pendingGeneration = pendingGenerationRef.current;
+        if (pendingGeneration) {
+          pendingGeneration.remainingMessages.shift();
+          pendingGeneration.committedMessages = [...pendingGeneration.committedMessages, aiMessage];
+        }
         setMessages((prev) => [...prev, aiMessage]);
         queueKeepLastMessageVisible();
         if (!isAiPanelOpenRef.current) {
           setUnreadMessageCount((prev) => Math.min(99, prev + 1));
         }
       }
+      pendingGenerationRef.current = null;
     } catch (error) {
+      pendingGenerationRef.current = null;
       const message = error instanceof Error ? error.message : '发送失败';
       showToast(message, 'error');
     } finally {
-      setIsAiLoading(false);
+      ACTIVE_AI_GENERATION_KEYS.delete(requestConversationKey);
+      if (isMountedRef.current && currentConversationKeyRef.current === requestConversationKey) {
+        setIsAiLoading(ACTIVE_AI_GENERATION_KEYS.has(requestConversationKey));
+      }
     }
   };
 
@@ -1357,7 +1464,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           </div>
 
           <div className="flex flex-col h-[calc(100%-2rem)] min-h-0">
-          <div ref={panelHeaderRef} className="px-6 pb-2 flex items-center mx-2">
+          <div ref={panelHeaderRef} className="px-6 pb-2 flex items-center">
             <div className="flex items-center gap-2 min-w-0">
               <div
                 className={`w-10 h-10 rounded-full overflow-hidden flex items-center justify-center border-2 border-transparent ${
@@ -1425,11 +1532,11 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                       className={`px-5 py-3 text-sm leading-relaxed transition-colors ${
                         isUser
                           ? isDarkMode
-                            ? 'bg-rose-500 text-white rounded-2xl rounded-br-none shadow-md'
-                            : 'bg-rose-400 text-white rounded-2xl rounded-br-none shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
+                            ? 'bg-rose-500 text-white rounded-2xl rounded-br-sm shadow-md'
+                            : 'bg-rose-400 text-white rounded-2xl rounded-br-sm shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
                           : isDarkMode
-                            ? 'bg-[#1a202c] text-slate-300 rounded-2xl rounded-bl-none shadow-md'
-                            : 'neu-flat text-slate-700 rounded-2xl rounded-bl-none'
+                            ? 'bg-[#1a202c] text-slate-300 rounded-2xl rounded-bl-sm shadow-md'
+                            : 'neu-flat text-slate-700 rounded-2xl rounded-bl-sm'
                       } ${isEditingTarget ? 'ring-2 ring-rose-300' : ''}`}
                       onPointerDown={(event) => handleBubblePointerDown(event, message.id)}
                       onPointerMove={handleBubblePointerMove}
@@ -1562,9 +1669,9 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                 <>
                   <button
                     onClick={() => void requestAiReply(messages)}
-                    disabled={isAiLoading || pendingUserMessages.length === 0}
+                    disabled={isAiLoading || !canSendToAi}
                     className={`p-2 rounded-full transition-all ${
-                      !isAiLoading && pendingUserMessages.length > 0
+                      !isAiLoading && canSendToAi
                         ? isDarkMode
                           ? 'bg-rose-400 text-white'
                           : 'neu-flat text-rose-400 active:scale-95'
