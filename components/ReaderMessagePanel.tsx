@@ -1532,11 +1532,11 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                       className={`px-5 py-3 text-sm leading-relaxed transition-colors ${
                         isUser
                           ? isDarkMode
-                            ? 'bg-rose-500 text-white rounded-2xl rounded-br-sm shadow-md'
-                            : 'bg-rose-400 text-white rounded-2xl rounded-br-sm shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
+                            ? 'bg-rose-500 text-white rounded-2xl rounded-br shadow-md'
+                            : 'bg-rose-400 text-white rounded-2xl rounded-br shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
                           : isDarkMode
-                            ? 'bg-[#1a202c] text-slate-300 rounded-2xl rounded-bl-sm shadow-md'
-                            : 'neu-flat text-slate-700 rounded-2xl rounded-bl-sm'
+                            ? 'bg-[#1a202c] text-slate-300 rounded-2xl rounded-bl shadow-md'
+                            : 'neu-flat text-slate-700 rounded-2xl rounded-bl'
                       } ${isEditingTarget ? 'ring-2 ring-rose-300' : ''}`}
                       onPointerDown={(event) => handleBubblePointerDown(event, message.id)}
                       onPointerMove={handleBubblePointerMove}
