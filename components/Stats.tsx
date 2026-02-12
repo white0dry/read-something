@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Cell, LabelList } from 'recharts';
 import { Flame, Clock, BookOpen, Calendar, Search, Check, X, RotateCcw } from 'lucide-react';
 import { GoogleGenAI } from '@google/genai';
@@ -634,13 +634,13 @@ const Stats: React.FC<StatsProps> = ({
     const model = (apiConfig.model || '').trim();
 
     if (!apiKey) {
-      throw new Error('Please set API Key first.');
+      throw new Error('请先设置正确的API Key.');
     }
     if (!endpoint) {
-      throw new Error('Please set API Endpoint first.');
+      throw new Error('请先设置正确的API地址.');
     }
     if (!model) {
-      throw new Error('Please select a model first.');
+      throw new Error('请先设置正确的模型名称.');
     }
 
     if (provider === 'GEMINI') {
@@ -1109,7 +1109,7 @@ const Stats: React.FC<StatsProps> = ({
                       <div className="stats-note-paper">
                         {isStickyNoteLoading ? (
                           <div className="stats-note-loading" role="status" aria-live="polite">
-                            <span className="stats-note-loading-text">书写中</span>
+                            <span className="stats-note-loading-text">奋笔疾书中</span>
                             <span className="stats-note-loading-quill" aria-hidden>
                               <svg viewBox="0 0 121.24 122.88" xmlns="http://www.w3.org/2000/svg">
                                 <path
@@ -1144,7 +1144,7 @@ const Stats: React.FC<StatsProps> = ({
                       className={`h-8 px-3 rounded-full text-[11px] font-bold flex items-center gap-1.5 transition-all active:scale-[0.98] disabled:opacity-55 disabled:cursor-not-allowed ${btnClass} ${isDarkMode ? 'text-slate-200 hover:text-rose-300' : 'text-slate-500 hover:text-rose-500'}`}
                     >
                       <RotateCcw size={12} />
-                      <span>重置便签</span>
+                      <span>重置</span>
                     </button>
                   </div>
                 </div>
