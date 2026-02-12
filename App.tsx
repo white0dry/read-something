@@ -968,6 +968,12 @@ const App: React.FC = () => {
             readingMsByBookId={readingMsByBookId}
             activeCharacterNickname={activeCharacterNickname}
             books={books}
+            apiConfig={apiConfig}
+            personas={personas}
+            activePersonaId={activePersonaId}
+            characters={characters}
+            activeCharacterId={activeCharacterId}
+            worldBookEntries={worldBookEntries}
           />
         )}
         {currentView === AppView.SETTINGS && (

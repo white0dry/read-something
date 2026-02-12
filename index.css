@@ -425,96 +425,139 @@
 
       .stats-note-wrap {
         position: relative;
-        width: min(100%, 15.5rem);
-        border-radius: 1.25rem;
-        padding: 1.25rem 0.75rem 0.75rem;
-        box-shadow:
-          9px 9px 18px rgba(148, 163, 184, 0.28),
-          -9px -9px 18px rgba(255, 255, 255, 0.72),
-          inset 1px 1px 0 rgba(255, 255, 255, 0.55);
-      }
-
-      .dark-mode .stats-note-wrap {
-        box-shadow:
-          9px 9px 18px rgba(15, 23, 42, 0.55),
-          -9px -9px 18px rgba(71, 85, 105, 0.35),
-          inset 1px 1px 0 rgba(255, 255, 255, 0.08);
+        width: min(100%, 15.8rem);
+        height: 100%;
+        max-height: 100%;
+        transform: rotate(-1deg);
       }
 
       .stats-note-tape {
         position: absolute;
-        top: -0.55rem;
-        width: 3.4rem;
-        height: 1rem;
-        border-radius: 0.3rem;
-        opacity: 0.9;
+        top: -0.75rem;
+        left: 50%;
+        transform: translateX(-50%) rotate(2deg);
+        width: 5.1rem;
+        height: 1.5rem;
         pointer-events: none;
-        background: linear-gradient(180deg, rgba(255, 255, 255, 0.62), rgba(241, 245, 249, 0.8));
-        box-shadow: 0 3px 10px rgba(15, 23, 42, 0.16);
-      }
-
-      .dark-mode .stats-note-tape {
-        background: linear-gradient(180deg, rgba(148, 163, 184, 0.35), rgba(100, 116, 139, 0.55));
-        box-shadow: 0 3px 10px rgba(2, 6, 23, 0.5);
-      }
-
-      .stats-note-tape-left {
-        left: 1.15rem;
-        transform: rotate(-14deg);
-      }
-
-      .stats-note-tape-right {
-        right: 1.15rem;
-        transform: rotate(12deg);
+        background: rgba(255, 255, 255, 0.4);
+        backdrop-filter: blur(2px);
+        border-left: 1px dashed rgba(0, 0, 0, 0.1);
+        border-right: 1px dashed rgba(0, 0, 0, 0.1);
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+        z-index: 2;
       }
 
       .stats-note-paper {
-        height: 11.5rem;
-        border-radius: 0.95rem;
-        padding: 0.85rem 0.9rem;
-        background:
-          linear-gradient(180deg, rgba(255, 253, 232, 0.96), rgba(254, 249, 195, 0.92)),
-          repeating-linear-gradient(
-            to bottom,
-            rgba(226, 232, 240, 0.18) 0,
-            rgba(226, 232, 240, 0.18) 1px,
-            transparent 1px,
-            transparent 1.72rem
-          );
+        position: relative;
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        padding: 0.95rem;
+        background: rgba(255, 248, 232, 0.9);
         box-shadow:
-          inset 3px 3px 8px rgba(148, 163, 184, 0.2),
-          inset -3px -3px 8px rgba(255, 255, 255, 0.62),
-          4px 4px 10px rgba(148, 163, 184, 0.2);
-      }
-
-      .dark-mode .stats-note-paper {
-        background:
-          linear-gradient(180deg, rgba(82, 71, 48, 0.96), rgba(70, 61, 42, 0.93)),
-          repeating-linear-gradient(
-            to bottom,
-            rgba(226, 232, 240, 0.16) 0,
-            rgba(226, 232, 240, 0.16) 1px,
-            transparent 1px,
-            transparent 1.72rem
-          );
-        box-shadow:
-          inset 3px 3px 8px rgba(15, 23, 42, 0.36),
-          inset -3px -3px 8px rgba(163, 186, 215, 0.08),
-          4px 4px 10px rgba(15, 23, 42, 0.36);
+          5px 5px 15px rgba(0, 0, 0, 0.1),
+          inset 0 0 30px rgba(255, 255, 255, 0.5);
       }
 
       .stats-note-content {
         height: 100%;
+        width: 100%;
         overflow-y: auto;
-        color: rgba(71, 85, 105, 0.96);
+        padding-top: 0.9rem;
+        color: #444444;
         white-space: pre-wrap;
-        font-size: 0.92rem;
-        line-height: 1.72;
         font-family: "PING FANG SHAO HUA", "PingFang SC", "Microsoft YaHei", sans-serif;
       }
 
-      .dark-mode .stats-note-content {
-        color: rgba(248, 250, 252, 0.86);
+      .stats-note-date {
+        font-size: calc(1.08rem * var(--app-font-scale, 1));
+        font-weight: 700;
+        margin-bottom: 0.55rem;
+        color: #555555;
+        border-bottom: 1px dashed #cccccc;
+        padding-bottom: 0.32rem;
+      }
+
+      .stats-note-body {
+        font-size: calc(0.95rem * var(--app-font-scale, 1));
+        line-height: 1.62;
+        color: #444444;
+        white-space: pre-wrap;
+      }
+
+      .stats-note-loading {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        color: #555555;
+        font-family: "PING FANG SHAO HUA", "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+
+      .stats-note-loading-text {
+        position: relative;
+        font-size: calc(1.22rem * var(--app-font-scale, 1));
+        letter-spacing: 2px;
+        padding-right: 1.6em;
+        line-height: 1.1;
+      }
+
+      .stats-note-loading-text::after {
+        content: '';
+        position: absolute;
+        right: 0;
+        top: 0;
+        width: 1.5em;
+        text-align: left;
+        animation: stats-note-dots 1.5s steps(5, end) infinite;
+      }
+
+      @keyframes stats-note-dots {
+        0%, 20% { content: ''; }
+        40% { content: '.'; }
+        60% { content: '..'; }
+        80%, 100% { content: '...'; }
+      }
+
+      .stats-note-loading-quill {
+        width: 3rem;
+        height: auto;
+        position: absolute;
+        right: 0.25rem;
+        bottom: 0.95rem;
+        transform-origin: 5% 95%;
+        animation: stats-note-writing 1.2s ease-in-out infinite;
+        pointer-events: none;
+      }
+
+      .stats-note-loading-quill svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      .stats-note-quill-path {
+        fill: #444444;
+      }
+
+      @keyframes stats-note-writing {
+        0% {
+          transform: rotate(0deg) translate(0, 0);
+        }
+        25% {
+          transform: rotate(10deg) translate(2px, -2px);
+        }
+        50% {
+          transform: rotate(-5deg) translate(4px, 0);
+        }
+        75% {
+          transform: rotate(5deg) translate(2px, -1px);
+        }
+        100% {
+          transform: rotate(0deg) translate(0, 0);
+        }
       }
 
       input[type='range'].app-range {
