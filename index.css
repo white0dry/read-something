@@ -105,6 +105,24 @@
         background: rgb(148 163 184 / 0.55);
       }
 
+      /* Reader消息面板: always hide scrollbars across browsers/PWA */
+      .reader-message-scroll {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+        scrollbar-gutter: auto;
+      }
+      .reader-message-scroll::-webkit-scrollbar {
+        width: 0 !important;
+        height: 0 !important;
+        display: none;
+      }
+      .reader-message-scroll::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .reader-message-scroll::-webkit-scrollbar-thumb {
+        background: transparent;
+      }
+
       /* Reader正文: keep thumb visible but make track invisible */
       .reader-content-scroll {
         scrollbar-width: none;

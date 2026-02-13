@@ -2714,6 +2714,8 @@ const Reader: React.FC<ReaderProps> = ({
                               : 'rgb(var(--theme-500) / 0.92)',
                             textDecorationThickness: '1.5px',
                             textUnderlineOffset: '0.16em',
+                            textDecorationSkipInk: 'none',
+                            WebkitTextDecorationSkip: 'none',
                           }
                         : {}),
                     }}

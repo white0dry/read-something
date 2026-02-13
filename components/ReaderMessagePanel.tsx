@@ -1719,7 +1719,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
             >
           <div
             ref={messagesContainerRef}
-            className={`reader-scroll-panel flex-1 min-h-0 overflow-y-auto p-4 px-6 transition-transform duration-200 ${
+            className={`reader-scroll-panel reader-message-scroll flex-1 min-h-0 overflow-y-auto p-4 px-6 transition-transform duration-200 ${
               isAiLoading ? '-translate-y-1' : 'translate-y-0'
             }`}
             style={{ overflowAnchor: 'none' }}
