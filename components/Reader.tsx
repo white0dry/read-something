@@ -200,6 +200,24 @@ const getDefaultReaderTypography = (darkMode: boolean): ReaderTypographyStyle =>
   textAlign: 'left',
 });
 
+const splitReaderParagraphs = (raw: string) => {
+  const normalizedText = raw.replace(/\r\n/g, '\n').trim();
+  if (!normalizedText) return [] as string[];
+
+  const splitByBlankLine = normalizedText
+    .split(/\n{2,}/)
+    .map(p => p.trim())
+    .filter(Boolean);
+  if (splitByBlankLine.length > 1) return splitByBlankLine;
+
+  return normalizedText
+    .split('\n')
+    .map(p => p.trim())
+    .filter(Boolean);
+};
+
+const normalizeReaderLayoutText = (raw: string) => splitReaderParagraphs(raw).join('\n');
+
 const sanitizeFontFamily = (raw: string) => {
   const trimmed = raw.trim();
   if (!trimmed) return '';
@@ -1214,22 +1232,14 @@ const Reader: React.FC<ReaderProps> = ({
     };
   }, []);
 
-  const paragraphs = useMemo(() => {
-    const normalizedText = bookText.replace(/\r\n/g, '\n').trim();
-    if (!normalizedText) return [];
+  const paragraphs = useMemo(() => splitReaderParagraphs(bookText), [bookText]);
 
-    const splitByBlankLine = normalizedText
-      .split(/\n{2,}/)
-      .map(p => p.trim())
-      .filter(Boolean);
+  const chapterNormalizedLengths = useMemo(
+    () => chapters.map((chapter) => normalizeReaderLayoutText(chapter.content || '').length),
+    [chapters]
+  );
 
-    if (splitByBlankLine.length > 1) return splitByBlankLine;
-
-    return normalizedText
-      .split('\n')
-      .map(p => p.trim())
-      .filter(Boolean);
-  }, [bookText]);
+  const fullNormalizedLength = useMemo(() => normalizeReaderLayoutText(bookText).length, [bookText]);
 
   const paragraphMeta = useMemo(() => {
     let cursor = 0;
@@ -1694,14 +1704,14 @@ const Reader: React.FC<ReaderProps> = ({
       };
 
       if (chapters.length > 0) {
-        const totalLength = getTotalTextLength(chapters, '');
+        const totalLength = chapterNormalizedLengths.reduce((sum, length) => sum + length, 0);
         const start = clamp(rawStart, 0, totalLength);
         const end = clamp(rawEnd, 0, totalLength);
         if (end <= start) return prev;
 
         let cursor = 0;
-        chapters.forEach((chapter, chapterIndex) => {
-          const chapterLength = chapter.content?.length || 0;
+        chapters.forEach((_, chapterIndex) => {
+          const chapterLength = chapterNormalizedLengths[chapterIndex] || 0;
           const chapterStart = cursor;
           const chapterEnd = chapterStart + chapterLength;
 
@@ -1721,7 +1731,7 @@ const Reader: React.FC<ReaderProps> = ({
         return next;
       }
 
-      const fullLength = Math.max(0, bookText.length);
+      const fullLength = Math.max(0, fullNormalizedLength);
       const start = clamp(rawStart, 0, fullLength);
       const end = clamp(rawEnd, 0, fullLength);
       if (end <= start) return prev;

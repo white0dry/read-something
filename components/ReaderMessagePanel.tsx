@@ -109,6 +109,41 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 const compactText = (value: string) => value.replace(/\s+/g, ' ').trim();
 const minutePad = (value: number) => `${value}`.padStart(2, '0');
 const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+const CONTEXT_VIEWPORT_TAIL_WEIGHT = 0.82;
+
+const normalizeReaderLayoutText = (raw: string) => {
+  const normalizedText = raw.replace(/\r\n/g, '\n').trim();
+  if (!normalizedText) return '';
+
+  const splitByBlankLine = normalizedText
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+  if (splitByBlankLine.length > 1) {
+    return splitByBlankLine.join('\n');
+  }
+
+  return normalizedText
+    .split('\n')
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+    .join('\n');
+};
+
+const toFiniteNonNegativeInt = (value: unknown) => {
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.max(0, Math.floor(numeric));
+};
+
+const scaleOffsetByLength = (offset: number, sourceLength: number, targetLength: number) => {
+  if (targetLength <= 0) return 0;
+  if (sourceLength <= 0) {
+    return clamp(Math.round(offset), 0, targetLength);
+  }
+  const safeOffset = clamp(Math.round(offset), 0, sourceLength);
+  return clamp(Math.round((safeOffset / sourceLength) * targetLength), 0, targetLength);
+};
 
 const getViewportHeight = () => {
   if (typeof window === 'undefined') return 800;
@@ -956,21 +991,86 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const getBubbleDisplayName = (sender: ChatSender) => (sender === 'user' ? userRealName : characterRealName);
 
   const buildReadingContext = (): ReadingContextSnapshot => {
-    const joinedBookText = chapters.length > 0 ? chapters.map((chapter) => chapter.content || '').join('') : bookText;
-    const readingPosition = getLatestReadingPosition();
-    const totalLength = joinedBookText.length;
-    const safeOffset = clamp(readingPosition?.globalCharOffset || 0, 0, totalLength);
-    const start = clamp(safeOffset - 800, 0, safeOffset);
-    const excerpt = joinedBookText.slice(start, safeOffset);
+    const chapterMeta =
+      chapters.length > 0
+        ? chapters.map((chapter) => {
+            const rawText = chapter.content || '';
+            const normalizedText = normalizeReaderLayoutText(rawText);
+            return {
+              rawLength: rawText.length,
+              normalizedLength: normalizedText.length,
+              normalizedText,
+            };
+          })
+        : [];
 
-    const chapterOffsets = new Map<number, number>();
-    if (chapters.length > 0) {
-      let cursor = 0;
-      chapters.forEach((chapter, index) => {
-        chapterOffsets.set(index, cursor);
-        cursor += (chapter.content || '').length;
+    const joinedBookText =
+      chapterMeta.length > 0
+        ? chapterMeta.map((item) => item.normalizedText).join('')
+        : normalizeReaderLayoutText(bookText);
+
+    const chapterRawOffsets = new Map<number, number>();
+    const chapterNormalizedOffsets = new Map<number, number>();
+    if (chapterMeta.length > 0) {
+      let rawCursor = 0;
+      let normalizedCursor = 0;
+      chapterMeta.forEach((chapter, index) => {
+        chapterRawOffsets.set(index, rawCursor);
+        chapterNormalizedOffsets.set(index, normalizedCursor);
+        rawCursor += chapter.rawLength;
+        normalizedCursor += chapter.normalizedLength;
       });
     }
+
+    const readingPosition = getLatestReadingPosition();
+    const totalNormalizedLength = joinedBookText.length;
+    const totalRawLength =
+      chapterMeta.length > 0
+        ? chapterMeta.reduce((sum, chapter) => sum + chapter.rawLength, 0)
+        : (bookText || '').length;
+    const safeRawOffset = clamp(readingPosition?.globalCharOffset || 0, 0, totalRawLength);
+
+    const scroller = readerContentRef.current;
+    const visibleRatio =
+      scroller && scroller.scrollHeight > 1
+        ? clamp(scroller.clientHeight / scroller.scrollHeight, 0, 1)
+        : 0;
+
+    let contextEnd = scaleOffsetByLength(safeRawOffset, totalRawLength, totalNormalizedLength);
+    const chapterIndex = readingPosition?.chapterIndex;
+    const hasValidChapterIndex =
+      chapterMeta.length > 0 &&
+      chapterIndex !== null &&
+      typeof chapterIndex === 'number' &&
+      chapterIndex >= 0 &&
+      chapterIndex < chapterMeta.length;
+
+    if (hasValidChapterIndex) {
+      const chapter = chapterMeta[chapterIndex as number];
+      const chapterRawStart = chapterRawOffsets.get(chapterIndex as number) || 0;
+      const chapterNormalizedStart = chapterNormalizedOffsets.get(chapterIndex as number) || 0;
+      const chapterRawOffset = clamp(readingPosition?.chapterCharOffset || 0, 0, chapter.rawLength);
+      const viewportTailOffset = Math.round(chapter.rawLength * visibleRatio * CONTEXT_VIEWPORT_TAIL_WEIGHT);
+      const shiftedChapterRawOffset = clamp(chapterRawOffset + viewportTailOffset, 0, chapter.rawLength);
+      const shiftedChapterNormalizedOffset = scaleOffsetByLength(
+        shiftedChapterRawOffset,
+        chapter.rawLength,
+        chapter.normalizedLength
+      );
+      contextEnd = clamp(chapterNormalizedStart + shiftedChapterNormalizedOffset, 0, totalNormalizedLength);
+      if (contextEnd <= 0 && totalNormalizedLength > 0) {
+        const fallbackRawGlobal = clamp(chapterRawStart + chapterRawOffset, 0, totalRawLength);
+        contextEnd = scaleOffsetByLength(fallbackRawGlobal, totalRawLength, totalNormalizedLength);
+      }
+    } else if (totalRawLength > 0) {
+      const viewportTailOffset = Math.round(totalRawLength * visibleRatio * CONTEXT_VIEWPORT_TAIL_WEIGHT);
+      const shiftedRawOffset = clamp(safeRawOffset + viewportTailOffset, 0, totalRawLength);
+      contextEnd = scaleOffsetByLength(shiftedRawOffset, totalRawLength, totalNormalizedLength);
+    }
+
+    contextEnd = clamp(contextEnd, 0, totalNormalizedLength);
+    const start = clamp(contextEnd - 800, 0, contextEnd);
+    const excerpt = joinedBookText.slice(start, contextEnd);
 
     const highlightedSnippets: string[] = [];
     Object.entries(highlightRangesByChapter).forEach(([key, ranges]) => {
@@ -978,17 +1078,23 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       let base = 0;
       if (key.startsWith('chapter-')) {
         const chapterIndex = Number(key.replace('chapter-', ''));
-        base = Number.isFinite(chapterIndex) ? chapterOffsets.get(chapterIndex) || 0 : 0;
+        if (!Number.isFinite(chapterIndex) || !chapterNormalizedOffsets.has(chapterIndex)) return;
+        base = chapterNormalizedOffsets.get(chapterIndex) || 0;
+      } else if (key !== 'full') {
+        return;
       }
 
       safeRanges.forEach((range) => {
-        const rangeStart = base + Math.max(0, Math.floor(range.start));
-        const rangeEnd = base + Math.max(0, Math.floor(range.end));
+        const localStart = toFiniteNonNegativeInt((range as ReaderHighlightRange).start);
+        const localEnd = toFiniteNonNegativeInt((range as ReaderHighlightRange).end);
+        if (localStart === null || localEnd === null) return;
+        const rangeStart = base + Math.min(localStart, localEnd);
+        const rangeEnd = base + Math.max(localStart, localEnd);
         if (rangeEnd <= rangeStart) return;
-        if (rangeEnd <= start || rangeStart >= safeOffset) return;
+        if (rangeEnd <= start || rangeStart >= contextEnd) return;
 
-        const clippedStart = clamp(rangeStart, start, safeOffset);
-        const clippedEnd = clamp(rangeEnd, start, safeOffset);
+        const clippedStart = clamp(rangeStart, start, contextEnd);
+        const clippedEnd = clamp(rangeEnd, start, contextEnd);
         if (clippedEnd <= clippedStart) return;
 
         const snippet = compactText(joinedBookText.slice(clippedStart, clippedEnd));
@@ -1002,7 +1108,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       joinedBookText,
       excerpt,
       excerptStart: start,
-      excerptEnd: safeOffset,
+      excerptEnd: contextEnd,
       highlightedSnippets: highlightedSnippets.slice(0, 12),
     };
   };
@@ -1210,6 +1316,9 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         readingContext,
         allowAiUnderlineInThisReply
       );
+      console.groupCollapsed(`[AI Prompt] ${new Date().toLocaleTimeString()}`);
+      console.log(prompt);
+      console.groupEnd();
       const rawReply = await callAiModel(prompt);
       const parsedReply = parseAiReplyPayload(rawReply);
       const bubbleLines = normalizeAiBubbleLines(parsedReply.bubblePayload || rawReply);
