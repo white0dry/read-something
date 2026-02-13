@@ -35,13 +35,77 @@ const READING_MS_BY_BOOK_ID_STORAGE_KEY = 'app_reading_ms_by_book_id';
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   activeCommentsEnabled: false,
-  autoParseEnabled: false,
+  aiProactiveUnderlineEnabled: false,
+  aiProactiveUnderlineProbability: 35,
   commentInterval: 30,
   commentProbability: 50,
   themeColor: DEFAULT_THEME_COLOR,
   fontSizeScale: 1.0,
   safeAreaTop: 0,
   safeAreaBottom: 0
+};
+
+const normalizeAppSettings = (raw: unknown): AppSettings => {
+  const source =
+    raw && typeof raw === 'object'
+      ? (raw as Partial<AppSettings> & { autoParseEnabled?: boolean })
+      : {};
+
+  const activeCommentsEnabled =
+    typeof source.activeCommentsEnabled === 'boolean'
+      ? source.activeCommentsEnabled
+      : DEFAULT_APP_SETTINGS.activeCommentsEnabled;
+  const aiProactiveUnderlineEnabled =
+    typeof source.aiProactiveUnderlineEnabled === 'boolean'
+      ? source.aiProactiveUnderlineEnabled
+      : typeof source.autoParseEnabled === 'boolean'
+        ? source.autoParseEnabled
+        : DEFAULT_APP_SETTINGS.aiProactiveUnderlineEnabled;
+  const aiProactiveUnderlineProbabilityRaw = source.aiProactiveUnderlineProbability;
+  const aiProactiveUnderlineProbability =
+    typeof aiProactiveUnderlineProbabilityRaw === 'number' && Number.isFinite(aiProactiveUnderlineProbabilityRaw)
+      ? Math.min(100, Math.max(0, Math.round(aiProactiveUnderlineProbabilityRaw)))
+      : DEFAULT_APP_SETTINGS.aiProactiveUnderlineProbability;
+  const commentIntervalRaw = source.commentInterval;
+  const commentInterval =
+    typeof commentIntervalRaw === 'number' && Number.isFinite(commentIntervalRaw)
+      ? Math.min(600, Math.max(10, Math.round(commentIntervalRaw)))
+      : DEFAULT_APP_SETTINGS.commentInterval;
+  const commentProbabilityRaw = source.commentProbability;
+  const commentProbability =
+    typeof commentProbabilityRaw === 'number' && Number.isFinite(commentProbabilityRaw)
+      ? Math.min(100, Math.max(0, Math.round(commentProbabilityRaw)))
+      : DEFAULT_APP_SETTINGS.commentProbability;
+  const themeColor =
+    typeof source.themeColor === 'string' && source.themeColor.trim()
+      ? source.themeColor
+      : DEFAULT_APP_SETTINGS.themeColor;
+  const fontSizeScale =
+    typeof source.fontSizeScale === 'number' && Number.isFinite(source.fontSizeScale)
+      ? source.fontSizeScale
+      : DEFAULT_APP_SETTINGS.fontSizeScale;
+  const safeAreaTopRaw = source.safeAreaTop;
+  const safeAreaTop =
+    typeof safeAreaTopRaw === 'number' && Number.isFinite(safeAreaTopRaw)
+      ? Math.max(0, Math.round(safeAreaTopRaw))
+      : DEFAULT_APP_SETTINGS.safeAreaTop;
+  const safeAreaBottomRaw = source.safeAreaBottom;
+  const safeAreaBottom =
+    typeof safeAreaBottomRaw === 'number' && Number.isFinite(safeAreaBottomRaw)
+      ? Math.max(0, Math.round(safeAreaBottomRaw))
+      : DEFAULT_APP_SETTINGS.safeAreaBottom;
+
+  return {
+    activeCommentsEnabled,
+    aiProactiveUnderlineEnabled,
+    aiProactiveUnderlineProbability,
+    commentInterval,
+    commentProbability,
+    themeColor,
+    fontSizeScale,
+    safeAreaTop,
+    safeAreaBottom,
+  };
 };
 
 const BUILT_IN_SAMPLE_COVER_URLS = new Set([
@@ -288,7 +352,7 @@ const App: React.FC = () => {
   const [appSettings, setAppSettings] = useState<AppSettings>(() => {
     try {
       const saved = localStorage.getItem('app_settings');
-      return saved ? { ...DEFAULT_APP_SETTINGS, ...JSON.parse(saved) } : DEFAULT_APP_SETTINGS;
+      return saved ? normalizeAppSettings(JSON.parse(saved)) : DEFAULT_APP_SETTINGS;
     } catch { return DEFAULT_APP_SETTINGS; }
   });
 
@@ -911,6 +975,7 @@ const App: React.FC = () => {
             onBack={handleBackToLibrary}
             isDarkMode={isDarkMode}
             activeBook={activeBook}
+            appSettings={appSettings}
             safeAreaTop={manualSafeAreaTop}
             safeAreaBottom={manualSafeAreaBottom}
             apiConfig={apiConfig}

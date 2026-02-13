@@ -15,9 +15,11 @@ import {
   Type,
 } from 'lucide-react';
 import {
+  AppSettings,
   ApiConfig,
   Book,
   Chapter,
+  ReaderAiUnderlineRange,
   ReaderBookState,
   ReaderFontState,
   ReaderHighlightRange,
@@ -32,6 +34,7 @@ interface ReaderProps {
   onBack: (snapshot?: ReaderSessionSnapshot) => void;
   isDarkMode: boolean;
   activeBook: Book | null;
+  appSettings: AppSettings;
   apiConfig: ApiConfig;
   personas: Persona[];
   activePersonaId: string | null;
@@ -53,6 +56,7 @@ interface RgbValue {
 }
 
 type TextHighlightRange = ReaderHighlightRange;
+type TextAiUnderlineRange = ReaderAiUnderlineRange;
 
 interface ParagraphMeta {
   text: string;
@@ -65,6 +69,7 @@ interface ParagraphSegment {
   end: number;
   text: string;
   color?: string;
+  hasAiUnderline?: boolean;
 }
 
 interface ReaderTypographyStyle {
@@ -360,40 +365,46 @@ const applyHighlightStroke = (ranges: TextHighlightRange[], stroke: TextHighligh
   return mergeSortedHighlightRanges(mergedInput);
 };
 
-const buildParagraphSegments = (paragraph: ParagraphMeta, ranges: TextHighlightRange[]) => {
-  const segments: ParagraphSegment[] = [];
-  let cursor = paragraph.start;
+const buildParagraphSegments = (
+  paragraph: ParagraphMeta,
+  highlightRanges: TextHighlightRange[],
+  aiUnderlineRanges: TextAiUnderlineRange[]
+) => {
+  const boundaries = new Set<number>([paragraph.start, paragraph.end]);
 
-  const pushPlain = (start: number, end: number) => {
-    if (end <= start) return;
-    segments.push({
-      start,
-      end,
-      text: paragraph.text.slice(start - paragraph.start, end - paragraph.start),
-    });
-  };
-
-  const pushHighlight = (start: number, end: number, color: string) => {
-    if (end <= start) return;
-    segments.push({
-      start,
-      end,
-      text: paragraph.text.slice(start - paragraph.start, end - paragraph.start),
-      color,
-    });
-  };
-
-  ranges.forEach(range => {
+  highlightRanges.forEach((range) => {
     if (range.end <= paragraph.start || range.start >= paragraph.end) return;
-    const rangeStart = Math.max(range.start, paragraph.start);
-    const rangeEnd = Math.min(range.end, paragraph.end);
-
-    pushPlain(cursor, rangeStart);
-    pushHighlight(rangeStart, rangeEnd, range.color);
-    cursor = Math.max(cursor, rangeEnd);
+    boundaries.add(Math.max(paragraph.start, range.start));
+    boundaries.add(Math.min(paragraph.end, range.end));
+  });
+  aiUnderlineRanges.forEach((range) => {
+    if (range.end <= paragraph.start || range.start >= paragraph.end) return;
+    boundaries.add(Math.max(paragraph.start, range.start));
+    boundaries.add(Math.min(paragraph.end, range.end));
   });
 
-  pushPlain(cursor, paragraph.end);
+  const orderedBoundaries = Array.from(boundaries).sort((a, b) => a - b);
+  const segments: ParagraphSegment[] = [];
+
+  for (let i = 0; i < orderedBoundaries.length - 1; i += 1) {
+    const start = orderedBoundaries[i];
+    const end = orderedBoundaries[i + 1];
+    if (end <= start) continue;
+
+    const text = paragraph.text.slice(start - paragraph.start, end - paragraph.start);
+    if (!text) continue;
+
+    const highlight = highlightRanges.find((range) => range.start < end && range.end > start);
+    const hasAiUnderline = aiUnderlineRanges.some((range) => range.start < end && range.end > start);
+
+    segments.push({
+      start,
+      end,
+      text,
+      color: highlight?.color,
+      hasAiUnderline,
+    });
+  }
 
   if (segments.length === 0) {
     segments.push({
@@ -480,6 +491,7 @@ const Reader: React.FC<ReaderProps> = ({
   onBack,
   isDarkMode,
   activeBook,
+  appSettings,
   apiConfig,
   personas,
   activePersonaId,
@@ -497,6 +509,7 @@ const Reader: React.FC<ReaderProps> = ({
   const [highlightColorDraft, setHighlightColorDraft] = useState<RgbValue>(() => hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
   const [highlightHexInput, setHighlightHexInput] = useState(DEFAULT_HIGHLIGHT_COLOR);
   const [highlightRangesByChapter, setHighlightRangesByChapter] = useState<Record<string, TextHighlightRange[]>>({});
+  const [aiUnderlineRangesByChapter, setAiUnderlineRangesByChapter] = useState<Record<string, TextAiUnderlineRange[]>>({});
   const [pendingHighlightRange, setPendingHighlightRange] = useState<TextHighlightRange | null>(null);
   const [isReaderStateHydrated, setIsReaderStateHydrated] = useState(false);
   const [hydratedBookId, setHydratedBookId] = useState<string | null>(null);
@@ -846,6 +859,7 @@ const Reader: React.FC<ReaderProps> = ({
         setSelectedChapterIndex(null);
         setBookText('');
         setHighlightRangesByChapter({});
+        setAiUnderlineRangesByChapter({});
         setHighlightColor(DEFAULT_HIGHLIGHT_COLOR);
         setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
         setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
@@ -873,12 +887,14 @@ const Reader: React.FC<ReaderProps> = ({
         const readerState = content?.readerState;
         const persistedColor = readerState?.highlightColor;
         const persistedRanges = readerState?.highlightsByChapter;
+        const persistedAiUnderlines = readerState?.aiUnderlinesByChapter;
         const persistedPosition = normalizeReaderPosition(readerState?.readingPosition);
 
         if (cancelled) return;
 
         setChapters(resolvedChapters);
         setHighlightRangesByChapter(persistedRanges || {});
+        setAiUnderlineRangesByChapter(persistedAiUnderlines || {});
         if (persistedColor && isValidHexColor(persistedColor.toUpperCase())) {
           const normalized = persistedColor.toUpperCase();
           setHighlightColor(normalized);
@@ -958,6 +974,7 @@ const Reader: React.FC<ReaderProps> = ({
           setChapters([]);
           setSelectedChapterIndex(null);
           setHighlightRangesByChapter({});
+          setAiUnderlineRangesByChapter({});
           setHighlightColor(DEFAULT_HIGHLIGHT_COLOR);
           setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
           setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
@@ -1239,6 +1256,10 @@ const Reader: React.FC<ReaderProps> = ({
     return highlightRangesByChapter[highlightStorageKey] || [];
   }, [highlightRangesByChapter, highlightStorageKey]);
 
+  const currentAiUnderlineRanges = useMemo(() => {
+    return aiUnderlineRangesByChapter[highlightStorageKey] || [];
+  }, [aiUnderlineRangesByChapter, highlightStorageKey]);
+
   const renderedHighlightRanges = useMemo(() => {
     if (!pendingHighlightRange || pendingHighlightRange.end <= pendingHighlightRange.start) {
       return currentHighlightRanges;
@@ -1249,9 +1270,9 @@ const Reader: React.FC<ReaderProps> = ({
   const paragraphRenderData = useMemo(() => {
     return paragraphMeta.map(item => ({
       paragraph: item,
-      segments: buildParagraphSegments(item, renderedHighlightRanges),
+      segments: buildParagraphSegments(item, renderedHighlightRanges, currentAiUnderlineRanges),
     }));
-  }, [paragraphMeta, renderedHighlightRanges]);
+  }, [paragraphMeta, renderedHighlightRanges, currentAiUnderlineRanges]);
 
   useEffect(() => {
     setPendingHighlightRange(null);
@@ -1281,6 +1302,7 @@ const Reader: React.FC<ReaderProps> = ({
       const readerState: ReaderBookState = {
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
+        aiUnderlinesByChapter: aiUnderlineRangesByChapter,
         readingPosition,
       };
       saveBookReaderState(activeBook.id, readerState).catch((error) => {
@@ -1300,6 +1322,7 @@ const Reader: React.FC<ReaderProps> = ({
     hydratedBookId,
     highlightColor,
     highlightRangesByChapter,
+    aiUnderlineRangesByChapter,
   ]);
 
   useEffect(() => {
@@ -1645,6 +1668,91 @@ const Reader: React.FC<ReaderProps> = ({
       const existing = prev[highlightStorageKey] || [];
       const merged = applyHighlightStroke(existing, range);
       return { ...prev, [highlightStorageKey]: merged };
+    });
+  };
+
+  const handleAddAiUnderlineRange = (payload: { start: number; end: number; generationId: string }) => {
+    const rawStart = Math.floor(Math.min(payload.start, payload.end));
+    const rawEnd = Math.floor(Math.max(payload.start, payload.end));
+    if (!payload.generationId || rawEnd <= rawStart) return;
+
+    setAiUnderlineRangesByChapter((prev) => {
+      let next = prev;
+      const appendRange = (key: string, range: TextAiUnderlineRange) => {
+        const existing = next[key] || [];
+        const duplicated = existing.some(
+          (item) =>
+            item.start === range.start &&
+            item.end === range.end &&
+            (item.generationId || '') === (range.generationId || '')
+        );
+        if (duplicated) return;
+        if (next === prev) {
+          next = { ...prev };
+        }
+        next[key] = [...existing, range];
+      };
+
+      if (chapters.length > 0) {
+        const totalLength = getTotalTextLength(chapters, '');
+        const start = clamp(rawStart, 0, totalLength);
+        const end = clamp(rawEnd, 0, totalLength);
+        if (end <= start) return prev;
+
+        let cursor = 0;
+        chapters.forEach((chapter, chapterIndex) => {
+          const chapterLength = chapter.content?.length || 0;
+          const chapterStart = cursor;
+          const chapterEnd = chapterStart + chapterLength;
+
+          const overlapStart = Math.max(start, chapterStart);
+          const overlapEnd = Math.min(end, chapterEnd);
+          if (overlapEnd > overlapStart) {
+            appendRange(`chapter-${chapterIndex}`, {
+              start: overlapStart - chapterStart,
+              end: overlapEnd - chapterStart,
+              generationId: payload.generationId,
+            });
+          }
+
+          cursor = chapterEnd;
+        });
+
+        return next;
+      }
+
+      const fullLength = Math.max(0, bookText.length);
+      const start = clamp(rawStart, 0, fullLength);
+      const end = clamp(rawEnd, 0, fullLength);
+      if (end <= start) return prev;
+
+      appendRange('full', { start, end, generationId: payload.generationId });
+      return next;
+    });
+  };
+
+  const handleRollbackAiUnderlineGeneration = (generationId: string) => {
+    const normalizedGenerationId = generationId.trim();
+    if (!normalizedGenerationId) return;
+
+    setAiUnderlineRangesByChapter((prev) => {
+      let changed = false;
+      const next: Record<string, TextAiUnderlineRange[]> = {};
+
+      Object.entries(prev).forEach(([key, ranges]) => {
+        const safeRanges = Array.isArray(ranges) ? ranges : [];
+        const filtered = safeRanges.filter((range) => (range.generationId || '') !== normalizedGenerationId);
+        if (filtered.length !== safeRanges.length) {
+          changed = true;
+        }
+        if (filtered.length > 0) {
+          next[key] = filtered;
+        } else if (safeRanges.length > 0) {
+          changed = true;
+        }
+      });
+
+      return changed ? next : prev;
     });
   };
 
@@ -2041,6 +2149,7 @@ const Reader: React.FC<ReaderProps> = ({
       const readerState: ReaderBookState = {
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
+        aiUnderlinesByChapter: aiUnderlineRangesByChapter,
         readingPosition: sessionSnapshot.readingPosition,
       };
       saveBookReaderState(sessionSnapshot.bookId, readerState).catch((error) => {
@@ -2584,7 +2693,20 @@ const Reader: React.FC<ReaderProps> = ({
                     data-reader-segment="1"
                     data-start={segment.start}
                     className={segment.color ? 'rounded-[0.14em]' : undefined}
-                    style={segment.color ? { backgroundColor: resolveHighlightBackgroundColor(segment.color, isDarkMode) } : undefined}
+                    style={{
+                      ...(segment.color ? { backgroundColor: resolveHighlightBackgroundColor(segment.color, isDarkMode) } : {}),
+                      ...(segment.hasAiUnderline
+                        ? {
+                            textDecorationLine: 'underline',
+                            textDecorationStyle: 'dashed',
+                            textDecorationColor: isDarkMode
+                              ? 'rgb(var(--theme-300) / 0.95)'
+                              : 'rgb(var(--theme-500) / 0.92)',
+                            textDecorationThickness: '1.5px',
+                            textUnderlineOffset: '0.16em',
+                          }
+                        : {}),
+                    }}
                   >
                     {segment.text}
                   </span>
@@ -2626,6 +2748,8 @@ const Reader: React.FC<ReaderProps> = ({
         isDarkMode={isDarkMode}
         apiConfig={apiConfig}
         activeBook={activeBook}
+        aiProactiveUnderlineEnabled={appSettings.aiProactiveUnderlineEnabled}
+        aiProactiveUnderlineProbability={appSettings.aiProactiveUnderlineProbability}
         personas={personas}
         activePersonaId={activePersonaId}
         characters={characters}
@@ -2634,6 +2758,8 @@ const Reader: React.FC<ReaderProps> = ({
         chapters={chapters}
         bookText={bookText}
         highlightRangesByChapter={highlightRangesByChapter}
+        onAddAiUnderlineRange={handleAddAiUnderlineRange}
+        onRollbackAiUnderlineGeneration={handleRollbackAiUnderlineGeneration}
         readerContentRef={readerScrollRef}
         getLatestReadingPosition={() => syncReadingPositionRef(Date.now()) || latestReadingPositionRef.current}
       />

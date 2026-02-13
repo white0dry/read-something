@@ -9,6 +9,12 @@ export interface ReaderHighlightRange {
   color: string;
 }
 
+export interface ReaderAiUnderlineRange {
+  start: number;
+  end: number;
+  generationId?: string;
+}
+
 export interface ReaderTypographyState {
   fontSizePx: number;
   lineHeight: number;
@@ -46,6 +52,7 @@ export interface ReaderSessionSnapshot {
 export interface ReaderBookState {
   highlightColor?: string;
   highlightsByChapter?: Record<string, ReaderHighlightRange[]>;
+  aiUnderlinesByChapter?: Record<string, ReaderAiUnderlineRange[]>;
   typographyStyle?: ReaderTypographyState;
   fontOptions?: ReaderFontState[];
   selectedFontId?: string;
@@ -108,7 +115,8 @@ export interface ApiPreset {
 
 export interface AppSettings {
   activeCommentsEnabled: boolean;
-  autoParseEnabled: boolean;
+  aiProactiveUnderlineEnabled: boolean;
+  aiProactiveUnderlineProbability: number;
   commentInterval: number;
   commentProbability: number;
   themeColor: string; // Hex code

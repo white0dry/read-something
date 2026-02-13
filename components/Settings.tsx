@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+﻿import React, { useState, useRef, useEffect } from 'react';
 import { 
   Settings as SettingsIcon, 
   Book, 
@@ -379,10 +379,10 @@ const Settings: React.FC<SettingsProps> = ({
                <div className={`${sectionIconClass} text-rose-400`}>
                  <UserCircle size={22} />
                </div>
-               <div>
-                 <div className={`font-bold ${headingClass}`}>管理用户人设</div>
-                 <div className="text-xs text-slate-500">已设置 {personas.length} 个</div>
-               </div>
+                <div>
+                  <div className={`font-bold ${headingClass}`}>管理用户人设</div>
+                  <div className="text-xs text-slate-500">已设置 {personas.length} 个</div>
+                </div>
              </div>
              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-slate-400 ${isDarkMode ? cardClass : 'neu-flat'}`}>
                 <ChevronRight size={16} />
@@ -400,10 +400,10 @@ const Settings: React.FC<SettingsProps> = ({
                <div className={`${sectionIconClass} text-rose-400`}>
                  <FeatherIcon size={22} />
                </div>
-               <div>
-                 <div className={`font-bold ${headingClass}`}>管理角色</div>
-                 <div className="text-xs text-slate-500">已设置 {characters.length} 个</div>
-               </div>
+                <div>
+                  <div className={`font-bold ${headingClass}`}>管理角色</div>
+                  <div className="text-xs text-slate-500">已设置 {characters.length} 个</div>
+                </div>
              </div>
              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-slate-400 ${isDarkMode ? cardClass : 'neu-flat'}`}>
                 <ChevronRight size={16} />
@@ -421,10 +421,10 @@ const Settings: React.FC<SettingsProps> = ({
                <div className={`${sectionIconClass} text-rose-400`}>
                  <Book size={22} />
                </div>
-               <div>
-                 <div className={`font-bold ${headingClass}`}>世界书</div>
-                 <div className="text-xs text-slate-500">已收录 {worldBookEntries.length} 条设定</div>
-               </div>
+                <div>
+                  <div className={`font-bold ${headingClass}`}>世界书</div>
+                  <div className="text-xs text-slate-500">已收录 {worldBookEntries.length} 条设定</div>
+                </div>
              </div>
              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-slate-400 ${isDarkMode ? cardClass : 'neu-flat'}`}>
                 <ChevronRight size={16} />
@@ -433,10 +433,53 @@ const Settings: React.FC<SettingsProps> = ({
 
           <div className="w-full h-[1px] bg-slate-300/20 mx-2" />
 
-          {/* Auto Parse Toggle */}
-          <div className="p-3 flex items-center justify-between">
-             <span className={`text-sm font-bold ml-2 ${headingClass}`}>主动高亮内容</span>
-             {renderToggle(appSettings.autoParseEnabled, () => updateSetting('autoParseEnabled', !appSettings.autoParseEnabled))}
+          {/* AI Proactive Underline Toggle & Config */}
+          <div className="p-3">
+             <div className="flex items-center justify-between mb-2">
+                <span className={`text-sm font-bold ml-2 ${headingClass}`}>主动高亮内容</span>
+                {renderToggle(
+                  appSettings.aiProactiveUnderlineEnabled,
+                  () => updateSetting('aiProactiveUnderlineEnabled', !appSettings.aiProactiveUnderlineEnabled)
+                )}
+             </div>
+
+             <div className={`grid transition-[grid-template-rows] duration-300 ease-in-out ${appSettings.aiProactiveUnderlineEnabled ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
+                <div className="overflow-hidden">
+                  <div className="mt-4 pl-4 pr-2 pb-4">
+                    <div className="flex items-center gap-4">
+                      <div className="flex-1">
+                        <div className="flex justify-between text-xs text-slate-500 mb-2 font-medium">
+                          <span>高亮触发概率 (%)</span>
+                        </div>
+                        <div className="relative h-2 w-full">
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            value={appSettings.aiProactiveUnderlineProbability}
+                            onChange={(e) => updateSetting('aiProactiveUnderlineProbability', parseInt(e.target.value))}
+                            className="app-range absolute top-1/2 -translate-y-1/2 left-0 w-full h-5 bg-transparent appearance-none cursor-pointer z-10"
+                          />
+                          <div className={`absolute top-0 left-0 h-full rounded-lg w-full ${isDarkMode ? 'bg-slate-700' : 'bg-black/5'}`} />
+                          <div
+                            className="absolute top-0 left-0 h-full bg-rose-300 rounded-lg pointer-events-none"
+                            style={{ width: `${appSettings.aiProactiveUnderlineProbability}%` }}
+                          />
+                        </div>
+                      </div>
+                      <input
+                        type="number"
+                        value={appSettings.aiProactiveUnderlineProbability}
+                        onChange={(e) => {
+                          const val = Math.min(100, Math.max(0, parseInt(e.target.value) || 0));
+                          updateSetting('aiProactiveUnderlineProbability', val);
+                        }}
+                        className={`w-16 h-8 text-center text-xs rounded-lg outline-none ${inputClass} [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
+                      />
+                    </div>
+                  </div>
+                </div>
+             </div>
           </div>
 
           <div className="w-full h-[1px] bg-slate-300/20 mx-2" />
@@ -457,7 +500,7 @@ const Settings: React.FC<SettingsProps> = ({
                       <div className="flex items-center gap-4">
                         <div className="flex-1">
                           <div className="flex justify-between text-xs text-slate-500 mb-2 font-medium">
-                            <span>检测间隔 (秒)</span>
+                            <span>检测间隔(秒)</span>
                           </div>
                           <div className="relative h-2 w-full">
                             <input 
@@ -549,7 +592,7 @@ const Settings: React.FC<SettingsProps> = ({
                 <div className={`${sectionIconClass} text-slate-400`}>
                   <HardDrive size={22} />
                 </div>
-                <span className={`font-bold ${headingClass}`}>储存分析</span>
+                <span className={`font-bold ${headingClass}`}>存储分析</span>
               </div>
               <div className={`w-8 h-8 rounded-full flex items-center justify-center text-slate-400 ${isDarkMode ? cardClass : 'neu-flat'}`}>
                 <ChevronRight size={16} />
@@ -592,3 +635,4 @@ const Settings: React.FC<SettingsProps> = ({
 };
 
 export default Settings;
+

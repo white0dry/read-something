@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   Pencil,
@@ -19,6 +19,8 @@ interface ReaderMessagePanelProps {
   isDarkMode: boolean;
   apiConfig: ApiConfig;
   activeBook: Book | null;
+  aiProactiveUnderlineEnabled: boolean;
+  aiProactiveUnderlineProbability: number;
   personas: Persona[];
   activePersonaId: string | null;
   characters: Character[];
@@ -27,6 +29,8 @@ interface ReaderMessagePanelProps {
   chapters: Chapter[];
   bookText: string;
   highlightRangesByChapter: Record<string, ReaderHighlightRange[]>;
+  onAddAiUnderlineRange: (payload: { start: number; end: number; generationId: string }) => void;
+  onRollbackAiUnderlineGeneration: (generationId: string) => void;
   readerContentRef: React.RefObject<HTMLDivElement>;
   getLatestReadingPosition: () => ReaderPositionState | null;
 }
@@ -71,6 +75,19 @@ interface ContextMenuState {
 interface PanelBounds {
   min: number;
   max: number;
+}
+
+interface ReadingContextSnapshot {
+  joinedBookText: string;
+  excerpt: string;
+  excerptStart: number;
+  excerptEnd: number;
+  highlightedSnippets: string[];
+}
+
+interface ParsedAiReply {
+  bubblePayload: string;
+  underlineText: string | null;
 }
 
 const CHAT_HISTORY_STORAGE_KEY = 'app_reader_chat_history_v1';
@@ -261,7 +278,7 @@ const ensureBubbleCount = (items: string[]) => {
 
   const raw = compactText(lines.join(' '));
   const splitByPunctuation = raw
-    .split(/[。！？!?；;，,\n]+/)
+    .split(/[。！？!?；;\n]+/)
     .map(compactText)
     .filter(Boolean);
 
@@ -306,10 +323,68 @@ const normalizeAiBubbleLines = (raw: string) => {
   if (marked.length > 0) return ensureBubbleCount(marked);
 
   const plainLines = lines
-    .map((line) => line.replace(/^\d+[\.\)、-]\s*/, ''))
+    .map((line) => line.replace(/^\d+[\.\)．、]\s*/, ''))
     .map(compactText)
     .filter(Boolean);
   return ensureBubbleCount(plainLines.length > 0 ? plainLines : [cleaned]);
+};
+
+const parseAiReplyPayload = (raw: string): ParsedAiReply => {
+  const lines = raw.split(/\r?\n/);
+  let firstUnderline: string | null = null;
+  const bubbleLines: string[] = [];
+
+  lines.forEach((line) => {
+    const matched = line.match(/^\s*\[\u5212\u7ebf\]\s*(.+)\s*$/);
+    if (matched) {
+      if (!firstUnderline) {
+        const text = compactText(matched[1] || '');
+        if (text) firstUnderline = text;
+      }
+      return;
+    }
+    bubbleLines.push(line);
+  });
+
+  return {
+    bubblePayload: bubbleLines.join('\n'),
+    underlineText: firstUnderline,
+  };
+};
+
+const findAiUnderlineRangeInExcerpt = (
+  underlineText: string,
+  context: Pick<ReadingContextSnapshot, 'excerpt' | 'excerptStart'>
+) => {
+  const needle = underlineText.replace(/\s+/g, '');
+  if (!needle) return null;
+
+  const excerpt = context.excerpt || '';
+  if (!excerpt) return null;
+
+  const compactChars: string[] = [];
+  const compactToRawIndex: number[] = [];
+  for (let index = 0; index < excerpt.length; index += 1) {
+    const char = excerpt[index];
+    if (/\s/.test(char)) continue;
+    compactChars.push(char);
+    compactToRawIndex.push(index);
+  }
+  if (compactChars.length === 0) return null;
+
+  const compactExcerpt = compactChars.join('');
+  const compactMatchStart = compactExcerpt.lastIndexOf(needle);
+  if (compactMatchStart < 0) return null;
+
+  const compactMatchEnd = compactMatchStart + needle.length - 1;
+  const rawStart = compactToRawIndex[compactMatchStart];
+  const rawEnd = compactToRawIndex[compactMatchEnd];
+  if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) return null;
+
+  const globalStart = context.excerptStart + rawStart;
+  const globalEnd = context.excerptStart + rawEnd + 1;
+  if (globalEnd <= globalStart) return null;
+  return { start: globalStart, end: globalEnd };
 };
 
 const FeatherIcon = ({ size = 16, className = '' }: { size?: number; className?: string }) => (
@@ -329,6 +404,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   isDarkMode,
   apiConfig,
   activeBook,
+  aiProactiveUnderlineEnabled,
+  aiProactiveUnderlineProbability,
   personas,
   activePersonaId,
   characters,
@@ -337,6 +414,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   chapters,
   bookText,
   highlightRangesByChapter,
+  onAddAiUnderlineRange,
+  onRollbackAiUnderlineGeneration,
   readerContentRef,
   getLatestReadingPosition,
 }) => {
@@ -876,13 +955,13 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
   const getBubbleDisplayName = (sender: ChatSender) => (sender === 'user' ? userRealName : characterRealName);
 
-  const buildReadingContext = () => {
+  const buildReadingContext = (): ReadingContextSnapshot => {
     const joinedBookText = chapters.length > 0 ? chapters.map((chapter) => chapter.content || '').join('') : bookText;
     const readingPosition = getLatestReadingPosition();
     const totalLength = joinedBookText.length;
     const safeOffset = clamp(readingPosition?.globalCharOffset || 0, 0, totalLength);
     const start = clamp(safeOffset - 800, 0, safeOffset);
-    const excerpt = joinedBookText.slice(start, safeOffset).trim();
+    const excerpt = joinedBookText.slice(start, safeOffset);
 
     const chapterOffsets = new Map<number, number>();
     if (chapters.length > 0) {
@@ -920,7 +999,10 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     });
 
     return {
+      joinedBookText,
       excerpt,
+      excerptStart: start,
+      excerptEnd: safeOffset,
       highlightedSnippets: highlightedSnippets.slice(0, 12),
     };
   };
@@ -939,8 +1021,14 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     ].join('\n');
   };
 
-  const buildAiPrompt = (sourceMessages: ChatBubble[], pendingMessages: ChatBubble[], regenerate: boolean) => {
-    const { excerpt, highlightedSnippets } = buildReadingContext();
+  const buildAiPrompt = (
+    sourceMessages: ChatBubble[],
+    pendingMessages: ChatBubble[],
+    readingContext: ReadingContextSnapshot,
+    allowAiUnderlineInThisReply: boolean
+  ) => {
+    const { excerpt, highlightedSnippets } = readingContext;
+    const hasReadableExcerpt = compactText(excerpt).length > 0;
     const activeBookSummary = activeBook?.id ? readingPrefixSummaryByBookId[activeBook.id] || '' : '';
     const recentHistory = sourceMessages
       .slice(-100)
@@ -950,15 +1038,16 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     const latestUserRecord =
       [...sourceMessages].reverse().find((message) => message.sender === 'user')?.promptRecord || '（暂无用户消息）';
     const pendingRecordText =
-      pendingMessages.length > 0
-        ? pendingMessages.map((message) => message.promptRecord).join('\n')
-        : `${latestUserRecord}\n（当前是刷新上一次回复，请基于这条用户消息重写回复）`;
+      pendingMessages.length > 0 ? pendingMessages.map((message) => message.promptRecord).join('\n') : latestUserRecord;
+    const proactiveUnderlineRule = allowAiUnderlineInThisReply
+      ? '【主动划线规则】你可以额外输出 0 或 1 行 `[划线] 文本`。划线文本必须是“当前阅读进度前文 800 字符”中的连续原文片段。若没有明确想重点讨论的句子，则不要输出 `[划线]` 行。'
+      : '【主动划线规则】本轮不要输出任何 `[划线]` 行。';
 
     return [
       `你是角色 ${characterRealName}。`,
-      `你的聊天昵称是 ${characterNickname}。`,
+      `你的聊天显示名是 ${characterNickname}。`,
       `当前共读用户真名：${userRealName}。`,
-      `当前共读用户昵称：${userNickname}。`,
+      `当前共读用户显示名：${userNickname}。`,
       '',
       formatWorldBookSection(characterWorldBookEntries.before, '【世界书-角色定义前】'),
       '【角色设定】',
@@ -969,8 +1058,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       `【书籍前文总结（预留字段）】${activeBookSummary || '（尚未生成）'}`,
       `【聊天前文总结（预留字段）】${chatHistorySummary || '（尚未生成）'}`,
       '',
-      '【当前阅读进度前文800字符，仅前文】',
-      excerpt || '（当前无可用前文）',
+      '【当前阅读进度前文800字符（仅前文）】',
+      hasReadableExcerpt ? excerpt : '（当前无可用前文）',
       '',
       '【前文中荧光笔重点】',
       highlightedSnippets.length > 0 ? highlightedSnippets.map((item) => `- ${item}`).join('\n') : '（暂无）',
@@ -988,12 +1077,13 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       '- 可以省略部分标点，不要写成书面报告。',
       '- 不能剧透用户尚未读到的后文。',
       '- 如果荧光笔重点为“（暂无）”，不要提及任何不存在的划线句子。',
-      regenerate ? '- 这是对上一轮回复的刷新重答，请保持信息一致但表达自然变化。' : '',
+      proactiveUnderlineRule,
       '',
       '【输出格式要求（必须严格遵守）】',
       '- 只输出 3 到 8 行。',
       '- 每一行必须以 [气泡] 开头。',
       '- [气泡] 后面只写一条聊天消息。',
+      '- `[划线]` 行最多 1 行，且可选。',
       '- 不要输出任何解释、标题、编号、代码块。',
       '',
       '[气泡] 示例',
@@ -1091,18 +1181,22 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     return data.choices?.[0]?.message?.content || '';
   };
 
-  const requestAiReply = async (sourceMessages: ChatBubble[], options?: { regenerate?: boolean }) => {
+  const requestAiReply = async (sourceMessages: ChatBubble[]) => {
     if (isAiLoading) return;
-    const regenerate = options?.regenerate === true;
+
     const pending = sourceMessages.filter((message) => message.sender === 'user' && !message.sentToAi);
     const lastMessage = sourceMessages[sourceMessages.length - 1] || null;
-    const fallbackLatestUserMessage =
-      !regenerate && pending.length === 0 && lastMessage?.sender === 'user' ? lastMessage : null;
+    const fallbackLatestUserMessage = pending.length === 0 && lastMessage?.sender === 'user' ? lastMessage : null;
     const effectivePending = fallbackLatestUserMessage ? [fallbackLatestUserMessage] : pending;
-    if (!regenerate && effectivePending.length === 0) {
+    if (effectivePending.length === 0) {
       showToast('当前没有待发送的用户消息', 'info');
       return;
     }
+
+    const readingContext = buildReadingContext();
+    const normalizedUnderlineProbability = clamp(Math.floor(aiProactiveUnderlineProbability), 0, 100);
+    const allowAiUnderlineInThisReply =
+      aiProactiveUnderlineEnabled && Math.random() * 100 < normalizedUnderlineProbability;
 
     const requestConversationKey = conversationKey;
     ACTIVE_AI_GENERATION_KEYS.add(requestConversationKey);
@@ -1110,10 +1204,31 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     setContextMenu(null);
 
     try {
-      const prompt = buildAiPrompt(sourceMessages, effectivePending, regenerate);
+      const prompt = buildAiPrompt(
+        sourceMessages,
+        effectivePending,
+        readingContext,
+        allowAiUnderlineInThisReply
+      );
       const rawReply = await callAiModel(prompt);
-      const bubbleLines = normalizeAiBubbleLines(rawReply);
+      const parsedReply = parseAiReplyPayload(rawReply);
+      const bubbleLines = normalizeAiBubbleLines(parsedReply.bubblePayload || rawReply);
       const generationId = `gen-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+      if (allowAiUnderlineInThisReply && parsedReply.underlineText) {
+        const underlineRange = findAiUnderlineRangeInExcerpt(parsedReply.underlineText, {
+          excerpt: readingContext.excerpt,
+          excerptStart: readingContext.excerptStart,
+        });
+        if (underlineRange) {
+          onAddAiUnderlineRange({
+            start: underlineRange.start,
+            end: underlineRange.end,
+            generationId,
+          });
+        }
+      }
+
       const now = Date.now();
       const aiMessages: ChatBubble[] = bubbleLines.map((line, index) => {
         const timestamp = now + index * 1000;
@@ -1308,12 +1423,13 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     if (sourceMessages.length === 0) return null;
     const last = sourceMessages[sourceMessages.length - 1];
     if (last.sender !== 'character') return null;
+    const generationId = last.generationId || null;
 
     const deleteIds = new Set<string>();
-    if (last.generationId) {
+    if (generationId) {
       for (let index = sourceMessages.length - 1; index >= 0; index -= 1) {
         const message = sourceMessages[index];
-        if (message.sender === 'character' && message.generationId === last.generationId) {
+        if (message.sender === 'character' && message.generationId === generationId) {
           deleteIds.add(message.id);
           continue;
         }
@@ -1331,22 +1447,28 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     }
 
     if (deleteIds.size === 0) return null;
-    return sourceMessages.filter((message) => !deleteIds.has(message.id));
+    return {
+      strippedMessages: sourceMessages.filter((message) => !deleteIds.has(message.id)),
+      generationId,
+    };
   };
 
   const handleRefreshReply = async () => {
     if (isAiLoading) return;
     if (messages.length === 0 || messages[messages.length - 1].sender !== 'character') {
-      showToast('目前没有可以重置的回复', 'info');
+      showToast('目前没有可以重答的回复', 'info');
       return;
     }
-    const stripped = removeLastAiGeneration(messages);
-    if (!stripped) {
-      showToast('目前没有可以重置的回复', 'info');
+    const removed = removeLastAiGeneration(messages);
+    if (!removed) {
+      showToast('目前没有可以重答的回复', 'info');
       return;
     }
-    setMessages(stripped);
-    await requestAiReply(stripped, { regenerate: true });
+    setMessages(removed.strippedMessages);
+    if (removed.generationId) {
+      onRollbackAiUnderlineGeneration(removed.generationId);
+    }
+    await requestAiReply(removed.strippedMessages);
   };
 
   const handleBubblePointerDown = (event: React.PointerEvent<HTMLDivElement>, bubbleId: string) => {
@@ -1757,3 +1879,4 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 };
 
 export default ReaderMessagePanel;
+
