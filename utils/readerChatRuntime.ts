@@ -1,0 +1,420 @@
+export type ChatSender = 'user' | 'character';
+
+export interface ChatQuotePayload {
+  sourceMessageId: string;
+  sender: ChatSender;
+  senderName: string;
+  content: string;
+  timestamp: number;
+}
+
+export interface ChatBubble {
+  id: string;
+  sender: ChatSender;
+  content: string;
+  timestamp: number;
+  promptRecord: string;
+  sentToAi: boolean;
+  quote?: ChatQuotePayload;
+  generationId?: string;
+  editedAt?: number;
+}
+
+export interface ReaderChatBucket {
+  updatedAt: number;
+  messages: ChatBubble[];
+  chatHistorySummary: string;
+  readingPrefixSummaryByBookId: Record<string, string>;
+}
+
+export type ReaderChatStore = Record<string, ReaderChatBucket>;
+export type GenerationMode = 'manual' | 'proactive';
+
+export interface ChatStoreUpdatedEventDetail {
+  conversationKey: string;
+  bucket: ReaderChatBucket;
+  reason?: string;
+}
+
+export interface GenerationStatusEventDetail {
+  conversationKey: string;
+  isLoading: boolean;
+  mode: GenerationMode | null;
+  requestId: string | null;
+  previousMode?: GenerationMode;
+  reason?: string;
+}
+
+interface GenerationRecord {
+  mode: GenerationMode;
+  requestId: string;
+  controller: AbortController;
+}
+
+const DEFAULT_USER_NAME = 'User';
+const DEFAULT_CHAR_NAME = 'Char';
+
+export const CHAT_HISTORY_STORAGE_KEY = 'app_reader_chat_history_v1';
+export const CHAT_STORE_UPDATED_EVENT = 'app-reader-chat-store-updated';
+export const GENERATION_STATUS_EVENT = 'app-reader-chat-generation-status';
+
+const generationRegistry = new Map<string, GenerationRecord>();
+
+export const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+export const compactText = (value: string) => value.replace(/\s+/g, ' ').trim();
+
+const minutePad = (value: number) => `${value}`.padStart(2, '0');
+
+export const formatTimestampMinute = (timestamp: number) => {
+  const date = new Date(timestamp);
+  const yyyy = date.getFullYear();
+  const mm = minutePad(date.getMonth() + 1);
+  const dd = minutePad(date.getDate());
+  const hh = minutePad(date.getHours());
+  const min = minutePad(date.getMinutes());
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
+};
+
+export const buildConversationKey = (bookId: string | null, personaId: string | null, characterId: string | null) =>
+  `book:${bookId || 'none'}::persona:${personaId || 'none'}::character:${characterId || 'none'}`;
+
+export const buildUserPromptRecord = (
+  userRealName: string,
+  content: string,
+  timestamp: number,
+  quote?: ChatQuotePayload
+) => {
+  const messageText = compactText(content);
+  const quoteText = quote
+    ? ` [引用:发送者=${quote.senderName};时间=${formatTimestampMinute(quote.timestamp)};内容=${compactText(quote.content)}]`
+    : '';
+  return `[用户消息][发送者:${userRealName}][时间:${formatTimestampMinute(timestamp)}] ${messageText}${quoteText}`;
+};
+
+export const buildCharacterPromptRecord = (characterRealName: string, content: string, timestamp: number) => {
+  const messageText = compactText(content);
+  return `[角色消息][发送者:${characterRealName}][时间:${formatTimestampMinute(timestamp)}] ${messageText}`;
+};
+
+export const defaultChatBucket = (): ReaderChatBucket => ({
+  updatedAt: Date.now(),
+  messages: [],
+  chatHistorySummary: '',
+  readingPrefixSummaryByBookId: {},
+});
+
+const normalizeQuotePayload = (value: unknown, fallbackTimestamp: number): ChatQuotePayload | undefined => {
+  if (!value || typeof value !== 'object') return undefined;
+  const source = value as Partial<ChatQuotePayload>;
+  if (source.sender !== 'user' && source.sender !== 'character') return undefined;
+  if (typeof source.content !== 'string') return undefined;
+  if (typeof source.senderName !== 'string') return undefined;
+  const content = compactText(source.content);
+  if (!content) return undefined;
+  const timestamp = Number(source.timestamp);
+  if (!Number.isFinite(timestamp)) return undefined;
+  return {
+    sourceMessageId:
+      typeof source.sourceMessageId === 'string' && source.sourceMessageId.trim()
+        ? source.sourceMessageId
+        : `quote-${fallbackTimestamp}`,
+    sender: source.sender,
+    senderName: compactText(source.senderName) || (source.sender === 'user' ? DEFAULT_USER_NAME : DEFAULT_CHAR_NAME),
+    content,
+    timestamp,
+  };
+};
+
+const normalizeChatBubble = (value: unknown): ChatBubble | null => {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Partial<ChatBubble>;
+  if (source.sender !== 'user' && source.sender !== 'character') return null;
+  const content = typeof source.content === 'string' ? compactText(source.content) : '';
+  const timestamp = Number(source.timestamp);
+  if (!content || !Number.isFinite(timestamp)) return null;
+  const quote = normalizeQuotePayload(source.quote, timestamp);
+  return {
+    id: typeof source.id === 'string' && source.id.trim() ? source.id : `${timestamp}-${Math.random()}`,
+    sender: source.sender,
+    content,
+    timestamp,
+    promptRecord:
+      typeof source.promptRecord === 'string' && compactText(source.promptRecord)
+        ? source.promptRecord
+        : source.sender === 'user'
+          ? buildUserPromptRecord(DEFAULT_USER_NAME, content, timestamp, quote)
+          : buildCharacterPromptRecord(DEFAULT_CHAR_NAME, content, timestamp),
+    sentToAi: source.sentToAi !== false,
+    quote,
+    generationId: typeof source.generationId === 'string' ? source.generationId : undefined,
+    editedAt: Number.isFinite(Number(source.editedAt)) ? Number(source.editedAt) : undefined,
+  };
+};
+
+const normalizeReadingPrefixSummaryByBookId = (value: unknown) => {
+  if (!value || typeof value !== 'object') return {};
+  return Object.entries(value as Record<string, unknown>).reduce<Record<string, string>>((acc, [bookId, text]) => {
+    if (!bookId || typeof text !== 'string') return acc;
+    acc[bookId] = text;
+    return acc;
+  }, {});
+};
+
+const normalizeChatBucket = (value: unknown): ReaderChatBucket => {
+  if (!value || typeof value !== 'object') return defaultChatBucket();
+  const source = value as Partial<ReaderChatBucket>;
+  const messages = Array.isArray(source.messages)
+    ? source.messages.map((item) => normalizeChatBubble(item)).filter((item): item is ChatBubble => Boolean(item))
+    : [];
+  return {
+    updatedAt: Number.isFinite(Number(source.updatedAt)) ? Number(source.updatedAt) : Date.now(),
+    messages,
+    chatHistorySummary: typeof source.chatHistorySummary === 'string' ? source.chatHistorySummary : '',
+    readingPrefixSummaryByBookId: normalizeReadingPrefixSummaryByBookId(source.readingPrefixSummaryByBookId),
+  };
+};
+
+const emitChatStoreUpdated = (detail: ChatStoreUpdatedEventDetail) => {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent<ChatStoreUpdatedEventDetail>(CHAT_STORE_UPDATED_EVENT, { detail }));
+};
+
+const emitGenerationStatus = (detail: GenerationStatusEventDetail) => {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent<GenerationStatusEventDetail>(GENERATION_STATUS_EVENT, { detail }));
+};
+
+export const readChatStore = (): ReaderChatStore => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(CHAT_HISTORY_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+
+    const normalized: ReaderChatStore = {};
+    Object.entries(parsed as Record<string, unknown>).forEach(([key, value]) => {
+      if (!key || !value || typeof value !== 'object') return;
+      normalized[key] = normalizeChatBucket(value);
+    });
+    return normalized;
+  } catch {
+    return {};
+  }
+};
+
+export const saveChatStore = (store: ReaderChatStore) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(store));
+  } catch {
+    // ignore localStorage failures (private mode / quota limits)
+  }
+};
+
+export const readConversationBucket = (conversationKey: string): ReaderChatBucket => {
+  if (!conversationKey) return defaultChatBucket();
+  const store = readChatStore();
+  return store[conversationKey] || defaultChatBucket();
+};
+
+export const ensureConversationBucket = (conversationKey: string, legacyConversationKey?: string) => {
+  const store = readChatStore();
+  const legacyBucket =
+    legacyConversationKey && legacyConversationKey !== conversationKey ? store[legacyConversationKey] : undefined;
+  const nextBucket = store[conversationKey] || legacyBucket || defaultChatBucket();
+  let changed = false;
+
+  if (!store[conversationKey]) {
+    store[conversationKey] = nextBucket;
+    changed = true;
+  }
+  if (legacyConversationKey && legacyConversationKey !== conversationKey && legacyBucket) {
+    delete store[legacyConversationKey];
+    changed = true;
+  }
+
+  if (changed) {
+    saveChatStore(store);
+    emitChatStoreUpdated({
+      conversationKey,
+      bucket: nextBucket,
+      reason: legacyBucket ? 'migrate-legacy-key' : 'init-bucket',
+    });
+  }
+
+  return nextBucket;
+};
+
+type ConversationBucketUpdater =
+  | Partial<ReaderChatBucket>
+  | ((existing: ReaderChatBucket) => ReaderChatBucket);
+
+export const persistConversationBucket = (
+  conversationKey: string,
+  updater: ConversationBucketUpdater,
+  reason?: string
+) => {
+  if (!conversationKey) return defaultChatBucket();
+  const store = readChatStore();
+  const existing = store[conversationKey] || defaultChatBucket();
+  const candidate =
+    typeof updater === 'function'
+      ? updater(existing)
+      : {
+          ...existing,
+          ...updater,
+        };
+  const nextBucket = normalizeChatBucket({
+    ...candidate,
+    updatedAt: Date.now(),
+  });
+  store[conversationKey] = nextBucket;
+  saveChatStore(store);
+  emitChatStoreUpdated({
+    conversationKey,
+    bucket: nextBucket,
+    reason,
+  });
+  return nextBucket;
+};
+
+export const persistConversationMessages = (conversationKey: string, messages: ChatBubble[], reason?: string) =>
+  persistConversationBucket(
+    conversationKey,
+    (existing) => ({
+      ...existing,
+      messages,
+    }),
+    reason
+  );
+
+export const getConversationGenerationStatus = (conversationKey: string) => {
+  const current = generationRegistry.get(conversationKey);
+  if (!current) {
+    return {
+      isLoading: false,
+      mode: null as GenerationMode | null,
+      requestId: null as string | null,
+    };
+  }
+  return {
+    isLoading: true,
+    mode: current.mode,
+    requestId: current.requestId,
+  };
+};
+
+export const beginConversationGeneration = (conversationKey: string, mode: GenerationMode) => {
+  if (!conversationKey) {
+    return {
+      status: 'blocked' as const,
+      blockedByMode: null as GenerationMode | null,
+      reason: 'missing-conversation-key',
+    };
+  }
+
+  const existing = generationRegistry.get(conversationKey);
+  if (existing) {
+    if (mode === 'manual' && existing.mode === 'proactive') {
+      existing.controller.abort('manual-priority');
+      generationRegistry.delete(conversationKey);
+      emitGenerationStatus({
+        conversationKey,
+        isLoading: false,
+        mode: null,
+        requestId: null,
+        previousMode: 'proactive',
+        reason: 'aborted-by-manual',
+      });
+    } else if (existing.mode === mode) {
+      return {
+        status: 'duplicate' as const,
+        blockedByMode: existing.mode,
+      };
+    } else {
+      return {
+        status: 'blocked' as const,
+        blockedByMode: existing.mode,
+      };
+    }
+  }
+
+  const requestId = `${mode}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const controller = new AbortController();
+  generationRegistry.set(conversationKey, {
+    mode,
+    requestId,
+    controller,
+  });
+  emitGenerationStatus({
+    conversationKey,
+    isLoading: true,
+    mode,
+    requestId,
+  });
+  return {
+    status: 'started' as const,
+    requestId,
+    controller,
+  };
+};
+
+export const finishConversationGeneration = (
+  conversationKey: string,
+  requestId: string,
+  reason?: string
+) => {
+  const existing = generationRegistry.get(conversationKey);
+  if (!existing) return;
+  if (existing.requestId !== requestId) return;
+  generationRegistry.delete(conversationKey);
+  emitGenerationStatus({
+    conversationKey,
+    isLoading: false,
+    mode: null,
+    requestId: null,
+    previousMode: existing.mode,
+    reason,
+  });
+};
+
+export const abortConversationGeneration = (
+  conversationKey: string,
+  reason = 'aborted'
+) => {
+  const existing = generationRegistry.get(conversationKey);
+  if (!existing) return;
+  existing.controller.abort(reason);
+  generationRegistry.delete(conversationKey);
+  emitGenerationStatus({
+    conversationKey,
+    isLoading: false,
+    mode: null,
+    requestId: null,
+    previousMode: existing.mode,
+    reason,
+  });
+};
+
+export const onChatStoreUpdated = (listener: (detail: ChatStoreUpdatedEventDetail) => void) => {
+  if (typeof window === 'undefined') return () => undefined;
+  const handler = (event: Event) => {
+    const customEvent = event as CustomEvent<ChatStoreUpdatedEventDetail>;
+    if (!customEvent.detail) return;
+    listener(customEvent.detail);
+  };
+  window.addEventListener(CHAT_STORE_UPDATED_EVENT, handler);
+  return () => window.removeEventListener(CHAT_STORE_UPDATED_EVENT, handler);
+};
+
+export const onGenerationStatusChanged = (listener: (detail: GenerationStatusEventDetail) => void) => {
+  if (typeof window === 'undefined') return () => undefined;
+  const handler = (event: Event) => {
+    const customEvent = event as CustomEvent<GenerationStatusEventDetail>;
+    if (!customEvent.detail) return;
+    listener(customEvent.detail);
+  };
+  window.addEventListener(GENERATION_STATUS_EVENT, handler);
+  return () => window.removeEventListener(GENERATION_STATUS_EVENT, handler);
+};

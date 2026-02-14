@@ -285,6 +285,40 @@
         transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease;
       }
 
+      @keyframes reader-bubble-enter-left {
+        from {
+          opacity: 0;
+          transform: translateX(-14px) scale(0.92);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0) scale(1);
+        }
+      }
+
+      @keyframes reader-bubble-enter-right {
+        from {
+          opacity: 0;
+          transform: translateX(14px) scale(0.92);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0) scale(1);
+        }
+      }
+
+      .reader-bubble-enter-left {
+        transform-origin: left bottom;
+        animation: reader-bubble-enter-left 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        will-change: transform, opacity;
+      }
+
+      .reader-bubble-enter-right {
+        transform-origin: right bottom;
+        animation: reader-bubble-enter-right 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        will-change: transform, opacity;
+      }
+
       @keyframes reader-typing-breath {
         0%,
         100% {

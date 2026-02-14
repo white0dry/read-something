@@ -7,7 +7,9 @@ import Settings from './components/Settings';
 import { AppView, Book, ApiConfig, ApiPreset, AppSettings, ReaderSessionSnapshot } from './types';
 import { Persona, Character, WorldBookEntry } from './components/settings/types';
 import { deleteImageByRef, migrateDataUrlToImageRef } from './utils/imageStorage';
-import { compactBookForState, deleteBookContent, migrateInlineBookContent, saveBookContent } from './utils/bookContentStorage';
+import { compactBookForState, deleteBookContent, getBookContent, migrateInlineBookContent, saveBookContent } from './utils/bookContentStorage';
+import { buildConversationKey, readConversationBucket, persistConversationBucket } from './utils/readerChatRuntime';
+import { buildCharacterWorldBookSections, buildReadingContextSnapshot, runConversationGeneration } from './utils/readerAiEngine';
 
 interface Notification {
   show: boolean;
@@ -32,6 +34,8 @@ const DAILY_READING_MS_STORAGE_KEY = 'app_daily_reading_ms';
 const COMPLETED_BOOK_IDS_STORAGE_KEY = 'app_completed_book_ids';
 const COMPLETED_BOOK_REACHED_AT_STORAGE_KEY = 'app_completed_book_reached_at';
 const READING_MS_BY_BOOK_ID_STORAGE_KEY = 'app_reading_ms_by_book_id';
+const PROACTIVE_DELAY_TOLERANCE_MS = 3000;
+const KEEP_ALIVE_SILENT_AUDIO_URL = 'https://files.catbox.moe/qx14i5.mp3';
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   activeCommentsEnabled: false,
@@ -227,6 +231,21 @@ const appendReadingDurationForBook = (
   };
 };
 
+const getMostRecentBook = (books: Book[]) => {
+  const candidates = books.filter((book) => typeof book.lastReadAt === 'number' && book.lastReadAt > 0);
+  if (candidates.length === 0) return null;
+  return [...candidates].sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0))[0] || null;
+};
+
+const isApiConfigReadyForChat = (apiConfig: ApiConfig) => {
+  const apiKey = (apiConfig.apiKey || '').trim();
+  const model = (apiConfig.model || '').trim();
+  const endpoint = (apiConfig.endpoint || '').trim();
+  if (!apiKey || !model) return false;
+  if (apiConfig.provider !== 'GEMINI' && !endpoint) return false;
+  return true;
+};
+
 const App: React.FC = () => {
   const VIEW_TRANSITION_MS = 260;
   const [currentView, setCurrentView] = useState<AppView>(AppView.LIBRARY);
@@ -319,6 +338,10 @@ const App: React.FC = () => {
   const readingSessionBookIdRef = useRef<string | null>(null);
   const dailyReadingMsByDateRef = useRef<Record<string, number>>(dailyReadingMsByDate);
   const readingMsByBookIdRef = useRef<Record<string, number>>(readingMsByBookId);
+  const proactiveTimerRef = useRef<number | null>(null);
+  const proactiveNextPlannedAtRef = useRef<number | null>(null);
+  const keepAliveAudioRef = useRef<HTMLAudioElement | null>(null);
+  const keepAliveUnlockCleanupRef = useRef<(() => void) | null>(null);
 
   // --- PERSISTENT STATE ---
 
@@ -779,9 +802,218 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
+    const clearUnlockListeners = () => {
+      if (!keepAliveUnlockCleanupRef.current) return;
+      keepAliveUnlockCleanupRef.current();
+      keepAliveUnlockCleanupRef.current = null;
+    };
+
+    const stopAudio = () => {
+      const audio = keepAliveAudioRef.current;
+      if (!audio) return;
+      audio.pause();
+      audio.currentTime = 0;
+    };
+
+    if (!appSettings.activeCommentsEnabled) {
+      clearUnlockListeners();
+      stopAudio();
+      return;
+    }
+
+    let audio = keepAliveAudioRef.current;
+    if (!audio) {
+      audio = new Audio(KEEP_ALIVE_SILENT_AUDIO_URL);
+      audio.loop = true;
+      audio.preload = 'auto';
+      audio.playsInline = true;
+      keepAliveAudioRef.current = audio;
+    } else {
+      if (!audio.src || !audio.src.includes(KEEP_ALIVE_SILENT_AUDIO_URL)) {
+        audio.src = KEEP_ALIVE_SILENT_AUDIO_URL;
+      }
+      audio.loop = true;
+      audio.preload = 'auto';
+      audio.playsInline = true;
+    }
+
+    const tryPlayAudio = () => {
+      const currentAudio = keepAliveAudioRef.current;
+      if (!currentAudio) return;
+      const playPromise = currentAudio.play();
+      if (!playPromise || typeof playPromise.catch !== 'function') return;
+      playPromise.catch(() => {
+        if (keepAliveUnlockCleanupRef.current) return;
+        const unlockEvents: Array<keyof WindowEventMap> = ['pointerdown', 'touchstart', 'click', 'keydown'];
+        const onFirstInteraction = () => {
+          const targetAudio = keepAliveAudioRef.current;
+          if (targetAudio) {
+            targetAudio.play().catch(() => undefined);
+          }
+          clearUnlockListeners();
+        };
+        unlockEvents.forEach((eventName) => {
+          window.addEventListener(eventName, onFirstInteraction, { once: true, passive: true, capture: true });
+        });
+        keepAliveUnlockCleanupRef.current = () => {
+          unlockEvents.forEach((eventName) => {
+            window.removeEventListener(eventName, onFirstInteraction, true);
+          });
+        };
+      });
+    };
+
+    tryPlayAudio();
+
+    return () => {
+      if (!appSettings.activeCommentsEnabled) {
+        clearUnlockListeners();
+        stopAudio();
+      }
+    };
+  }, [appSettings.activeCommentsEnabled]);
+
+  useEffect(() => {
+    const clearProactiveTimer = () => {
+      if (proactiveTimerRef.current) {
+        window.clearTimeout(proactiveTimerRef.current);
+        proactiveTimerRef.current = null;
+      }
+      proactiveNextPlannedAtRef.current = null;
+    };
+
+    const intervalMs = Math.max(10000, Math.round(appSettings.commentInterval * 1000));
+    const probability = Math.min(100, Math.max(0, Math.round(appSettings.commentProbability)));
+
+    const scheduleNextCheck = () => {
+      if (!appSettings.activeCommentsEnabled) return;
+      clearProactiveTimer();
+      const plannedAt = Date.now() + intervalMs;
+      proactiveNextPlannedAtRef.current = plannedAt;
+      proactiveTimerRef.current = window.setTimeout(() => {
+        void runProactiveCheck(plannedAt);
+      }, intervalMs);
+    };
+
+    const runProactiveCheck = async (plannedAt: number) => {
+      proactiveTimerRef.current = null;
+      proactiveNextPlannedAtRef.current = null;
+
+      try {
+        if (!appSettings.activeCommentsEnabled) return;
+
+        const delayMs = Date.now() - plannedAt;
+        const maxAcceptedDelay = Math.max(PROACTIVE_DELAY_TOLERANCE_MS, Math.floor(intervalMs * 0.5));
+        if (delayMs > maxAcceptedDelay) return;
+
+        if (Math.random() * 100 >= probability) return;
+
+        if (!activePersonaId || !activeCharacterId) return;
+        if (!isApiConfigReadyForChat(apiConfig)) return;
+
+        const targetBook =
+          currentView === AppView.READER && activeBook?.id
+            ? activeBook
+            : getMostRecentBook(books);
+        if (!targetBook?.id) return;
+
+        const activePersona = personas.find((persona) => persona.id === activePersonaId) || null;
+        const activeCharacter = characters.find((character) => character.id === activeCharacterId) || null;
+        if (!activePersona || !activeCharacter) return;
+
+        const content = await getBookContent(targetBook.id).catch(() => null);
+        const readerState = content?.readerState;
+        const readingContext = buildReadingContextSnapshot({
+          chapters: content?.chapters || [],
+          bookText: content?.fullText || '',
+          highlightRangesByChapter: readerState?.highlightsByChapter || {},
+          readingPosition: readerState?.readingPosition || null,
+          visibleRatio: 0,
+        });
+
+        const conversationKey = buildConversationKey(targetBook.id, activePersonaId, activeCharacterId);
+        const bucket = readConversationBucket(conversationKey);
+        const result = await runConversationGeneration({
+          mode: 'proactive',
+          conversationKey,
+          sourceMessages: bucket.messages,
+          apiConfig,
+          userRealName: activePersona.name?.trim() || 'User',
+          userNickname: activePersona.userNickname?.trim() || activePersona.name?.trim() || 'User',
+          characterRealName: activeCharacter.name?.trim() || 'Char',
+          characterNickname: activeCharacter.nickname?.trim() || activeCharacter.name?.trim() || 'Char',
+          characterDescription: activeCharacter.description?.trim() || '（暂无角色人设）',
+          characterWorldBookEntries: buildCharacterWorldBookSections(activeCharacter, worldBookEntries),
+          activeBookId: targetBook.id,
+          activeBookTitle: targetBook.title || '未选择书籍',
+          chatHistorySummary: bucket.chatHistorySummary || '',
+          readingPrefixSummaryByBookId: bucket.readingPrefixSummaryByBookId || {},
+          readingContext,
+          aiProactiveUnderlineEnabled: appSettings.aiProactiveUnderlineEnabled,
+          aiProactiveUnderlineProbability: appSettings.aiProactiveUnderlineProbability,
+          allowEmptyPending: true,
+        });
+        if (result.status !== 'ok') return;
+
+        persistConversationBucket(
+          conversationKey,
+          (existing) => ({
+            ...existing,
+            messages: [...result.baseMessages, ...result.aiMessages],
+          }),
+          'app-proactive'
+        );
+      } finally {
+        scheduleNextCheck();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (!appSettings.activeCommentsEnabled) return;
+      if (document.visibilityState !== 'visible') return;
+      scheduleNextCheck();
+    };
+
+    clearProactiveTimer();
+    if (appSettings.activeCommentsEnabled) {
+      scheduleNextCheck();
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    return () => {
+      clearProactiveTimer();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [
+    appSettings.activeCommentsEnabled,
+    appSettings.commentInterval,
+    appSettings.commentProbability,
+    appSettings.aiProactiveUnderlineEnabled,
+    appSettings.aiProactiveUnderlineProbability,
+    currentView,
+    activeBook,
+    books,
+    activePersonaId,
+    activeCharacterId,
+    personas,
+    characters,
+    worldBookEntries,
+    apiConfig,
+  ]);
+
+  useEffect(() => {
     return () => {
       if (viewTransitionTimerRef.current) window.clearTimeout(viewTransitionTimerRef.current);
       if (viewTransitionUnlockTimerRef.current) window.clearTimeout(viewTransitionUnlockTimerRef.current);
+      if (proactiveTimerRef.current) window.clearTimeout(proactiveTimerRef.current);
+      if (keepAliveUnlockCleanupRef.current) {
+        keepAliveUnlockCleanupRef.current();
+        keepAliveUnlockCleanupRef.current = null;
+      }
+      if (keepAliveAudioRef.current) {
+        keepAliveAudioRef.current.pause();
+        keepAliveAudioRef.current.currentTime = 0;
+      }
     };
   }, []);
 
