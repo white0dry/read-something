@@ -10,9 +10,12 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { ApiConfig, Book, Chapter, ReaderHighlightRange, ReaderPositionState } from '../types';
+import { ApiConfig, AppSettings, Book, Chapter, ReaderSummaryCard, ReaderHighlightRange, ReaderPositionState } from '../types';
 import { Character, Persona, WorldBookEntry } from './settings/types';
 import ResolvedImage from './ResolvedImage';
+import ReaderMoreSettingsPanel, { ReaderArchiveOption } from './ReaderMoreSettingsPanel';
+import { deleteImageByRef, saveImageFile } from '../utils/imageStorage';
+import { getBookContent, saveBookSummaryState } from '../utils/bookContentStorage';
 import {
   buildCharacterPromptRecord,
   buildConversationKey,
@@ -43,12 +46,16 @@ interface ReaderMessagePanelProps {
   isDarkMode: boolean;
   apiConfig: ApiConfig;
   activeBook: Book | null;
+  appSettings: AppSettings;
+  setAppSettings: React.Dispatch<React.SetStateAction<AppSettings>>;
   aiProactiveUnderlineEnabled: boolean;
   aiProactiveUnderlineProbability: number;
   personas: Persona[];
   activePersonaId: string | null;
+  onSelectPersona: (personaId: string | null) => void;
   characters: Character[];
   activeCharacterId: string | null;
+  onSelectCharacter: (characterId: string | null) => void;
   worldBookEntries: WorldBookEntry[];
   chapters: Chapter[];
   bookText: string;
@@ -57,6 +64,8 @@ interface ReaderMessagePanelProps {
   onRollbackAiUnderlineGeneration: (generationId: string) => void;
   readerContentRef: React.RefObject<HTMLDivElement>;
   getLatestReadingPosition: () => ReaderPositionState | null;
+  isMoreSettingsOpen: boolean;
+  onCloseMoreSettings: () => void;
 }
 
 interface ContextMenuState {
@@ -89,6 +98,35 @@ const CONTEXT_MENU_MARGIN = 8;
 const DEFAULT_CHAR_IMG = 'https://i.postimg.cc/ZY3jJTK4/56163534-p0.jpg';
 const DEFAULT_USER_NAME = 'User';
 const DEFAULT_CHAR_NAME = 'Char';
+const SUMMARY_MODEL_CACHE_STORAGE_KEY = 'app_summary_api_models_cache_v1';
+const SUMMARY_TASK_DEBOUNCE_MS = 3000;
+const SUMMARY_CHAT_PRIORITY = 2;
+const SUMMARY_BOOK_PRIORITY = 1;
+const SUMMARY_MANUAL_BOOST = 10;
+const MESSAGE_TIME_GAP_MS = 60 * 60 * 1000;
+const clampSummary = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+type SummaryTaskKind = 'chat' | 'book';
+type SummaryTriggerKind = 'auto' | 'manual';
+
+interface SummaryTask {
+  id: string;
+  kind: SummaryTaskKind;
+  trigger: SummaryTriggerKind;
+  start: number;
+  end: number;
+  conversationKey: string;
+  createdAt: number;
+}
+
+interface SummaryApiCacheEntry {
+  models: string[];
+  updatedAt: number;
+}
+
+type SummaryApiCacheStore = Record<string, SummaryApiCacheEntry>;
+type FetchState = 'IDLE' | 'LOADING' | 'SUCCESS' | 'ERROR';
+
 const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
 const getViewportHeight = () => {
@@ -109,16 +147,181 @@ const FeatherIcon = ({ size = 16, className = '' }: { size?: number; className?:
   </svg>
 );
 
+const formatBubbleClock = (timestamp: number) =>
+  new Date(timestamp)
+    .toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    })
+    .replace(' ', '');
+
+const aggregateSummaryCardsText = (cards: ReaderSummaryCard[]) =>
+  cards
+    .slice()
+    .sort((a, b) => {
+      if (a.start !== b.start) return a.start - b.start;
+      if (a.end !== b.end) return a.end - b.end;
+      return a.createdAt - b.createdAt;
+    })
+    .map((card) => card.content.trim())
+    .filter(Boolean)
+    .join('\n');
+
+const fingerprintText = (value: string) => {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+};
+
+const normalizeEndpoint = (value: string) => value.trim().replace(/\/+$/, '');
+
+const buildSummaryModelCacheKey = (config: ApiConfig) => {
+  const endpoint = normalizeEndpoint(config.endpoint || '') || 'default';
+  const apiKey = (config.apiKey || '').trim();
+  if (!apiKey) return '';
+  return `${config.provider}::${endpoint}::${fingerprintText(apiKey)}`;
+};
+
+const safeReadSummaryModelCache = (): SummaryApiCacheStore => {
+  try {
+    const raw = localStorage.getItem(SUMMARY_MODEL_CACHE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const next: SummaryApiCacheStore = {};
+    Object.entries(parsed).forEach(([key, value]) => {
+      if (!value || typeof value !== 'object') return;
+      const source = value as Partial<SummaryApiCacheEntry>;
+      const models = Array.isArray(source.models)
+        ? Array.from(new Set(source.models.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean)))
+        : [];
+      if (models.length === 0) return;
+      next[key] = {
+        models,
+        updatedAt: Number.isFinite(Number(source.updatedAt)) ? Number(source.updatedAt) : Date.now(),
+      };
+    });
+    return next;
+  } catch {
+    return {};
+  }
+};
+
+const safeSaveSummaryModelCache = (store: SummaryApiCacheStore) => {
+  try {
+    localStorage.setItem(SUMMARY_MODEL_CACHE_STORAGE_KEY, JSON.stringify(store));
+  } catch {
+    // ignore
+  }
+};
+
+const isSameApiConfig = (left: ApiConfig, right: ApiConfig) =>
+  left.provider === right.provider &&
+  normalizeEndpoint(left.endpoint || '') === normalizeEndpoint(right.endpoint || '') &&
+  (left.apiKey || '').trim() === (right.apiKey || '').trim() &&
+  (left.model || '').trim() === (right.model || '').trim();
+
+const parseConversationKey = (key: string) => {
+  const matched = key.match(/^book:(.+?)::persona:(.+?)::character:(.+)$/);
+  if (!matched) return null;
+  return {
+    bookId: matched[1] === 'none' ? null : matched[1],
+    personaId: matched[2] === 'none' ? null : matched[2],
+    characterId: matched[3] === 'none' ? null : matched[3],
+  };
+};
+
+const callSummaryModel = async (prompt: string, config: ApiConfig) => {
+  const provider = config.provider;
+  const endpoint = normalizeEndpoint(config.endpoint || '');
+  const apiKey = (config.apiKey || '').trim();
+  const model = (config.model || '').trim();
+  if (!apiKey) throw new Error('请先设置总结 API Key');
+  if (!model) throw new Error('请先设置总结模型');
+  if (provider !== 'GEMINI' && !endpoint) throw new Error('请先设置总结 API 地址');
+
+  if (provider === 'GEMINI') {
+    const response = await fetch(
+      `${endpoint}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.4 },
+        }),
+      }
+    );
+    if (!response.ok) throw new Error(`总结请求失败(${response.status})`);
+    const data = await response.json();
+    return (
+      data?.candidates?.[0]?.content?.parts
+        ?.map((part: { text?: string }) => part.text || '')
+        .join('')
+        .trim() || ''
+    );
+  }
+
+  if (provider === 'CLAUDE') {
+    const response = await fetch(`${endpoint}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 320,
+        temperature: 0.4,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!response.ok) throw new Error(`总结请求失败(${response.status})`);
+    const data = await response.json();
+    return (
+      data?.content
+        ?.map((item: { text?: string }) => item.text || '')
+        .join('')
+        .trim() || ''
+    );
+  }
+
+  const response = await fetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.45,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+  });
+  if (!response.ok) throw new Error(`总结请求失败(${response.status})`);
+  const data = await response.json();
+  return data?.choices?.[0]?.message?.content?.trim() || '';
+};
+
 const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   isDarkMode,
   apiConfig,
   activeBook,
+  appSettings,
+  setAppSettings,
   aiProactiveUnderlineEnabled,
   aiProactiveUnderlineProbability,
   personas,
   activePersonaId,
+  onSelectPersona,
   characters,
   activeCharacterId,
+  onSelectCharacter,
   worldBookEntries,
   chapters,
   bookText,
@@ -127,6 +330,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   onRollbackAiUnderlineGeneration,
   readerContentRef,
   getLatestReadingPosition,
+  isMoreSettingsOpen,
+  onCloseMoreSettings,
 }) => {
   const [isAiPanelOpen, setIsAiPanelOpen] = useState(true);
   const [isAiFabOpening, setIsAiFabOpening] = useState(false);
@@ -164,6 +369,15 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const [selectedDeleteIds, setSelectedDeleteIds] = useState<string[]>([]);
   const [chatHistorySummary, setChatHistorySummary] = useState('');
   const [readingPrefixSummaryByBookId, setReadingPrefixSummaryByBookId] = useState<Record<string, string>>({});
+  const [chatSummaryCards, setChatSummaryCards] = useState<ReaderSummaryCard[]>([]);
+  const [chatAutoSummaryLastEnd, setChatAutoSummaryLastEnd] = useState(0);
+  const [bookSummaryCards, setBookSummaryCards] = useState<ReaderSummaryCard[]>([]);
+  const [bookAutoSummaryLastEnd, setBookAutoSummaryLastEnd] = useState(0);
+  const [summaryTaskQueue, setSummaryTaskQueue] = useState<SummaryTask[]>([]);
+  const [summaryTaskRunning, setSummaryTaskRunning] = useState(false);
+  const [summaryApiModels, setSummaryApiModels] = useState<string[]>([]);
+  const [summaryApiFetchState, setSummaryApiFetchState] = useState<FetchState>('IDLE');
+  const [summaryApiFetchError, setSummaryApiFetchError] = useState('');
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isAiPanelOpenRef = useRef(isAiPanelOpen);
@@ -185,6 +399,13 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     committedMessages: ChatBubble[];
     remainingMessages: ChatBubble[];
   } | null>(null);
+  const summaryTaskQueueRef = useRef<SummaryTask[]>([]);
+  const summaryTaskRunningRef = useRef(false);
+  const summaryTaskDebounceRef = useRef<Record<string, number>>({});
+  const chatSummaryCardsRef = useRef<ReaderSummaryCard[]>([]);
+  const bookSummaryCardsRef = useRef<ReaderSummaryCard[]>([]);
+  const chatAutoSummaryLastEndRef = useRef(0);
+  const bookAutoSummaryLastEndRef = useRef(0);
   const longPressMetaRef = useRef<{ bubbleId: string | null; x: number; y: number }>({
     bubbleId: null,
     x: 0,
@@ -237,10 +458,57 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const isManualLoading = activeGenerationMode === 'manual';
   const selectedDeleteIdSet = useMemo(() => new Set(selectedDeleteIds), [selectedDeleteIds]);
   const hiddenBubbleIdSet = useMemo(() => new Set(hiddenBubbleIds), [hiddenBubbleIds]);
+  const readerMoreAppearance = appSettings.readerMore.appearance;
+  const readerMoreFeature = appSettings.readerMore.feature;
+  const summaryApiConfig: ApiConfig = useMemo(
+    () =>
+      readerMoreFeature.summaryApiEnabled
+        ? {
+            provider: readerMoreFeature.summaryApi.provider,
+            endpoint: readerMoreFeature.summaryApi.endpoint,
+            apiKey: readerMoreFeature.summaryApi.apiKey,
+            model: readerMoreFeature.summaryApi.model,
+          }
+        : apiConfig,
+    [
+      readerMoreFeature.summaryApiEnabled,
+      readerMoreFeature.summaryApi.provider,
+      readerMoreFeature.summaryApi.endpoint,
+      readerMoreFeature.summaryApi.apiKey,
+      readerMoreFeature.summaryApi.model,
+      apiConfig,
+    ]
+  );
+  const summaryApiCacheKey = useMemo(() => buildSummaryModelCacheKey(summaryApiConfig), [summaryApiConfig]);
   const visibleMessages = useMemo(
     () => (hiddenBubbleIds.length === 0 ? messages : messages.filter((message) => !hiddenBubbleIdSet.has(message.id))),
     [messages, hiddenBubbleIds.length, hiddenBubbleIdSet]
   );
+  const messageTimeline = useMemo(() => {
+    const items: Array<
+      | { type: 'time'; id: string; timestamp: number }
+      | { type: 'message'; id: string; message: ChatBubble }
+    > = [];
+    const showMessageTime = readerMoreAppearance.showMessageTime;
+    const gapMs = Math.max(MESSAGE_TIME_GAP_MS, (readerMoreAppearance.timeGapMinutes || 60) * 60 * 1000);
+    let prevTimestamp = 0;
+    visibleMessages.forEach((message) => {
+      if (showMessageTime && prevTimestamp > 0 && message.timestamp - prevTimestamp >= gapMs) {
+        items.push({
+          type: 'time',
+          id: `sep-${message.id}`,
+          timestamp: message.timestamp,
+        });
+      }
+      items.push({
+        type: 'message',
+        id: message.id,
+        message,
+      });
+      prevTimestamp = message.timestamp;
+    });
+    return items;
+  }, [visibleMessages, readerMoreAppearance.showMessageTime, readerMoreAppearance.timeGapMinutes]);
   const resolvedPanelHeight = clamp(panelHeightPx, panelBounds.min, panelBounds.max);
 
   const updateHiddenBubbleIds = useCallback((updater: (prev: string[]) => string[]) => {
@@ -249,6 +517,57 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     hiddenBubbleIdsRef.current = next;
     setHiddenBubbleIds(next);
   }, []);
+
+  const updateReaderMoreAppearanceSettings = useCallback(
+    (updater: Partial<AppSettings['readerMore']['appearance']>) => {
+      setAppSettings((prev) => ({
+        ...prev,
+        readerMore: {
+          ...prev.readerMore,
+          appearance: {
+            ...prev.readerMore.appearance,
+            ...updater,
+          },
+        },
+      }));
+    },
+    [setAppSettings]
+  );
+
+  const updateReaderMoreFeatureSettings = useCallback(
+    (updater: Partial<AppSettings['readerMore']['feature']>) => {
+      setAppSettings((prev) => ({
+        ...prev,
+        readerMore: {
+          ...prev.readerMore,
+          feature: {
+            ...prev.readerMore.feature,
+            ...updater,
+          },
+        },
+      }));
+    },
+    [setAppSettings]
+  );
+
+  const updateSummaryApiSettings = useCallback(
+    (updater: Partial<AppSettings['readerMore']['feature']['summaryApi']>) => {
+      setAppSettings((prev) => ({
+        ...prev,
+        readerMore: {
+          ...prev.readerMore,
+          feature: {
+            ...prev.readerMore.feature,
+            summaryApi: {
+              ...prev.readerMore.feature.summaryApi,
+              ...updater,
+            },
+          },
+        },
+      }));
+    },
+    [setAppSettings]
+  );
 
   const showToast = useCallback((text: string, type: 'error' | 'info' = 'info') => {
     if (toastTimerRef.current) {
@@ -261,6 +580,587 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       toastTimerRef.current = null;
     }, 1800);
   }, []);
+
+  const applyChatSummaryCards = useCallback(
+    (nextCards: ReaderSummaryCard[]) => {
+      const safeCards = nextCards
+        .map((card) => ({
+          ...card,
+          start: Math.max(1, Math.floor(card.start)),
+          end: Math.max(Math.floor(card.start), Math.floor(card.end)),
+          content: card.content.trim(),
+          updatedAt: Number.isFinite(card.updatedAt) ? card.updatedAt : Date.now(),
+          createdAt: Number.isFinite(card.createdAt) ? card.createdAt : Date.now(),
+        }))
+        .filter((card) => card.content);
+      const summaryText = aggregateSummaryCardsText(safeCards);
+      setChatSummaryCards(safeCards);
+      setChatHistorySummary(summaryText);
+    },
+    []
+  );
+
+  const applyBookSummaryCards = useCallback(
+    (nextCards: ReaderSummaryCard[]) => {
+      const safeCards = nextCards
+        .map((card) => ({
+          ...card,
+          start: Math.max(1, Math.floor(card.start)),
+          end: Math.max(Math.floor(card.start), Math.floor(card.end)),
+          content: card.content.trim(),
+          updatedAt: Number.isFinite(card.updatedAt) ? card.updatedAt : Date.now(),
+          createdAt: Number.isFinite(card.createdAt) ? card.createdAt : Date.now(),
+        }))
+        .filter((card) => card.content);
+      setBookSummaryCards(safeCards);
+      if (!activeBook?.id) return;
+      const summaryText = aggregateSummaryCardsText(safeCards);
+      setReadingPrefixSummaryByBookId((prev) => ({
+        ...prev,
+        [activeBook.id]: summaryText,
+      }));
+    },
+    [activeBook?.id]
+  );
+
+  const persistBookSummaryLocal = useCallback(
+    (payload: { cards?: ReaderSummaryCard[]; autoLastEnd?: number }) => {
+      if (!activeBook?.id) return;
+      saveBookSummaryState(activeBook.id, {
+        bookSummaryCards: payload.cards,
+        bookAutoSummaryLastEnd: payload.autoLastEnd,
+      }).catch((error) => {
+        console.error('Failed to persist book summary state', error);
+      });
+    },
+    [activeBook?.id]
+  );
+
+  const handleUploadChatBackgroundImage = useCallback(
+    async (file: File) => {
+      try {
+        const imageRef = await saveImageFile(file);
+        const previousRef = appSettings.readerMore.appearance.chatBackgroundImage;
+        updateReaderMoreAppearanceSettings({ chatBackgroundImage: imageRef });
+        if (previousRef && previousRef !== imageRef) {
+          void deleteImageByRef(previousRef).catch(() => undefined);
+        }
+      } catch (error) {
+        console.error('Failed to save chat background image', error);
+        showToast('背景图片保存失败', 'error');
+      }
+    },
+    [appSettings.readerMore.appearance.chatBackgroundImage, updateReaderMoreAppearanceSettings, showToast]
+  );
+
+  const handleSetChatBackgroundFromUrl = useCallback(
+    (url: string) => {
+      updateReaderMoreAppearanceSettings({ chatBackgroundImage: url });
+    },
+    [updateReaderMoreAppearanceSettings]
+  );
+
+  const handleClearChatBackground = useCallback(() => {
+    const previousRef = appSettings.readerMore.appearance.chatBackgroundImage;
+    updateReaderMoreAppearanceSettings({ chatBackgroundImage: '' });
+    if (previousRef) {
+      void deleteImageByRef(previousRef).catch(() => undefined);
+    }
+  }, [appSettings.readerMore.appearance.chatBackgroundImage, updateReaderMoreAppearanceSettings]);
+
+  const handleApplyBubbleCssDraft = useCallback(() => {
+    updateReaderMoreAppearanceSettings({
+      bubbleCssApplied: appSettings.readerMore.appearance.bubbleCssDraft,
+    });
+  }, [appSettings.readerMore.appearance.bubbleCssDraft, updateReaderMoreAppearanceSettings]);
+
+  const handleSaveBubbleCssPreset = useCallback(
+    (name: string) => {
+      const safeName = name.trim();
+      if (!safeName) {
+        showToast('请输入预设名称', 'info');
+        return;
+      }
+      const nextId = `css-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      updateReaderMoreAppearanceSettings({
+        bubbleCssPresets: [
+          ...appSettings.readerMore.appearance.bubbleCssPresets,
+          {
+            id: nextId,
+            name: safeName,
+            css: appSettings.readerMore.appearance.bubbleCssDraft,
+          },
+        ],
+        selectedBubbleCssPresetId: nextId,
+      });
+    },
+    [appSettings.readerMore.appearance.bubbleCssDraft, appSettings.readerMore.appearance.bubbleCssPresets, updateReaderMoreAppearanceSettings, showToast]
+  );
+
+  const handleDeleteBubbleCssPreset = useCallback(
+    (presetId: string) => {
+      const next = appSettings.readerMore.appearance.bubbleCssPresets.filter((item) => item.id !== presetId);
+      updateReaderMoreAppearanceSettings({
+        bubbleCssPresets: next,
+        selectedBubbleCssPresetId:
+          appSettings.readerMore.appearance.selectedBubbleCssPresetId === presetId
+            ? null
+            : appSettings.readerMore.appearance.selectedBubbleCssPresetId,
+      });
+    },
+    [appSettings.readerMore.appearance.bubbleCssPresets, appSettings.readerMore.appearance.selectedBubbleCssPresetId, updateReaderMoreAppearanceSettings]
+  );
+
+  const handleRenameBubbleCssPreset = useCallback(
+    (presetId: string, name: string) => {
+      const safeName = name.trim();
+      if (!safeName) {
+        showToast('请输入新的预设名称', 'info');
+        return;
+      }
+      updateReaderMoreAppearanceSettings({
+        bubbleCssPresets: appSettings.readerMore.appearance.bubbleCssPresets.map((item) =>
+          item.id === presetId
+            ? {
+                ...item,
+                name: safeName,
+              }
+            : item
+        ),
+      });
+    },
+    [appSettings.readerMore.appearance.bubbleCssPresets, updateReaderMoreAppearanceSettings, showToast]
+  );
+
+  const handleSelectBubbleCssPreset = useCallback(
+    (presetId: string | null) => {
+      if (!presetId) {
+        updateReaderMoreAppearanceSettings({ selectedBubbleCssPresetId: null });
+        return;
+      }
+      const preset = appSettings.readerMore.appearance.bubbleCssPresets.find((item) => item.id === presetId);
+      if (!preset) return;
+      updateReaderMoreAppearanceSettings({
+        selectedBubbleCssPresetId: presetId,
+        bubbleCssDraft: preset.css,
+      });
+    },
+    [appSettings.readerMore.appearance.bubbleCssPresets, updateReaderMoreAppearanceSettings]
+  );
+
+  const fetchSummaryApiModels = useCallback(async () => {
+    const config = summaryApiConfig;
+    const apiKey = (config.apiKey || '').trim();
+    const endpoint = normalizeEndpoint(config.endpoint || '');
+    if (!apiKey) {
+      setSummaryApiFetchState('ERROR');
+      setSummaryApiFetchError('请先输入总结 API Key');
+      return;
+    }
+
+    setSummaryApiFetchState('LOADING');
+    setSummaryApiFetchError('');
+    try {
+      let models: string[] = [];
+      if (config.provider === 'GEMINI') {
+        const response = await fetch(`${endpoint}/models?key=${encodeURIComponent(apiKey)}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (Array.isArray(data?.models)) {
+          models = data.models
+            .map((item: { name?: string }) => (item.name || '').replace('models/', '').trim())
+            .filter(Boolean);
+        }
+      } else if (config.provider === 'CLAUDE') {
+        const response = await fetch(`${endpoint}/v1/models`, {
+          headers: {
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+          },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (Array.isArray(data?.data)) {
+          models = data.data.map((item: { id?: string }) => (item.id || '').trim()).filter(Boolean);
+        }
+      } else {
+        const response = await fetch(`${endpoint}/models`, {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (Array.isArray(data?.data)) {
+          models = data.data.map((item: { id?: string }) => (item.id || '').trim()).filter(Boolean);
+        }
+      }
+
+      const normalizedModels = Array.from(new Set(models.filter(Boolean)));
+      if (normalizedModels.length === 0) throw new Error('未获取到可用模型');
+      setSummaryApiModels(normalizedModels);
+      setSummaryApiFetchState('SUCCESS');
+      if (summaryApiCacheKey) {
+        const cacheStore = safeReadSummaryModelCache();
+        cacheStore[summaryApiCacheKey] = {
+          models: normalizedModels,
+          updatedAt: Date.now(),
+        };
+        safeSaveSummaryModelCache(cacheStore);
+      }
+      if (!config.model) {
+        updateSummaryApiSettings({ model: normalizedModels[0] });
+      }
+    } catch (error) {
+      console.error('Failed to fetch summary models', error);
+      setSummaryApiFetchState('ERROR');
+      setSummaryApiFetchError(error instanceof Error ? error.message : '模型拉取失败');
+    }
+  }, [summaryApiConfig, summaryApiCacheKey, updateSummaryApiSettings]);
+
+  const queueSummaryTask = useCallback((task: Omit<SummaryTask, 'id' | 'createdAt'>) => {
+    const key = `${task.conversationKey}::${task.kind}::${task.trigger}::${task.start}-${task.end}`;
+    const now = Date.now();
+    const lastQueuedAt = summaryTaskDebounceRef.current[key] || 0;
+    if (now - lastQueuedAt < SUMMARY_TASK_DEBOUNCE_MS) return;
+    summaryTaskDebounceRef.current[key] = now;
+
+    setSummaryTaskQueue((prev) => {
+      if (
+        prev.some(
+          (item) =>
+            item.conversationKey === task.conversationKey &&
+            item.kind === task.kind &&
+            item.start === task.start &&
+            item.end === task.end
+        )
+      ) {
+        return prev;
+      }
+      return [
+        ...prev,
+        {
+          ...task,
+          id: `sum-${now}-${Math.random().toString(36).slice(2, 8)}`,
+          createdAt: now,
+        },
+      ];
+    });
+  }, []);
+
+  const selectNextSummaryTask = useCallback((queue: SummaryTask[]) => {
+    if (queue.length === 0) return null;
+    const scored = queue
+      .map((task) => {
+        let score = task.kind === 'chat' ? SUMMARY_CHAT_PRIORITY : SUMMARY_BOOK_PRIORITY;
+        if (task.trigger === 'manual') score += SUMMARY_MANUAL_BOOST;
+        return { task, score };
+      })
+      .sort((left, right) => {
+        if (right.score !== left.score) return right.score - left.score;
+        return left.task.createdAt - right.task.createdAt;
+      });
+    return scored[0]?.task || null;
+  }, []);
+
+  useEffect(() => {
+    if (summaryTaskRunningRef.current) return;
+    const queue = summaryTaskQueueRef.current;
+    const nextTask = selectNextSummaryTask(
+      queue.filter((task) => task.conversationKey === conversationKey)
+    );
+    if (!nextTask) return;
+
+    const isChatBusy = activeGenerationMode !== null;
+    if (isChatBusy && isSameApiConfig(summaryApiConfig, apiConfig)) {
+      return;
+    }
+
+    setSummaryTaskRunning(true);
+    const runTask = async () => {
+      try {
+        const timestamp = Date.now();
+        const buildPrompt = () => {
+          if (nextTask.kind === 'chat') {
+            const messageSlice = messagesRef.current
+              .slice(Math.max(0, nextTask.start - 1), Math.max(0, nextTask.end))
+              .map((item) => `[${item.sender === 'user' ? '用户' : 'AI'}] ${item.content}`)
+              .join('\n');
+            return [
+              `请将以下聊天记录总结为 100-200 字，第三人称、凝练、可读性强。`,
+              `消息区间：${nextTask.start}-${nextTask.end}`,
+              `不要使用列表，不要加入未出现的信息。`,
+              '',
+              messageSlice || '（空）',
+            ].join('\n');
+          }
+          const safeStart = clampSummary(nextTask.start, 1, Math.max(1, bookText.length || 1));
+          const safeEnd = clampSummary(nextTask.end, safeStart, Math.max(safeStart, bookText.length || 1));
+          const excerpt = bookText.slice(safeStart - 1, safeEnd);
+          return [
+            `请将以下书籍片段总结为 100-200 字，语言凝练，不剧透范围外内容。`,
+            `字符区间：${safeStart}-${safeEnd}`,
+            `总结应基于文本事实，不要虚构。`,
+            '',
+            excerpt || '（空）',
+          ].join('\n');
+        };
+
+        const summaryTextRaw = await callSummaryModel(buildPrompt(), summaryApiConfig);
+        const summaryText = summaryTextRaw.trim();
+        if (!summaryText) throw new Error('总结结果为空');
+
+        const card: ReaderSummaryCard = {
+          id: `card-${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
+          content: summaryText,
+          start: nextTask.start,
+          end: nextTask.end,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+
+        if (nextTask.kind === 'chat') {
+          applyChatSummaryCards([...chatSummaryCardsRef.current, card]);
+          if (nextTask.trigger === 'auto') {
+            setChatAutoSummaryLastEnd((prev) => Math.max(prev, nextTask.end));
+          }
+        } else {
+          const nextCards = [...bookSummaryCardsRef.current, card];
+          applyBookSummaryCards(nextCards);
+          persistBookSummaryLocal({
+            cards: nextCards,
+            autoLastEnd:
+              nextTask.trigger === 'auto'
+                ? Math.max(bookAutoSummaryLastEndRef.current, nextTask.end)
+                : bookAutoSummaryLastEndRef.current,
+          });
+          if (nextTask.trigger === 'auto') {
+            setBookAutoSummaryLastEnd((prev) => Math.max(prev, nextTask.end));
+          }
+        }
+
+        setSummaryTaskQueue((prev) => prev.filter((item) => item.id !== nextTask.id));
+      } catch (error) {
+        console.error('Summary task failed', error);
+        if (nextTask.trigger === 'manual') {
+          showToast(error instanceof Error ? error.message : '总结失败', 'error');
+        }
+        setSummaryTaskQueue((prev) => prev.filter((item) => item.id !== nextTask.id));
+      } finally {
+        setSummaryTaskRunning(false);
+      }
+    };
+    void runTask();
+  }, [
+    summaryTaskQueue,
+    conversationKey,
+    activeGenerationMode,
+    summaryApiConfig,
+    apiConfig,
+    bookText,
+    selectNextSummaryTask,
+    applyChatSummaryCards,
+    applyBookSummaryCards,
+    persistBookSummaryLocal,
+    showToast,
+  ]);
+
+  useEffect(() => {
+    if (!isConversationHydrated) return;
+    if (!readerMoreFeature.autoChatSummaryEnabled) return;
+    const triggerCount = clampSummary(readerMoreFeature.autoChatSummaryTriggerCount, 100, 5000);
+    const total = messages.length;
+    let cursor = Math.max(0, chatAutoSummaryLastEndRef.current);
+    while (total - cursor >= triggerCount) {
+      const start = cursor + 1;
+      const end = cursor + triggerCount;
+      queueSummaryTask({
+        kind: 'chat',
+        trigger: 'auto',
+        start,
+        end,
+        conversationKey,
+      });
+      cursor = end;
+    }
+  }, [
+    isConversationHydrated,
+    readerMoreFeature.autoChatSummaryEnabled,
+    readerMoreFeature.autoChatSummaryTriggerCount,
+    messages.length,
+    queueSummaryTask,
+    conversationKey,
+  ]);
+
+  useEffect(() => {
+    if (!readerMoreFeature.autoBookSummaryEnabled) return;
+    if (!activeBook?.id) return;
+    const triggerChars = clampSummary(readerMoreFeature.autoBookSummaryTriggerChars, 1000, 50000);
+    const interval = window.setInterval(() => {
+      const position = getLatestReadingPosition();
+      const totalRead = Math.max(
+        0,
+        Math.min(bookText.length || 0, Math.floor(position?.globalCharOffset || 0))
+      );
+      let cursor = Math.max(0, bookAutoSummaryLastEndRef.current);
+      while (totalRead - cursor >= triggerChars) {
+        const start = cursor + 1;
+        const end = cursor + triggerChars;
+        queueSummaryTask({
+          kind: 'book',
+          trigger: 'auto',
+          start,
+          end,
+          conversationKey,
+        });
+        cursor = end;
+      }
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [
+    readerMoreFeature.autoBookSummaryEnabled,
+    readerMoreFeature.autoBookSummaryTriggerChars,
+    activeBook?.id,
+    bookText.length,
+    getLatestReadingPosition,
+    queueSummaryTask,
+    conversationKey,
+  ]);
+
+  const archiveOptions = useMemo<ReaderArchiveOption[]>(() => {
+    const store = readChatStore();
+    const options = Object.entries(store)
+      .map(([key, bucket]) => {
+        const parsed = parseConversationKey(key);
+        if (!parsed) return null;
+        if (parsed.bookId !== (activeBook?.id || null)) return null;
+        const persona = personas.find((item) => item.id === parsed.personaId) || null;
+        const character = characters.find((item) => item.id === parsed.characterId) || null;
+        const isValid = Boolean(persona && character);
+        return {
+          conversationKey: key,
+          personaId: parsed.personaId,
+          personaName: persona?.name || '已失效用户人设',
+          characterId: parsed.characterId,
+          characterName: character?.name || '已失效角色人设',
+          updatedAt: bucket.updatedAt || 0,
+          isValid,
+          isCurrent: key === conversationKey,
+        } as ReaderArchiveOption;
+      })
+      .filter((item): item is ReaderArchiveOption => Boolean(item))
+      .sort((left, right) => {
+        if (left.isCurrent !== right.isCurrent) return left.isCurrent ? -1 : 1;
+        return right.updatedAt - left.updatedAt;
+      });
+    return options;
+  }, [activeBook?.id, characters, personas, conversationKey, messages.length]);
+
+  const handleSelectArchive = useCallback(
+    (archive: ReaderArchiveOption) => {
+      if (!archive.isValid || archive.isCurrent) return;
+      onSelectPersona(archive.personaId);
+      onSelectCharacter(archive.characterId);
+      onCloseMoreSettings();
+    },
+    [onSelectPersona, onSelectCharacter, onCloseMoreSettings]
+  );
+
+  const handleRequestManualChatSummary = useCallback(
+    (start: number, end: number) => {
+      const maxCount = Math.max(1, messagesRef.current.length);
+      const safeStart = clampSummary(Math.min(start, end), 1, maxCount);
+      const safeEnd = clampSummary(Math.max(start, end), 1, maxCount);
+      queueSummaryTask({
+        kind: 'chat',
+        trigger: 'manual',
+        start: safeStart,
+        end: safeEnd,
+        conversationKey,
+      });
+    },
+    [queueSummaryTask, conversationKey]
+  );
+
+  const handleRequestManualBookSummary = useCallback(
+    (start: number, end: number) => {
+      const maxCount = Math.max(1, bookText.length);
+      const safeStart = clampSummary(Math.min(start, end), 1, maxCount);
+      const safeEnd = clampSummary(Math.max(start, end), 1, maxCount);
+      queueSummaryTask({
+        kind: 'book',
+        trigger: 'manual',
+        start: safeStart,
+        end: safeEnd,
+        conversationKey,
+      });
+    },
+    [queueSummaryTask, conversationKey, bookText.length]
+  );
+
+  const handleEditChatSummaryCard = useCallback(
+    (cardId: string, content: string) => {
+      const trimmed = content.trim();
+      if (!trimmed) return;
+      const now = Date.now();
+      const nextCards = chatSummaryCardsRef.current.map((card) =>
+        card.id === cardId
+          ? {
+              ...card,
+              content: trimmed,
+              updatedAt: now,
+            }
+          : card
+      );
+      applyChatSummaryCards(nextCards);
+    },
+    [applyChatSummaryCards]
+  );
+
+  const handleDeleteChatSummaryCard = useCallback(
+    (cardId: string) => {
+      const nextCards = chatSummaryCardsRef.current.filter((card) => card.id !== cardId);
+      applyChatSummaryCards(nextCards);
+    },
+    [applyChatSummaryCards]
+  );
+
+  const handleEditBookSummaryCard = useCallback(
+    (cardId: string, content: string) => {
+      const trimmed = content.trim();
+      if (!trimmed) return;
+      const now = Date.now();
+      const nextCards = bookSummaryCardsRef.current.map((card) =>
+        card.id === cardId
+          ? {
+              ...card,
+              content: trimmed,
+              updatedAt: now,
+            }
+          : card
+      );
+      applyBookSummaryCards(nextCards);
+      persistBookSummaryLocal({
+        cards: nextCards,
+        autoLastEnd: bookAutoSummaryLastEndRef.current,
+      });
+    },
+    [applyBookSummaryCards, persistBookSummaryLocal]
+  );
+
+  const handleDeleteBookSummaryCard = useCallback(
+    (cardId: string) => {
+      const nextCards = bookSummaryCardsRef.current.filter((card) => card.id !== cardId);
+      applyBookSummaryCards(nextCards);
+      persistBookSummaryLocal({
+        cards: nextCards,
+        autoLastEnd: bookAutoSummaryLastEndRef.current,
+      });
+    },
+    [applyBookSummaryCards, persistBookSummaryLocal]
+  );
 
   const scrollMessagesToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     if (!messagesContainerRef.current) return;
@@ -335,6 +1235,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     messagesRef.current = bucket.messages;
     setChatHistorySummary(bucket.chatHistorySummary || '');
     setReadingPrefixSummaryByBookId(bucket.readingPrefixSummaryByBookId || {});
+    setChatSummaryCards(bucket.chatSummaryCards || []);
+    setChatAutoSummaryLastEnd(Math.max(0, bucket.chatAutoSummaryLastEnd || 0));
     setActiveGenerationMode(status.isLoading ? status.mode : null);
     setInputText('');
     setQuotedMessageId(null);
@@ -343,7 +1245,23 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     setSelectedDeleteIds([]);
     setContextMenu(null);
     setIsConversationHydrated(true);
-  }, [conversationKey, legacyConversationKey]);
+
+    if (!activeBook?.id) {
+      setBookSummaryCards([]);
+      setBookAutoSummaryLastEnd(0);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const content = await getBookContent(activeBook.id).catch(() => null);
+      if (cancelled) return;
+      setBookSummaryCards(content?.bookSummaryCards || []);
+      setBookAutoSummaryLastEnd(Math.max(0, content?.bookAutoSummaryLastEnd || 0));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationKey, legacyConversationKey, activeBook?.id]);
 
   useEffect(() => {
     if (!isConversationHydrated) return;
@@ -354,10 +1272,20 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         messages,
         chatHistorySummary,
         readingPrefixSummaryByBookId,
+        chatSummaryCards,
+        chatAutoSummaryLastEnd,
       }),
       'panel-local-sync'
     );
-  }, [conversationKey, messages, chatHistorySummary, readingPrefixSummaryByBookId, isConversationHydrated]);
+  }, [
+    conversationKey,
+    messages,
+    chatHistorySummary,
+    readingPrefixSummaryByBookId,
+    chatSummaryCards,
+    chatAutoSummaryLastEnd,
+    isConversationHydrated,
+  ]);
 
   useEffect(() => {
     const pending = pendingGenerationRef.current;
@@ -377,6 +1305,65 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    chatSummaryCardsRef.current = chatSummaryCards;
+  }, [chatSummaryCards]);
+
+  useEffect(() => {
+    bookSummaryCardsRef.current = bookSummaryCards;
+  }, [bookSummaryCards]);
+
+  useEffect(() => {
+    chatAutoSummaryLastEndRef.current = chatAutoSummaryLastEnd;
+  }, [chatAutoSummaryLastEnd]);
+
+  useEffect(() => {
+    bookAutoSummaryLastEndRef.current = bookAutoSummaryLastEnd;
+  }, [bookAutoSummaryLastEnd]);
+
+  useEffect(() => {
+    summaryTaskQueueRef.current = summaryTaskQueue;
+  }, [summaryTaskQueue]);
+
+  useEffect(() => {
+    summaryTaskRunningRef.current = summaryTaskRunning;
+  }, [summaryTaskRunning]);
+
+  useEffect(() => {
+    if (!activeBook?.id) return;
+    setReadingPrefixSummaryByBookId((prev) => ({
+      ...prev,
+      [activeBook.id]: aggregateSummaryCardsText(bookSummaryCards),
+    }));
+  }, [activeBook?.id, bookSummaryCards]);
+
+  useEffect(() => {
+    if (!activeBook?.id) return;
+    persistBookSummaryLocal({
+      cards: bookSummaryCards,
+      autoLastEnd: bookAutoSummaryLastEnd,
+    });
+  }, [activeBook?.id, bookSummaryCards, bookAutoSummaryLastEnd, persistBookSummaryLocal]);
+
+  useEffect(() => {
+    if (!summaryApiCacheKey) {
+      setSummaryApiModels([]);
+      setSummaryApiFetchState('IDLE');
+      setSummaryApiFetchError('');
+      return;
+    }
+    const cacheEntry = safeReadSummaryModelCache()[summaryApiCacheKey];
+    if (!cacheEntry || cacheEntry.models.length === 0) {
+      setSummaryApiModels([]);
+      setSummaryApiFetchState('IDLE');
+      setSummaryApiFetchError('');
+      return;
+    }
+    setSummaryApiModels(cacheEntry.models);
+    setSummaryApiFetchState('SUCCESS');
+    setSummaryApiFetchError('');
+  }, [summaryApiCacheKey]);
 
   useEffect(() => {
     hiddenBubbleIdsRef.current = hiddenBubbleIds;
@@ -429,6 +1416,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       messagesRef.current = incoming.messages;
       setChatHistorySummary(incoming.chatHistorySummary || '');
       setReadingPrefixSummaryByBookId(incoming.readingPrefixSummaryByBookId || {});
+      setChatSummaryCards(incoming.chatSummaryCards || []);
+      setChatAutoSummaryLastEnd(Math.max(0, incoming.chatAutoSummaryLastEnd || 0));
     });
 
     const offGenerationStatus = onGenerationStatusChanged((detail) => {
@@ -814,6 +1803,9 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         readingContext,
         aiProactiveUnderlineEnabled,
         aiProactiveUnderlineProbability,
+        memoryBubbleCount: appSettings.readerMore.feature.memoryBubbleCount,
+        replyBubbleMin: appSettings.readerMore.feature.replyBubbleMin,
+        replyBubbleMax: appSettings.readerMore.feature.replyBubbleMax,
         allowEmptyPending: false,
         onAddAiUnderlineRange,
       });
@@ -1116,6 +2108,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
   return (
     <>
+      {readerMoreAppearance.bubbleCssApplied && <style>{readerMoreAppearance.bubbleCssApplied}</style>}
       {!isAiPanelOpen && (
         <button
           onClick={handleOpenAiPanelFromFab}
@@ -1181,12 +2174,22 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           </div>
 
           <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
+          {readerMoreAppearance.chatBackgroundImage && (
+            <div className="absolute inset-0 pointer-events-none z-0">
+              <ResolvedImage
+                src={readerMoreAppearance.chatBackgroundImage}
+                alt="chat-background"
+                className="w-full h-full object-cover"
+              />
+              <div className={`absolute inset-0 ${isDarkMode ? 'bg-black/35' : 'bg-white/25'}`} />
+            </div>
+          )}
           <div
             ref={messagesContainerRef}
             className={`reader-scroll-panel reader-message-scroll flex-1 min-h-0 overflow-y-auto p-4 px-6 transition-transform duration-200 ${
               isAiLoading ? '-translate-y-1' : 'translate-y-0'
             }`}
-            style={{ overflowAnchor: 'none' }}
+            style={{ overflowAnchor: 'none', zIndex: 1 }}
           >
             <div className="min-h-full flex flex-col justify-end space-y-4">
             {messages.length === 0 && (
@@ -1195,7 +2198,21 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
               </div>
             )}
 
-            {visibleMessages.map((message) => {
+            {messageTimeline.map((item) => {
+              if (item.type === 'time') {
+                return (
+                  <div key={item.id} className="flex justify-center">
+                    <div
+                      className={`px-3 py-1 rounded-full text-[11px] ${
+                        isDarkMode ? 'bg-[#1a202c] text-slate-400' : 'bg-white/70 text-slate-500'
+                      }`}
+                    >
+                      {formatBubbleClock(item.timestamp)}
+                    </div>
+                  </div>
+                );
+              }
+              const message = item.message;
               const isUser = message.sender === 'user';
               const isSelectedForDelete = selectedDeleteIdSet.has(message.id);
               const isEditingTarget = editingMessageId === message.id;
@@ -1214,8 +2231,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                           isSelectedForDelete
                             ? 'text-rose-400'
                             : isDarkMode
-                              ? 'text-slate-500'
-                              : 'text-slate-400'
+                            ? 'text-slate-500'
+                            : 'text-slate-400'
                         }`}
                         aria-label="select-message"
                       >
@@ -1223,41 +2240,50 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                       </button>
                     )}
 
-                    <div
-                      className={`px-5 py-3 text-sm leading-relaxed transition-colors ${
-                        isUser
-                          ? isDarkMode
-                            ? 'bg-rose-500 text-white rounded-2xl rounded-br shadow-md'
-                            : 'bg-rose-400 text-white rounded-2xl rounded-br shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
-                          : isDarkMode
-                            ? 'bg-[#1a202c] text-slate-300 rounded-2xl rounded-bl shadow-md'
-                            : 'neu-flat text-slate-700 rounded-2xl rounded-bl'
-                       } ${isUser ? 'reader-bubble-enter-right' : 'reader-bubble-enter-left'} ${
-                         isEditingTarget ? 'ring-2 ring-rose-300' : ''
-                       }`}
-                      onPointerDown={(event) => handleBubblePointerDown(event, message.id)}
-                      onPointerMove={handleBubblePointerMove}
-                      onPointerUp={handleBubblePointerEnd}
-                      onPointerCancel={handleBubblePointerEnd}
-                      onContextMenu={(event) => handleBubbleContextMenu(event, message.id)}
-                    >
-                      {message.quote && (
-                        <div
-                          className={`mb-2 px-2 py-1 rounded-lg text-[11px] leading-snug border ${
-                            isUser
-                              ? 'border-white/35 bg-white/15'
-                              : isDarkMode
-                                ? 'border-slate-600 bg-slate-700/30'
-                                : 'border-slate-200 bg-white/55'
-                          }`}
-                        >
-                          <div className="font-semibold opacity-90">
-                            {message.quote.senderName} · {formatTimestampMinute(message.quote.timestamp).slice(11)}
-                          </div>
-                          <div className="opacity-80 break-all">{message.quote.content}</div>
+                    <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+                      {readerMoreAppearance.showMessageTime && (
+                        <div className={`text-[11px] mb-1 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                          {formatBubbleClock(message.timestamp)}
                         </div>
                       )}
-                      <div className="break-words">{message.content}</div>
+
+                      <div
+                        className={`rm-bubble ${isUser ? 'rm-bubble-user' : 'rm-bubble-ai'} px-5 py-3 text-sm leading-relaxed transition-colors ${
+                          isUser
+                            ? isDarkMode
+                              ? 'bg-rose-500 text-white rounded-2xl rounded-br shadow-md'
+                              : 'bg-rose-400 text-white rounded-2xl rounded-br shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
+                            : isDarkMode
+                            ? 'bg-[#1a202c] text-slate-300 rounded-2xl rounded-bl shadow-md'
+                            : 'neu-flat text-slate-700 rounded-2xl rounded-bl'
+                         } ${isUser ? 'reader-bubble-enter-right' : 'reader-bubble-enter-left'} ${
+                           isEditingTarget ? 'ring-2 ring-rose-300' : ''
+                         }`}
+                        style={{ fontSize: `${14 * readerMoreAppearance.bubbleFontSizeScale}px` }}
+                        onPointerDown={(event) => handleBubblePointerDown(event, message.id)}
+                        onPointerMove={handleBubblePointerMove}
+                        onPointerUp={handleBubblePointerEnd}
+                        onPointerCancel={handleBubblePointerEnd}
+                        onContextMenu={(event) => handleBubbleContextMenu(event, message.id)}
+                      >
+                        {message.quote && (
+                          <div
+                            className={`mb-2 px-2 py-1 rounded-lg text-[11px] leading-snug border ${
+                              isUser
+                                ? 'border-white/35 bg-white/15'
+                                : isDarkMode
+                                ? 'border-slate-600 bg-slate-700/30'
+                                : 'border-slate-200 bg-white/55'
+                            }`}
+                          >
+                            <div className="font-semibold opacity-90">
+                              {message.quote.senderName} · {formatTimestampMinute(message.quote.timestamp).slice(11)}
+                            </div>
+                            <div className="opacity-80 break-all">{message.quote.content}</div>
+                          </div>
+                        )}
+                        <div className="break-words">{message.content}</div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1400,6 +2426,44 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           </div>
         </div>
       </div>
+
+      <ReaderMoreSettingsPanel
+        isDarkMode={isDarkMode}
+        isOpen={isMoreSettingsOpen}
+        onClose={onCloseMoreSettings}
+        appearanceSettings={readerMoreAppearance}
+        featureSettings={readerMoreFeature}
+        onUpdateAppearanceSettings={updateReaderMoreAppearanceSettings}
+        onUpdateFeatureSettings={updateReaderMoreFeatureSettings}
+        onUpdateSummaryApiSettings={updateSummaryApiSettings}
+        onUploadChatBackgroundImage={handleUploadChatBackgroundImage}
+        onSetChatBackgroundImageFromUrl={handleSetChatBackgroundFromUrl}
+        onClearChatBackgroundImage={handleClearChatBackground}
+        onApplyBubbleCssDraft={handleApplyBubbleCssDraft}
+        onSaveBubbleCssPreset={handleSaveBubbleCssPreset}
+        onDeleteBubbleCssPreset={handleDeleteBubbleCssPreset}
+        onRenameBubbleCssPreset={handleRenameBubbleCssPreset}
+        onSelectBubbleCssPreset={handleSelectBubbleCssPreset}
+        onClearBubbleCssDraft={() => updateReaderMoreAppearanceSettings({ bubbleCssDraft: '' })}
+        archiveOptions={archiveOptions}
+        onSelectArchive={handleSelectArchive}
+        bookSummaryCards={bookSummaryCards}
+        chatSummaryCards={chatSummaryCards}
+        onEditBookSummaryCard={handleEditBookSummaryCard}
+        onDeleteBookSummaryCard={handleDeleteBookSummaryCard}
+        onEditChatSummaryCard={handleEditChatSummaryCard}
+        onDeleteChatSummaryCard={handleDeleteChatSummaryCard}
+        onRequestManualBookSummary={handleRequestManualBookSummary}
+        onRequestManualChatSummary={handleRequestManualChatSummary}
+        currentReadCharOffset={Math.max(0, getLatestReadingPosition()?.globalCharOffset || 0)}
+        totalBookChars={bookText.length}
+        totalMessages={messages.length}
+        summaryTaskRunning={summaryTaskRunning}
+        onFetchSummaryModels={fetchSummaryApiModels}
+        summaryApiModels={summaryApiModels}
+        summaryApiFetchState={summaryApiFetchState}
+        summaryApiFetchError={summaryApiFetchError}
+      />
 
       {contextMenu && !isDeleteMode && (
         <div

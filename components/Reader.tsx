@@ -35,11 +35,14 @@ interface ReaderProps {
   isDarkMode: boolean;
   activeBook: Book | null;
   appSettings: AppSettings;
+  setAppSettings: React.Dispatch<React.SetStateAction<AppSettings>>;
   apiConfig: ApiConfig;
   personas: Persona[];
   activePersonaId: string | null;
+  onSelectPersona: (personaId: string | null) => void;
   characters: Character[];
   activeCharacterId: string | null;
+  onSelectCharacter: (characterId: string | null) => void;
   worldBookEntries: WorldBookEntry[];
   safeAreaTop?: number;
   safeAreaBottom?: number;
@@ -510,11 +513,14 @@ const Reader: React.FC<ReaderProps> = ({
   isDarkMode,
   activeBook,
   appSettings,
+  setAppSettings,
   apiConfig,
   personas,
   activePersonaId,
+  onSelectPersona,
   characters,
   activeCharacterId,
+  onSelectCharacter,
   worldBookEntries,
   safeAreaTop = 0,
   safeAreaBottom = 0,
@@ -549,6 +555,7 @@ const Reader: React.FC<ReaderProps> = ({
   const [activeTypographyColorEditor, setActiveTypographyColorEditor] = useState<TypographyColorKind | null>(null);
   const [closingTypographyColorEditor, setClosingTypographyColorEditor] = useState<TypographyColorKind | null>(null);
   const [isReaderAppearanceHydrated, setIsReaderAppearanceHydrated] = useState(false);
+  const [isMoreSettingsOpen, setIsMoreSettingsOpen] = useState(false);
 
   const readerScrollRef = useRef<HTMLDivElement>(null);
   const readerScrollbarTrackRef = useRef<HTMLDivElement>(null);
@@ -2338,7 +2345,12 @@ const Reader: React.FC<ReaderProps> = ({
           >
             <Type size={18} />
           </button>
-          <button className="w-10 h-10 neu-btn rounded-full" style={typographyToggleStyle}>
+          <button
+            onClick={() => setIsMoreSettingsOpen(true)}
+            className={`w-10 h-10 neu-btn reader-tool-toggle rounded-full ${isMoreSettingsOpen ? 'reader-tool-active' : ''}`}
+            style={typographyToggleStyle}
+            title="更多设置"
+          >
             <MoreHorizontal size={18} />
           </button>
         </div>
@@ -2760,12 +2772,16 @@ const Reader: React.FC<ReaderProps> = ({
         isDarkMode={isDarkMode}
         apiConfig={apiConfig}
         activeBook={activeBook}
+        appSettings={appSettings}
+        setAppSettings={setAppSettings}
         aiProactiveUnderlineEnabled={appSettings.aiProactiveUnderlineEnabled}
         aiProactiveUnderlineProbability={appSettings.aiProactiveUnderlineProbability}
         personas={personas}
         activePersonaId={activePersonaId}
+        onSelectPersona={onSelectPersona}
         characters={characters}
         activeCharacterId={activeCharacterId}
+        onSelectCharacter={onSelectCharacter}
         worldBookEntries={worldBookEntries}
         chapters={chapters}
         bookText={bookText}
@@ -2774,6 +2790,8 @@ const Reader: React.FC<ReaderProps> = ({
         onRollbackAiUnderlineGeneration={handleRollbackAiUnderlineGeneration}
         readerContentRef={readerScrollRef}
         getLatestReadingPosition={() => syncReadingPositionRef(Date.now()) || latestReadingPositionRef.current}
+        isMoreSettingsOpen={isMoreSettingsOpen}
+        onCloseMoreSettings={() => setIsMoreSettingsOpen(false)}
       />
     </div>
   );

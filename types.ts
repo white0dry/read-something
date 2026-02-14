@@ -113,6 +113,56 @@ export interface ApiPreset {
   config: ApiConfig;
 }
 
+export interface ReaderCssPreset {
+  id: string;
+  name: string;
+  css: string;
+}
+
+export interface ReaderSummaryCard {
+  id: string;
+  content: string;
+  start: number;
+  end: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ReaderMoreAppearanceSettings {
+  bubbleFontSizeScale: number;
+  chatBackgroundImage: string;
+  showMessageTime: boolean;
+  timeGapMinutes: number;
+  bubbleCssDraft: string;
+  bubbleCssApplied: string;
+  bubbleCssPresets: ReaderCssPreset[];
+  selectedBubbleCssPresetId: string | null;
+}
+
+export interface ReaderSummaryApiSettings {
+  provider: ApiProvider;
+  endpoint: string;
+  apiKey: string;
+  model: string;
+}
+
+export interface ReaderMoreFeatureSettings {
+  memoryBubbleCount: number;
+  replyBubbleMin: number;
+  replyBubbleMax: number;
+  autoChatSummaryEnabled: boolean;
+  autoChatSummaryTriggerCount: number;
+  autoBookSummaryEnabled: boolean;
+  autoBookSummaryTriggerChars: number;
+  summaryApiEnabled: boolean;
+  summaryApi: ReaderSummaryApiSettings;
+}
+
+export interface ReaderMoreSettings {
+  appearance: ReaderMoreAppearanceSettings;
+  feature: ReaderMoreFeatureSettings;
+}
+
 export interface AppSettings {
   activeCommentsEnabled: boolean;
   aiProactiveUnderlineEnabled: boolean;
@@ -123,4 +173,5 @@ export interface AppSettings {
   fontSizeScale: number; // 0.8 - 1.2
   safeAreaTop: number; // px
   safeAreaBottom: number; // px
+  readerMore: ReaderMoreSettings;
 }

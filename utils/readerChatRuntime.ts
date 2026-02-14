@@ -1,3 +1,5 @@
+import { ReaderSummaryCard } from '../types';
+
 export type ChatSender = 'user' | 'character';
 
 export interface ChatQuotePayload {
@@ -25,6 +27,8 @@ export interface ReaderChatBucket {
   messages: ChatBubble[];
   chatHistorySummary: string;
   readingPrefixSummaryByBookId: Record<string, string>;
+  chatSummaryCards: ReaderSummaryCard[];
+  chatAutoSummaryLastEnd: number;
 }
 
 export type ReaderChatStore = Record<string, ReaderChatBucket>;
@@ -101,7 +105,38 @@ export const defaultChatBucket = (): ReaderChatBucket => ({
   messages: [],
   chatHistorySummary: '',
   readingPrefixSummaryByBookId: {},
+  chatSummaryCards: [],
+  chatAutoSummaryLastEnd: 0,
 });
+
+const normalizeSummaryCard = (value: unknown): ReaderSummaryCard | null => {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Partial<ReaderSummaryCard>;
+  const id = typeof source.id === 'string' && source.id.trim() ? source.id : '';
+  const content = typeof source.content === 'string' ? source.content.trim() : '';
+  const start = Number(source.start);
+  const end = Number(source.end);
+  if (!id || !content || !Number.isFinite(start) || !Number.isFinite(end)) return null;
+  const safeStart = Math.max(0, Math.floor(start));
+  const safeEnd = Math.max(safeStart, Math.floor(end));
+  const createdAt = Number(source.createdAt);
+  const updatedAt = Number(source.updatedAt);
+  return {
+    id,
+    content,
+    start: safeStart,
+    end: safeEnd,
+    createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+  };
+};
+
+const normalizeSummaryCards = (value: unknown) => {
+  if (!Array.isArray(value)) return [] as ReaderSummaryCard[];
+  return value
+    .map((item) => normalizeSummaryCard(item))
+    .filter((item): item is ReaderSummaryCard => Boolean(item));
+};
 
 const normalizeQuotePayload = (value: unknown, fallbackTimestamp: number): ChatQuotePayload | undefined => {
   if (!value || typeof value !== 'object') return undefined;
@@ -171,6 +206,10 @@ const normalizeChatBucket = (value: unknown): ReaderChatBucket => {
     messages,
     chatHistorySummary: typeof source.chatHistorySummary === 'string' ? source.chatHistorySummary : '',
     readingPrefixSummaryByBookId: normalizeReadingPrefixSummaryByBookId(source.readingPrefixSummaryByBookId),
+    chatSummaryCards: normalizeSummaryCards(source.chatSummaryCards),
+    chatAutoSummaryLastEnd: Number.isFinite(Number(source.chatAutoSummaryLastEnd))
+      ? Math.max(0, Math.floor(Number(source.chatAutoSummaryLastEnd)))
+      : 0,
   };
 };
 

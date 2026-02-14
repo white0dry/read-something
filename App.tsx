@@ -4,7 +4,7 @@ import Library from './components/Library';
 import Reader from './components/Reader';
 import Stats from './components/Stats';
 import Settings from './components/Settings';
-import { AppView, Book, ApiConfig, ApiPreset, AppSettings, ReaderSessionSnapshot } from './types';
+import { AppView, Book, ApiConfig, ApiPreset, ApiProvider, AppSettings, ReaderSessionSnapshot } from './types';
 import { Persona, Character, WorldBookEntry } from './components/settings/types';
 import { deleteImageByRef, migrateDataUrlToImageRef } from './utils/imageStorage';
 import { compactBookForState, deleteBookContent, getBookContent, migrateInlineBookContent, saveBookContent } from './utils/bookContentStorage';
@@ -36,6 +36,35 @@ const COMPLETED_BOOK_REACHED_AT_STORAGE_KEY = 'app_completed_book_reached_at';
 const READING_MS_BY_BOOK_ID_STORAGE_KEY = 'app_reading_ms_by_book_id';
 const PROACTIVE_DELAY_TOLERANCE_MS = 3000;
 const KEEP_ALIVE_SILENT_AUDIO_URL = 'https://files.catbox.moe/qx14i5.mp3';
+const FIXED_MESSAGE_TIME_GAP_MINUTES = 60;
+const DEFAULT_READER_MORE_SETTINGS = {
+  appearance: {
+    bubbleFontSizeScale: 1,
+    chatBackgroundImage: '',
+    showMessageTime: false,
+    timeGapMinutes: FIXED_MESSAGE_TIME_GAP_MINUTES,
+    bubbleCssDraft: '',
+    bubbleCssApplied: '',
+    bubbleCssPresets: [],
+    selectedBubbleCssPresetId: null as string | null,
+  },
+  feature: {
+    memoryBubbleCount: 100,
+    replyBubbleMin: 3,
+    replyBubbleMax: 8,
+    autoChatSummaryEnabled: false,
+    autoChatSummaryTriggerCount: 500,
+    autoBookSummaryEnabled: false,
+    autoBookSummaryTriggerChars: 5000,
+    summaryApiEnabled: false,
+    summaryApi: {
+      provider: 'OPENAI' as ApiProvider,
+      endpoint: 'https://api.openai.com/v1',
+      apiKey: '',
+      model: '',
+    },
+  },
+};
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   activeCommentsEnabled: false,
@@ -46,7 +75,8 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   themeColor: DEFAULT_THEME_COLOR,
   fontSizeScale: 1.0,
   safeAreaTop: 0,
-  safeAreaBottom: 0
+  safeAreaBottom: 0,
+  readerMore: DEFAULT_READER_MORE_SETTINGS,
 };
 
 const normalizeAppSettings = (raw: unknown): AppSettings => {
@@ -98,6 +128,137 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
     typeof safeAreaBottomRaw === 'number' && Number.isFinite(safeAreaBottomRaw)
       ? Math.max(0, Math.round(safeAreaBottomRaw))
       : DEFAULT_APP_SETTINGS.safeAreaBottom;
+  const readerMoreSource =
+    source.readerMore && typeof source.readerMore === 'object'
+      ? (source.readerMore as Partial<AppSettings['readerMore']>)
+      : {};
+  const appearanceSource =
+    readerMoreSource.appearance && typeof readerMoreSource.appearance === 'object'
+      ? (readerMoreSource.appearance as Partial<AppSettings['readerMore']['appearance']>)
+      : {};
+  const featureSource =
+    readerMoreSource.feature && typeof readerMoreSource.feature === 'object'
+      ? (readerMoreSource.feature as Partial<AppSettings['readerMore']['feature']>)
+      : {};
+  const summaryApiSource =
+    featureSource.summaryApi && typeof featureSource.summaryApi === 'object'
+      ? (featureSource.summaryApi as Partial<AppSettings['readerMore']['feature']['summaryApi']>)
+      : {};
+  const normalizedBubbleCssPresets = Array.isArray(appearanceSource.bubbleCssPresets)
+    ? appearanceSource.bubbleCssPresets
+        .map((item) => {
+          if (!item || typeof item !== 'object') return null;
+          const id = typeof item.id === 'string' ? item.id.trim() : '';
+          const name = typeof item.name === 'string' ? item.name.trim() : '';
+          const css = typeof item.css === 'string' ? item.css : '';
+          if (!id || !name) return null;
+          return { id, name, css };
+        })
+        .filter(
+          (
+            item
+          ): item is {
+            id: string;
+            name: string;
+            css: string;
+          } => Boolean(item)
+        )
+    : [];
+  const selectedBubbleCssPresetIdRaw =
+    typeof appearanceSource.selectedBubbleCssPresetId === 'string'
+      ? appearanceSource.selectedBubbleCssPresetId
+      : null;
+  const selectedBubbleCssPresetId =
+    selectedBubbleCssPresetIdRaw && normalizedBubbleCssPresets.some((item) => item.id === selectedBubbleCssPresetIdRaw)
+      ? selectedBubbleCssPresetIdRaw
+      : null;
+  const readerMore = {
+    appearance: {
+      bubbleFontSizeScale:
+        typeof appearanceSource.bubbleFontSizeScale === 'number' && Number.isFinite(appearanceSource.bubbleFontSizeScale)
+          ? Math.min(2.5, Math.max(0.7, appearanceSource.bubbleFontSizeScale))
+          : DEFAULT_READER_MORE_SETTINGS.appearance.bubbleFontSizeScale,
+      chatBackgroundImage:
+        typeof appearanceSource.chatBackgroundImage === 'string'
+          ? appearanceSource.chatBackgroundImage.trim()
+          : DEFAULT_READER_MORE_SETTINGS.appearance.chatBackgroundImage,
+      showMessageTime:
+        typeof appearanceSource.showMessageTime === 'boolean'
+          ? appearanceSource.showMessageTime
+          : DEFAULT_READER_MORE_SETTINGS.appearance.showMessageTime,
+      timeGapMinutes: FIXED_MESSAGE_TIME_GAP_MINUTES,
+      bubbleCssDraft:
+        typeof appearanceSource.bubbleCssDraft === 'string'
+          ? appearanceSource.bubbleCssDraft
+          : DEFAULT_READER_MORE_SETTINGS.appearance.bubbleCssDraft,
+      bubbleCssApplied:
+        typeof appearanceSource.bubbleCssApplied === 'string'
+          ? appearanceSource.bubbleCssApplied
+          : DEFAULT_READER_MORE_SETTINGS.appearance.bubbleCssApplied,
+      bubbleCssPresets: normalizedBubbleCssPresets,
+      selectedBubbleCssPresetId,
+    },
+    feature: {
+      memoryBubbleCount:
+        typeof featureSource.memoryBubbleCount === 'number' && Number.isFinite(featureSource.memoryBubbleCount)
+          ? Math.min(5000, Math.max(20, Math.round(featureSource.memoryBubbleCount)))
+          : DEFAULT_READER_MORE_SETTINGS.feature.memoryBubbleCount,
+      replyBubbleMin:
+        typeof featureSource.replyBubbleMin === 'number' && Number.isFinite(featureSource.replyBubbleMin)
+          ? Math.min(20, Math.max(1, Math.round(featureSource.replyBubbleMin)))
+          : DEFAULT_READER_MORE_SETTINGS.feature.replyBubbleMin,
+      replyBubbleMax:
+        typeof featureSource.replyBubbleMax === 'number' && Number.isFinite(featureSource.replyBubbleMax)
+          ? Math.min(20, Math.max(1, Math.round(featureSource.replyBubbleMax)))
+          : DEFAULT_READER_MORE_SETTINGS.feature.replyBubbleMax,
+      autoChatSummaryEnabled:
+        typeof featureSource.autoChatSummaryEnabled === 'boolean'
+          ? featureSource.autoChatSummaryEnabled
+          : DEFAULT_READER_MORE_SETTINGS.feature.autoChatSummaryEnabled,
+      autoChatSummaryTriggerCount:
+        typeof featureSource.autoChatSummaryTriggerCount === 'number' && Number.isFinite(featureSource.autoChatSummaryTriggerCount)
+          ? Math.min(5000, Math.max(100, Math.round(featureSource.autoChatSummaryTriggerCount)))
+          : DEFAULT_READER_MORE_SETTINGS.feature.autoChatSummaryTriggerCount,
+      autoBookSummaryEnabled:
+        typeof featureSource.autoBookSummaryEnabled === 'boolean'
+          ? featureSource.autoBookSummaryEnabled
+          : DEFAULT_READER_MORE_SETTINGS.feature.autoBookSummaryEnabled,
+      autoBookSummaryTriggerChars:
+        typeof featureSource.autoBookSummaryTriggerChars === 'number' && Number.isFinite(featureSource.autoBookSummaryTriggerChars)
+          ? Math.min(50000, Math.max(1000, Math.round(featureSource.autoBookSummaryTriggerChars)))
+          : DEFAULT_READER_MORE_SETTINGS.feature.autoBookSummaryTriggerChars,
+      summaryApiEnabled:
+        typeof featureSource.summaryApiEnabled === 'boolean'
+          ? featureSource.summaryApiEnabled
+          : DEFAULT_READER_MORE_SETTINGS.feature.summaryApiEnabled,
+      summaryApi: {
+        provider:
+          summaryApiSource.provider === 'OPENAI' ||
+          summaryApiSource.provider === 'DEEPSEEK' ||
+          summaryApiSource.provider === 'GEMINI' ||
+          summaryApiSource.provider === 'CLAUDE' ||
+          summaryApiSource.provider === 'CUSTOM'
+            ? summaryApiSource.provider
+            : DEFAULT_READER_MORE_SETTINGS.feature.summaryApi.provider,
+        endpoint:
+          typeof summaryApiSource.endpoint === 'string'
+            ? summaryApiSource.endpoint
+            : DEFAULT_READER_MORE_SETTINGS.feature.summaryApi.endpoint,
+        apiKey:
+          typeof summaryApiSource.apiKey === 'string'
+            ? summaryApiSource.apiKey
+            : DEFAULT_READER_MORE_SETTINGS.feature.summaryApi.apiKey,
+        model:
+          typeof summaryApiSource.model === 'string'
+            ? summaryApiSource.model
+            : DEFAULT_READER_MORE_SETTINGS.feature.summaryApi.model,
+      },
+    },
+  };
+  const normalizedReplyMin = readerMore.feature.replyBubbleMin;
+  const normalizedReplyMax = readerMore.feature.replyBubbleMax;
+  readerMore.feature.replyBubbleMin = Math.min(normalizedReplyMin, normalizedReplyMax);
+  readerMore.feature.replyBubbleMax = Math.max(normalizedReplyMin, normalizedReplyMax);
 
   return {
     activeCommentsEnabled,
@@ -109,6 +270,7 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
     fontSizeScale,
     safeAreaTop,
     safeAreaBottom,
+    readerMore,
   };
 };
 
@@ -951,6 +1113,9 @@ const App: React.FC = () => {
           readingContext,
           aiProactiveUnderlineEnabled: appSettings.aiProactiveUnderlineEnabled,
           aiProactiveUnderlineProbability: appSettings.aiProactiveUnderlineProbability,
+          memoryBubbleCount: appSettings.readerMore.feature.memoryBubbleCount,
+          replyBubbleMin: appSettings.readerMore.feature.replyBubbleMin,
+          replyBubbleMax: appSettings.readerMore.feature.replyBubbleMax,
           allowEmptyPending: true,
         });
         if (result.status !== 'ok') return;
@@ -990,6 +1155,9 @@ const App: React.FC = () => {
     appSettings.commentProbability,
     appSettings.aiProactiveUnderlineEnabled,
     appSettings.aiProactiveUnderlineProbability,
+    appSettings.readerMore.feature.memoryBubbleCount,
+    appSettings.readerMore.feature.replyBubbleMin,
+    appSettings.readerMore.feature.replyBubbleMax,
     currentView,
     activeBook,
     books,
@@ -1208,13 +1376,16 @@ const App: React.FC = () => {
             isDarkMode={isDarkMode}
             activeBook={activeBook}
             appSettings={appSettings}
+            setAppSettings={setAppSettings}
             safeAreaTop={manualSafeAreaTop}
             safeAreaBottom={manualSafeAreaBottom}
             apiConfig={apiConfig}
             personas={personas}
             activePersonaId={activePersonaId}
+            onSelectPersona={setActivePersonaId}
             characters={characters}
             activeCharacterId={activeCharacterId}
+            onSelectCharacter={setActiveCharacterId}
             worldBookEntries={worldBookEntries}
           />
         </div>

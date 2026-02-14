@@ -51,6 +51,9 @@ interface RunConversationGenerationParams {
   allowEmptyPending?: boolean;
   onAddAiUnderlineRange?: (payload: { start: number; end: number; generationId: string }) => void;
   signal?: AbortSignal;
+  memoryBubbleCount?: number;
+  replyBubbleMin?: number;
+  replyBubbleMax?: number;
 }
 
 type RunGenerationSkipReason =
@@ -76,6 +79,9 @@ type RunConversationGenerationResult =
     };
 
 const CONTEXT_VIEWPORT_TAIL_WEIGHT = 0.82;
+const DEFAULT_MEMORY_BUBBLE_COUNT = 100;
+const DEFAULT_REPLY_BUBBLE_MIN = 3;
+const DEFAULT_REPLY_BUBBLE_MAX = 8;
 
 const normalizeReaderLayoutText = (raw: string) => {
   const normalizedText = raw.replace(/\r\n/g, '\n').trim();
@@ -111,10 +117,10 @@ const scaleOffsetByLength = (offset: number, sourceLength: number, targetLength:
   return clamp(Math.round((safeOffset / sourceLength) * targetLength), 0, targetLength);
 };
 
-const ensureBubbleCount = (items: string[]) => {
+const ensureBubbleCount = (items: string[], minCount: number, maxCount: number) => {
   let lines = items.map(compactText).filter(Boolean);
-  if (lines.length > 8) lines = lines.slice(0, 8);
-  if (lines.length >= 3) return lines;
+  if (lines.length > maxCount) lines = lines.slice(0, maxCount);
+  if (lines.length >= minCount) return lines;
 
   const raw = compactText(lines.join(' '));
   const splitByPunctuation = raw
@@ -123,28 +129,28 @@ const ensureBubbleCount = (items: string[]) => {
     .filter(Boolean);
 
   lines = splitByPunctuation.length > 0 ? splitByPunctuation : lines;
-  if (lines.length > 8) lines = lines.slice(0, 8);
-  if (lines.length >= 3) return lines;
+  if (lines.length > maxCount) lines = lines.slice(0, maxCount);
+  if (lines.length >= minCount) return lines;
 
   if (raw) {
-    const chunkSize = Math.max(2, Math.ceil(raw.length / 3));
+    const chunkSize = Math.max(2, Math.ceil(raw.length / Math.max(minCount, 1)));
     const chunks: string[] = [];
-    for (let index = 0; index < raw.length && chunks.length < 8; index += chunkSize) {
+    for (let index = 0; index < raw.length && chunks.length < maxCount; index += chunkSize) {
       chunks.push(raw.slice(index, index + chunkSize));
     }
     if (chunks.length > 0) lines = chunks;
   }
 
   const fallback = lines[0] || '收到';
-  while (lines.length < 3) {
+  while (lines.length < minCount) {
     lines.push(fallback);
   }
-  return lines.slice(0, 8);
+  return lines.slice(0, maxCount);
 };
 
-const normalizeAiBubbleLines = (raw: string) => {
+const normalizeAiBubbleLines = (raw: string, minCount: number, maxCount: number) => {
   const trimmed = raw.trim();
-  if (!trimmed) return ['收到', '我在', '继续聊'];
+  if (!trimmed) return ensureBubbleCount([], minCount, maxCount);
 
   let cleaned = trimmed;
   cleaned = cleaned.replace(/```(?:[\w-]+)?\n?/g, '');
@@ -153,20 +159,20 @@ const normalizeAiBubbleLines = (raw: string) => {
   const tagMatches = [...cleaned.matchAll(/<bubble>([\s\S]*?)<\/bubble>/gi)]
     .map((match) => compactText(match[1] || ''))
     .filter(Boolean);
-  if (tagMatches.length > 0) return ensureBubbleCount(tagMatches);
+  if (tagMatches.length > 0) return ensureBubbleCount(tagMatches, minCount, maxCount);
 
   const lines = cleaned.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const marked = lines
     .map((line) => line.match(/^\[气泡\]\s*(.+)$/)?.[1] || line.match(/^【气泡】\s*(.+)$/)?.[1] || '')
     .map(compactText)
     .filter(Boolean);
-  if (marked.length > 0) return ensureBubbleCount(marked);
+  if (marked.length > 0) return ensureBubbleCount(marked, minCount, maxCount);
 
   const plainLines = lines
     .map((line) => line.replace(/^\d+[\.\)．、]\s*/, ''))
     .map(compactText)
     .filter(Boolean);
-  return ensureBubbleCount(plainLines.length > 0 ? plainLines : [cleaned]);
+  return ensureBubbleCount(plainLines.length > 0 ? plainLines : [cleaned], minCount, maxCount);
 };
 
 const parseAiReplyPayload = (raw: string): ParsedAiReply => {
@@ -375,6 +381,9 @@ const buildAiPrompt = (params: {
   activeBookTitle: string;
   activeBookSummary: string;
   chatHistorySummary: string;
+  memoryBubbleCount: number;
+  replyBubbleMin: number;
+  replyBubbleMax: number;
 }) => {
   const {
     mode,
@@ -391,11 +400,14 @@ const buildAiPrompt = (params: {
     activeBookTitle,
     activeBookSummary,
     chatHistorySummary,
+    memoryBubbleCount,
+    replyBubbleMin,
+    replyBubbleMax,
   } = params;
   const { excerpt, highlightedSnippets } = readingContext;
   const hasReadableExcerpt = compactText(excerpt).length > 0;
   const recentHistory = sourceMessages
-    .slice(-100)
+    .slice(-memoryBubbleCount)
     .map((message) => message.promptRecord)
     .join('\n');
 
@@ -438,7 +450,8 @@ const buildAiPrompt = (params: {
     highlightedSnippets.length > 0 ? highlightedSnippets.map((item) => `- ${item}`).join('\n') : '（暂无）',
     highlightedSnippets.length === 0 ? '【荧光笔状态】当前没有任何划线句子，禁止编造“划线内容”。' : '',
     '',
-    '【最近100条聊天记录】',
+    '【最近聊天记录】',
+    `【本轮记忆条数】${memoryBubbleCount}`,
     recentHistory || '（暂无）',
     '',
     '【本轮待回复用户消息】',
@@ -453,7 +466,7 @@ const buildAiPrompt = (params: {
     proactiveUnderlineRule,
     '',
     '【输出格式要求（必须严格遵守）】',
-    '- 只输出 3 到 8 行。',
+    `- 只输出 ${replyBubbleMin} 到 ${replyBubbleMax} 行。`,
     '- 每一行必须以 [气泡] 开头。',
     '- [气泡] 后面只写一条聊天消息。',
     '- `[划线]` 行最多 1 行，且可选。',
@@ -652,6 +665,9 @@ export const runConversationGeneration = async (
     aiProactiveUnderlineProbability,
     onAddAiUnderlineRange,
     signal: outerSignal,
+    memoryBubbleCount,
+    replyBubbleMin,
+    replyBubbleMax,
   } = params;
 
   const validationMessage = validateApiConfig(apiConfig);
@@ -711,6 +727,15 @@ export const runConversationGeneration = async (
     const normalizedUnderlineProbability = clamp(Math.floor(aiProactiveUnderlineProbability), 0, 100);
     const allowAiUnderlineInThisReply =
       aiProactiveUnderlineEnabled && Math.random() * 100 < normalizedUnderlineProbability;
+    const normalizedMemoryBubbleCount = clamp(
+      Math.floor(Number(memoryBubbleCount) || DEFAULT_MEMORY_BUBBLE_COUNT),
+      1,
+      5000
+    );
+    const normalizedReplyMin = clamp(Math.floor(Number(replyBubbleMin) || DEFAULT_REPLY_BUBBLE_MIN), 1, 20);
+    const normalizedReplyMax = clamp(Math.floor(Number(replyBubbleMax) || DEFAULT_REPLY_BUBBLE_MAX), 1, 20);
+    const resolvedReplyBubbleMin = Math.min(normalizedReplyMin, normalizedReplyMax);
+    const resolvedReplyBubbleMax = Math.max(normalizedReplyMin, normalizedReplyMax);
 
     const prompt = buildAiPrompt({
       mode,
@@ -727,6 +752,9 @@ export const runConversationGeneration = async (
       activeBookTitle,
       activeBookSummary,
       chatHistorySummary,
+      memoryBubbleCount: normalizedMemoryBubbleCount,
+      replyBubbleMin: resolvedReplyBubbleMin,
+      replyBubbleMax: resolvedReplyBubbleMax,
     });
     console.groupCollapsed(`[AI Prompt:${mode}] ${new Date().toLocaleTimeString()}`);
     console.log(prompt);
@@ -735,7 +763,11 @@ export const runConversationGeneration = async (
     const rawReply = await callAiModel(prompt, apiConfig, innerSignal);
     throwIfAborted(innerSignal);
     const parsedReply = parseAiReplyPayload(rawReply);
-    const bubbleLines = normalizeAiBubbleLines(parsedReply.bubblePayload || rawReply);
+    const bubbleLines = normalizeAiBubbleLines(
+      parsedReply.bubblePayload || rawReply,
+      resolvedReplyBubbleMin,
+      resolvedReplyBubbleMax
+    );
     const generationId = `gen-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
     if (allowAiUnderlineInThisReply && parsedReply.underlineText && onAddAiUnderlineRange) {

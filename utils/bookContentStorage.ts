@@ -1,4 +1,4 @@
-import { Book, Chapter, ReaderBookState } from '../types';
+import { Book, Chapter, ReaderBookState, ReaderSummaryCard } from '../types';
 
 const BOOK_CONTENT_DB_NAME = 'app_book_content_v1';
 const BOOK_CONTENT_STORE = 'book_contents';
@@ -8,7 +8,53 @@ export interface StoredBookContent {
   fullText: string;
   chapters: Chapter[];
   readerState?: ReaderBookState;
+  bookSummaryCards?: ReaderSummaryCard[];
+  bookAutoSummaryLastEnd?: number;
 }
+
+const normalizeSummaryCard = (value: unknown): ReaderSummaryCard | null => {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Partial<ReaderSummaryCard>;
+  const id = typeof source.id === 'string' && source.id.trim() ? source.id : '';
+  const content = typeof source.content === 'string' ? source.content.trim() : '';
+  const start = Number(source.start);
+  const end = Number(source.end);
+  if (!id || !content || !Number.isFinite(start) || !Number.isFinite(end)) return null;
+  const safeStart = Math.max(0, Math.floor(start));
+  const safeEnd = Math.max(safeStart, Math.floor(end));
+  const createdAt = Number(source.createdAt);
+  const updatedAt = Number(source.updatedAt);
+  return {
+    id,
+    content,
+    start: safeStart,
+    end: safeEnd,
+    createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+  };
+};
+
+const normalizeStoredBookContent = (value: unknown): StoredBookContent | null => {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Partial<StoredBookContent>;
+  const fullText = typeof source.fullText === 'string' ? source.fullText : '';
+  const chapters = Array.isArray(source.chapters) ? source.chapters : [];
+  const bookSummaryCards = Array.isArray(source.bookSummaryCards)
+    ? source.bookSummaryCards
+        .map((item) => normalizeSummaryCard(item))
+        .filter((item): item is ReaderSummaryCard => Boolean(item))
+    : [];
+  const bookAutoSummaryLastEnd = Number.isFinite(Number(source.bookAutoSummaryLastEnd))
+    ? Math.max(0, Math.floor(Number(source.bookAutoSummaryLastEnd)))
+    : 0;
+  return {
+    fullText,
+    chapters,
+    readerState: source.readerState,
+    bookSummaryCards,
+    bookAutoSummaryLastEnd,
+  };
+};
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -41,11 +87,13 @@ export const saveBookContent = async (bookId: string, fullText: string, chapters
 
     const getRequest = store.get(bookId);
     getRequest.onsuccess = () => {
-      const existing = getRequest.result as StoredBookContent | undefined;
+      const existing = normalizeStoredBookContent(getRequest.result);
       const payload: StoredBookContent = {
         fullText,
         chapters,
         readerState: existing?.readerState,
+        bookSummaryCards: existing?.bookSummaryCards || [],
+        bookAutoSummaryLastEnd: existing?.bookAutoSummaryLastEnd || 0,
       };
       store.put(payload, bookId);
     };
@@ -66,11 +114,13 @@ export const saveBookReaderState = async (bookId: string, readerState: ReaderBoo
 
     const getRequest = store.get(bookId);
     getRequest.onsuccess = () => {
-      const existing = (getRequest.result as StoredBookContent | undefined) || { fullText: '', chapters: [] };
+      const existing = normalizeStoredBookContent(getRequest.result) || { fullText: '', chapters: [] };
       const payload: StoredBookContent = {
         fullText: existing.fullText || '',
         chapters: existing.chapters || [],
         readerState,
+        bookSummaryCards: existing.bookSummaryCards || [],
+        bookAutoSummaryLastEnd: existing.bookAutoSummaryLastEnd || 0,
       };
       store.put(payload, bookId);
     };
@@ -79,6 +129,42 @@ export const saveBookReaderState = async (bookId: string, readerState: ReaderBoo
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error || new Error('Failed to save reader state'));
     tx.onabort = () => reject(tx.error || new Error('Failed to save reader state'));
+  });
+};
+
+export const saveBookSummaryState = async (
+  bookId: string,
+  summary: {
+    bookSummaryCards?: ReaderSummaryCard[];
+    bookAutoSummaryLastEnd?: number;
+  }
+): Promise<void> => {
+  const db = await openBookContentDb();
+
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(BOOK_CONTENT_STORE, 'readwrite');
+    const store = tx.objectStore(BOOK_CONTENT_STORE);
+
+    const getRequest = store.get(bookId);
+    getRequest.onsuccess = () => {
+      const existing = normalizeStoredBookContent(getRequest.result) || { fullText: '', chapters: [] };
+      const payload: StoredBookContent = {
+        fullText: existing.fullText || '',
+        chapters: existing.chapters || [],
+        readerState: existing.readerState,
+        bookSummaryCards: summary.bookSummaryCards || existing.bookSummaryCards || [],
+        bookAutoSummaryLastEnd:
+          typeof summary.bookAutoSummaryLastEnd === 'number'
+            ? Math.max(0, Math.floor(summary.bookAutoSummaryLastEnd))
+            : existing.bookAutoSummaryLastEnd || 0,
+      };
+      store.put(payload, bookId);
+    };
+    getRequest.onerror = () => reject(getRequest.error || new Error('Failed to read existing summary state'));
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('Failed to save summary state'));
+    tx.onabort = () => reject(tx.error || new Error('Failed to save summary state'));
   });
 };
 
@@ -91,7 +177,7 @@ export const getBookContent = async (bookId: string): Promise<StoredBookContent 
     const request = store.get(bookId);
 
     request.onsuccess = () => {
-      const result = request.result as StoredBookContent | undefined;
+      const result = normalizeStoredBookContent(request.result);
       resolve(result || null);
     };
     request.onerror = () => reject(request.error || new Error('Failed to read book content'));
