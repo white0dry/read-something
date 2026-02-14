@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   Pencil,
@@ -489,10 +489,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const [selectedDeleteIds, setSelectedDeleteIds] = useState<string[]>([]);
   const [chatHistorySummary, setChatHistorySummary] = useState('');
   const [readingPrefixSummaryByBookId, setReadingPrefixSummaryByBookId] = useState<Record<string, string>>({});
-  const [panelHeaderHeightPx, setPanelHeaderHeightPx] = useState(0);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const panelHeaderRef = useRef<HTMLDivElement>(null);
   const isAiPanelOpenRef = useRef(isAiPanelOpen);
   const aiFabOpenTimerRef = useRef<number | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -501,6 +499,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const dragRafRef = useRef<number | null>(null);
   const pendingDragHeightRef = useRef<number | null>(null);
   const keepBottomRafRef = useRef<number | null>(null);
+  const scrollDistFromBottomRef = useRef<number | null>(null);
+  const releaseScrollDistLockAfterLayoutRef = useRef(false);
   const isMountedRef = useRef(true);
   const currentConversationKeyRef = useRef('');
   const pendingGenerationRef = useRef<{
@@ -567,8 +567,6 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
   const selectedDeleteIdSet = useMemo(() => new Set(selectedDeleteIds), [selectedDeleteIds]);
   const resolvedPanelHeight = clamp(panelHeightPx, panelBounds.min, panelBounds.max);
-  const panelBodyMaxHeight = Math.max(0, panelBounds.max - PANEL_GRIP_HEIGHT_PX);
-  const panelConversationMaxHeight = Math.max(0, panelBodyMaxHeight - panelHeaderHeightPx);
 
   const showToast = useCallback((text: string, type: 'error' | 'info' = 'info') => {
     if (toastTimerRef.current) {
@@ -597,6 +595,15 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       scrollMessagesToBottom('auto');
     });
   }, [scrollMessagesToBottom]);
+
+  const captureScrollDistFromBottom = useCallback(() => {
+    const scroller = messagesContainerRef.current;
+    if (!scroller) {
+      scrollDistFromBottomRef.current = null;
+      return;
+    }
+    scrollDistFromBottomRef.current = Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight);
+  }, []);
 
   const clearLongPressTimer = () => {
     if (longPressTimerRef.current) {
@@ -710,7 +717,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       return;
     }
     const viewportBottomGap = Math.max(0, window.innerHeight - readerRect.bottom);
-    const nextBottom = Math.max(16, Math.round(viewportBottomGap + 14));
+    const nextBottom = Math.max(16, Math.round(viewportBottomGap + 10));
     setFabBottomPx(nextBottom);
   }, [readerContentRef]);
 
@@ -740,30 +747,6 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   }, [measurePanelBounds, measureFabBottom, readerContentRef]);
 
   useEffect(() => {
-    const measureHeader = () => {
-      const measured = panelHeaderRef.current?.getBoundingClientRect().height || 0;
-      const next = Math.max(0, Math.round(measured));
-      setPanelHeaderHeightPx((prev) => (prev === next ? prev : next));
-    };
-
-    measureHeader();
-    const observed = panelHeaderRef.current;
-    const observer =
-      typeof ResizeObserver !== 'undefined' && observed
-        ? new ResizeObserver(() => {
-            measureHeader();
-          })
-        : null;
-    observer?.observe(observed);
-    window.addEventListener('resize', measureHeader);
-
-    return () => {
-      window.removeEventListener('resize', measureHeader);
-      observer?.disconnect();
-    };
-  }, []);
-
-  useEffect(() => {
     setPanelHeightPx((prev) => clamp(prev, panelBounds.min, panelBounds.max));
   }, [panelBounds]);
 
@@ -791,10 +774,22 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     return () => window.cancelAnimationFrame(rafId);
   }, [messages, isAiPanelOpen, isAiLoading, scrollMessagesToBottom]);
 
-  useEffect(() => {
-    if (!isAiPanelOpen) return;
-    queueKeepLastMessageVisible();
-  }, [resolvedPanelHeight, panelHeaderHeightPx, isAiPanelOpen, queueKeepLastMessageVisible]);
+  useLayoutEffect(() => {
+    const dist = scrollDistFromBottomRef.current;
+    if (!Number.isFinite(dist)) return;
+    const scroller = messagesContainerRef.current;
+    if (!scroller) {
+      scrollDistFromBottomRef.current = null;
+      releaseScrollDistLockAfterLayoutRef.current = false;
+      return;
+    }
+    const nextTop = scroller.scrollHeight - scroller.clientHeight - (dist as number);
+    scroller.scrollTop = Math.max(0, nextTop);
+    if (releaseScrollDistLockAfterLayoutRef.current) {
+      scrollDistFromBottomRef.current = null;
+      releaseScrollDistLockAfterLayoutRef.current = false;
+    }
+  }, [resolvedPanelHeight]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -908,6 +903,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       startHeight: resolvedPanelHeight,
       moved: false,
     };
+    releaseScrollDistLockAfterLayoutRef.current = false;
+    captureScrollDistFromBottom();
     setIsPanelDragging(true);
   };
 
@@ -931,7 +928,6 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       const next = pendingDragHeightRef.current;
       if (!Number.isFinite(next)) return;
       setPanelHeightPx(next as number);
-      queueKeepLastMessageVisible();
     });
   };
 
@@ -950,8 +946,20 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
     const shouldCollapse = !drag.moved;
     if (Number.isFinite(pendingDragHeightRef.current)) {
-      setPanelHeightPx(pendingDragHeightRef.current as number);
+      const next = pendingDragHeightRef.current as number;
+      releaseScrollDistLockAfterLayoutRef.current = true;
+      setPanelHeightPx((prev) => {
+        if (prev === next) {
+          releaseScrollDistLockAfterLayoutRef.current = false;
+          scrollDistFromBottomRef.current = null;
+          return prev;
+        }
+        return next;
+      });
       pendingDragHeightRef.current = null;
+    } else {
+      scrollDistFromBottomRef.current = null;
+      releaseScrollDistLockAfterLayoutRef.current = false;
     }
     if (dragRafRef.current) {
       window.cancelAnimationFrame(dragRafRef.current);
@@ -959,7 +967,6 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     }
     clearDragState();
     setIsPanelDragging(false);
-    queueKeepLastMessageVisible();
     if (shouldCollapse) {
       setIsAiPanelOpen(false);
     }
@@ -976,8 +983,20 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     }
 
     if (Number.isFinite(pendingDragHeightRef.current)) {
-      setPanelHeightPx(pendingDragHeightRef.current as number);
+      const next = pendingDragHeightRef.current as number;
+      releaseScrollDistLockAfterLayoutRef.current = true;
+      setPanelHeightPx((prev) => {
+        if (prev === next) {
+          releaseScrollDistLockAfterLayoutRef.current = false;
+          scrollDistFromBottomRef.current = null;
+          return prev;
+        }
+        return next;
+      });
       pendingDragHeightRef.current = null;
+    } else {
+      scrollDistFromBottomRef.current = null;
+      releaseScrollDistLockAfterLayoutRef.current = false;
     }
     if (dragRafRef.current) {
       window.cancelAnimationFrame(dragRafRef.current);
@@ -985,7 +1004,6 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     }
     clearDragState();
     setIsPanelDragging(false);
-    queueKeepLastMessageVisible();
   };
 
   const getBubbleDisplayName = (sender: ChatSender) => (sender === 'user' ? userRealName : characterRealName);
@@ -1695,7 +1713,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           </div>
 
           <div className="flex flex-col h-[calc(100%-2rem)] min-h-0">
-          <div ref={panelHeaderRef} className="px-6 pb-2 flex items-center">
+          <div className="px-6 pb-2 flex items-center">
             <div className="flex items-center gap-2 min-w-0">
               <div
                 className={`w-10 h-10 rounded-full overflow-hidden flex items-center justify-center border-2 border-transparent ${
@@ -1710,13 +1728,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
             </div>
           </div>
 
-          <div className="relative flex-1 min-h-0 overflow-hidden">
-            <div
-              className="absolute bottom-0 left-0 right-0 flex flex-col min-h-0"
-              style={{
-                height: `${panelConversationMaxHeight}px`,
-              }}
-            >
+          <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
           <div
             ref={messagesContainerRef}
             className={`reader-scroll-panel reader-message-scroll flex-1 min-h-0 overflow-y-auto p-4 px-6 transition-transform duration-200 ${
@@ -1931,7 +1943,6 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
             </div>
           </div>
             </div>
-          </div>
           </div>
         </div>
       </div>
