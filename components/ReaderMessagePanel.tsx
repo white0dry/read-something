@@ -606,6 +606,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     return items;
   }, [visibleMessages, readerMoreAppearance.showMessageTime, readerMoreAppearance.timeGapMinutes]);
   const resolvedPanelHeight = clamp(panelHeightPx, panelBounds.min, panelBounds.max);
+  const safeBottomInset = Math.max(0, safeAreaBottom || 0);
+  const resolvedPanelVisualHeight = resolvedPanelHeight + safeBottomInset;
 
   const updateHiddenBubbleIds = useCallback((updater: (prev: string[]) => string[]) => {
     const prev = hiddenBubbleIdsRef.current;
@@ -2497,16 +2499,15 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           isAiPanelOpen ? 'translate-y-0 opacity-100' : 'translate-y-full opacity-0'
         }`}
         style={{
-          height: `${resolvedPanelHeight}px`,
-          bottom: `${Math.max(0, safeAreaBottom || 0)}px`,
+          height: `${resolvedPanelVisualHeight}px`,
         }}
       >
         <div
           className={`absolute bottom-0 left-0 right-0 pointer-events-auto overflow-hidden ${
-            isDarkMode ? 'bg-[#2d3748] rounded-t-3xl shadow-[0_-5px_20px_rgba(0,0,0,0.4)]' : 'neu-flat rounded-t-3xl'
+            isDarkMode ? 'bg-[#2d3748] rounded-t-3xl rounded-b-none shadow-[0_-5px_20px_rgba(0,0,0,0.4)]' : 'neu-flat rounded-t-3xl rounded-b-none'
           }`}
           style={{
-            height: `${resolvedPanelHeight}px`,
+            height: `${resolvedPanelVisualHeight}px`,
             boxShadow: isDarkMode ? '' : '0 -10px 20px -5px rgba(163,177,198, 0.4)',
           }}
         >
@@ -2655,7 +2656,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
             </div>
           </div>
 
-          <div className="p-4 pb-6 relative z-10">
+          <div className="p-4 pb-6 relative z-10" style={{ paddingBottom: `${24 + safeBottomInset}px` }}>
             {toast && (
               <div
                 className={`absolute z-20 left-1/2 -translate-x-1/2 -top-8 px-6 py-2 rounded-full flex items-center gap-2 border backdrop-blur-md text-xs font-bold ${
