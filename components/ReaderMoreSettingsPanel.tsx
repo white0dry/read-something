@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Check, ChevronDown, Trash2, Image as ImageIcon, Link as LinkIcon, Loader2, X, RefreshCw, Zap, Save, Edit2, Palette, Settings, Archive } from 'lucide-react';
 import { ApiProvider, AppSettings, ReaderSummaryCard } from '../types';
 import ResolvedImage from './ResolvedImage';
@@ -18,6 +18,7 @@ type FetchState = 'IDLE' | 'LOADING' | 'SUCCESS' | 'ERROR';
 type TabKey = 'appearance' | 'feature' | 'session';
 type ModalType = 'none' | 'book' | 'chat' | 'bgUrl';
 const PANEL_VIEW_TRANSITION_MS = 260;
+const MODAL_FADE_TRANSITION_MS = 220;
 
 interface Props {
   isDarkMode: boolean;
@@ -231,12 +232,14 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
   const [rendered, setRendered] = useState(isOpen);
   const [closing, setClosing] = useState(false);
   const [modal, setModal] = useState<ModalType>('none');
+  const [modalClosing, setModalClosing] = useState(false);
   const [bgUrlInput, setBgUrlInput] = useState('');
   const [presetName, setPresetName] = useState('');
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
   const [bookRange, setBookRange] = useState({ start: 1, end: 1 });
   const [chatRange, setChatRange] = useState({ start: 1, end: 1 });
   const closeTimerRef = useRef<number | null>(null);
+  const modalCloseTimerRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -249,13 +252,18 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     if (!rendered) return;
     setClosing(true);
     closeTimerRef.current = window.setTimeout(() => {
+      if (modalCloseTimerRef.current) window.clearTimeout(modalCloseTimerRef.current);
       setRendered(false);
       setClosing(false);
+      setModalClosing(false);
       setModal('none');
     }, PANEL_VIEW_TRANSITION_MS);
   }, [isOpen, rendered]);
 
-  useEffect(() => () => closeTimerRef.current && window.clearTimeout(closeTimerRef.current), []);
+  useEffect(() => () => {
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+    if (modalCloseTimerRef.current) window.clearTimeout(modalCloseTimerRef.current);
+  }, []);
   useEffect(() => setBookRange({ start: 1, end: Math.max(1, currentReadCharOffset || 1) }), [currentReadCharOffset, modal]);
   useEffect(() => setChatRange({ start: 1, end: Math.max(1, totalMessages || 1) }), [totalMessages, modal]);
 
@@ -302,6 +310,20 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     <input type="number" min={min} max={max} value={value} onChange={(e) => onChange(Number(e.target.value || '0'))}
       className={`w-14 h-8 rounded-lg px-2 text-xs text-right outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${inputClass}`} />
   );
+  const openModal = (nextModal: Exclude<ModalType, 'none'>) => {
+    if (modalCloseTimerRef.current) window.clearTimeout(modalCloseTimerRef.current);
+    setModalClosing(false);
+    setModal(nextModal);
+  };
+  const closeModal = () => {
+    if (modal === 'none') return;
+    if (modalCloseTimerRef.current) window.clearTimeout(modalCloseTimerRef.current);
+    setModalClosing(true);
+    modalCloseTimerRef.current = window.setTimeout(() => {
+      setModal('none');
+      setModalClosing(false);
+    }, MODAL_FADE_TRANSITION_MS);
+  };
 
   const applySummaryApiSettings = () => {
     // Visual feedback for applying settings
@@ -324,12 +346,12 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
       else onRequestManualChatSummary(s, e);
     };
     return (
-      <div className={`fixed inset-0 z-[95] flex items-center justify-center p-6 ${closing ? 'app-fade-exit' : 'app-fade-enter'}`}>
-        <button type="button" className="absolute inset-0 bg-black/45 backdrop-blur-sm" onClick={() => setModal('none')} />
-        <div className={`relative w-full max-w-2xl max-h-[80vh] rounded-3xl p-5 flex flex-col ${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'bg-[#e0e5ec] border-white/50'} border shadow-2xl ${closing ? 'app-fade-exit' : 'app-fade-enter'}`}>
+      <div className={`fixed inset-0 z-[95] flex items-center justify-center p-6 ${modalClosing ? 'app-fade-exit' : 'app-fade-enter'}`}>
+        <button type="button" className="absolute inset-0 bg-black/45 backdrop-blur-sm" onClick={closeModal} />
+        <div className={`relative w-full max-w-2xl max-h-[80vh] rounded-3xl p-5 flex flex-col ${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'bg-[#e0e5ec] border-white/50'} border shadow-2xl ${modalClosing ? 'app-fade-exit' : 'app-fade-enter'}`}>
           <div className="flex items-center justify-between mb-4">
             <div className={`text-lg font-bold ${headingClass}`}>{isBook ? '书籍内容总结' : '聊天记录总结'}</div>
-            <button type="button" onClick={() => setModal('none')} className={`w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-400 transition-colors ${btnClass} ${activeBtnClass}`}>
+            <button type="button" onClick={closeModal} className={`w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-400 transition-colors ${btnClass} ${activeBtnClass}`}>
               <X size={18} />
             </button>
           </div>
@@ -380,10 +402,10 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
   const renderBgUrlModal = () => {
     if (modal !== 'bgUrl') return null;
     return (
-      <div className={`fixed inset-0 z-[95] flex items-center justify-center p-6 ${closing ? 'app-fade-exit' : 'app-fade-enter'}`}>
-        <button type="button" className="absolute inset-0 bg-black/45 backdrop-blur-sm" onClick={() => setModal('none')} />
-        <div className={`relative w-full max-w-md rounded-2xl p-6 ${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'bg-[#e0e5ec] border-white/50'} border shadow-2xl ${closing ? 'app-fade-exit' : 'app-fade-enter'}`}>
-          <button type="button" onClick={() => setModal('none')} className={`absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-400 transition-colors ${btnClass} ${activeBtnClass}`}>
+      <div className={`fixed inset-0 z-[95] flex items-center justify-center p-6 ${modalClosing ? 'app-fade-exit' : 'app-fade-enter'}`}>
+        <button type="button" className="absolute inset-0 bg-black/45 backdrop-blur-sm" onClick={closeModal} />
+        <div className={`relative w-full max-w-md rounded-2xl p-6 ${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'bg-[#e0e5ec] border-white/50'} border shadow-2xl ${modalClosing ? 'app-fade-exit' : 'app-fade-enter'}`}>
+          <button type="button" onClick={closeModal} className={`absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-400 transition-colors ${btnClass} ${activeBtnClass}`}>
             <X size={18} />
           </button>
           <h3 className={`text-lg font-bold mb-6 ${headingClass}`}>输入网络链接</h3>
@@ -395,13 +417,13 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
             className={`w-full h-12 px-4 rounded-xl text-sm outline-none mb-4 ${inputClass}`}
           />
           <div className="flex gap-3">
-            <button onClick={() => setModal('none')} className={`flex-1 h-11 rounded-full text-slate-500 text-sm font-bold ${btnClass} ${activeBtnClass} transition-all`}>
+            <button onClick={closeModal} className={`flex-1 h-11 rounded-full text-slate-500 text-sm font-bold ${btnClass} ${activeBtnClass} transition-all`}>
               取消
             </button>
             <button
               onClick={() => {
                 onSetChatBackgroundImageFromUrl(bgUrlInput.trim());
-                setModal('none');
+                closeModal();
                 setBgUrlInput('');
               }}
               disabled={!bgUrlInput.trim()}
@@ -468,7 +490,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                 {tab === 'appearance' && (
                   <div className="space-y-0">
                     {/* 气泡字体大小 */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <div className={`text-sm font-bold mb-3 ${headingClass}`}>气泡字体大小</div>
                       <div className="flex items-center justify-between text-xs text-slate-500 mb-2">
                         <span>缩放比例</span>
@@ -483,10 +505,10 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                       </div>
                     </div>
 
-                    <div className="w-full h-[1px] bg-slate-300/20 my-3" />
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
 
                     {/* 聊天背景图片 */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <div className={`text-sm font-bold mb-3 ${headingClass}`}>聊天背景图片</div>
                       <div className={`mb-3 aspect-square rounded-2xl overflow-hidden border border-slate-300/20 ${pressedClass}`}>
                         {appearanceSettings.chatBackgroundImage ? (
@@ -502,7 +524,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                           <ImageIcon size={16} />
                           <span>本地上传</span>
                         </button>
-                        <button type="button" onClick={() => setModal('bgUrl')} className={`flex-1 h-10 rounded-xl text-sm flex items-center justify-center gap-2 ${btnClass} ${activeBtnClass} transition-all`}>
+                        <button type="button" onClick={() => openModal('bgUrl')} className={`flex-1 h-10 rounded-xl text-sm flex items-center justify-center gap-2 ${btnClass} ${activeBtnClass} transition-all`}>
                           <LinkIcon size={16} />
                           <span>网络链接</span>
                         </button>
@@ -522,20 +544,20 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                       </div>
                     </div>
 
-                    <div className="w-full h-[1px] bg-slate-300/20 my-3" />
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
 
                     {/* 时间显示 */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <div className="flex items-center justify-between">
                         <span className={`text-sm font-bold ${headingClass}`}>时间显示</span>
                         <Toggle checked={appearanceSettings.showMessageTime} onClick={() => onUpdateAppearanceSettings({ showMessageTime: !appearanceSettings.showMessageTime })} pressedClass={pressedClass} activeClass={activeBtnClass} />
                       </div>
                     </div>
 
-                    <div className="w-full h-[1px] bg-slate-300/20 my-3" />
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
 
                     {/* 自定义气泡 CSS */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <div className={`text-sm font-bold mb-3 ${headingClass}`}>自定义气泡 CSS</div>
                       <textarea
                         value={appearanceSettings.bubbleCssDraft}
@@ -659,37 +681,37 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                 {tab === 'feature' && (
                   <div className="space-y-0">
                     {/* 记忆消息条数 */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <div className="flex items-center justify-between">
                         <span className={`text-sm font-bold ${headingClass}`}>记忆消息条数</span>
                         {numInput(featureSettings.memoryBubbleCount, (v) => onUpdateFeatureSettings({ memoryBubbleCount: clampInt(v, 20, 5000) }), 20, 5000)}
                       </div>
                     </div>
 
-                    <div className="w-full h-[1px] bg-slate-300/20 my-3" />
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
 
                     {/* 回复最小条数 */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <div className="flex items-center justify-between">
                         <span className={`text-sm font-bold ${headingClass}`}>回复最小条数</span>
                         {numInput(featureSettings.replyBubbleMin, (v) => onUpdateFeatureSettings({ replyBubbleMin: clampInt(v, 1, 20), replyBubbleMax: Math.max(clampInt(v, 1, 20), featureSettings.replyBubbleMax) }), 1, 20)}
                       </div>
                     </div>
 
-                    <div className="w-full h-[1px] bg-slate-300/20 my-3" />
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
 
                     {/* 回复最大条数 */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <div className="flex items-center justify-between">
                         <span className={`text-sm font-bold ${headingClass}`}>回复最大条数</span>
                         {numInput(featureSettings.replyBubbleMax, (v) => onUpdateFeatureSettings({ replyBubbleMax: clampInt(v, 1, 20), replyBubbleMin: Math.min(clampInt(v, 1, 20), featureSettings.replyBubbleMin) }), 1, 20)}
                       </div>
                     </div>
 
-                    <div className="w-full h-[1px] bg-slate-300/20 my-3" />
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
 
                     {/* 聊天自动总结 */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <div className="flex items-center justify-between mb-2">
                         <span className={`text-sm font-bold ${headingClass}`}>聊天自动总结</span>
                         <Toggle checked={featureSettings.autoChatSummaryEnabled} onClick={() => onUpdateFeatureSettings({ autoChatSummaryEnabled: !featureSettings.autoChatSummaryEnabled })} pressedClass={pressedClass} activeClass={activeBtnClass} />
@@ -704,10 +726,10 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                       </div>
                     </div>
 
-                    <div className="w-full h-[1px] bg-slate-300/20 my-3" />
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
 
                     {/* 书籍自动总结 */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <div className="flex items-center justify-between mb-2">
                         <span className={`text-sm font-bold ${headingClass}`}>书籍自动总结</span>
                         <Toggle checked={featureSettings.autoBookSummaryEnabled} onClick={() => onUpdateFeatureSettings({ autoBookSummaryEnabled: !featureSettings.autoBookSummaryEnabled })} pressedClass={pressedClass} activeClass={activeBtnClass} />
@@ -722,10 +744,10 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                       </div>
                     </div>
 
-                    <div className="w-full h-[1px] bg-slate-300/20 my-3" />
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
 
                     {/* 总结专用副 API */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <div className="flex items-center justify-between mb-2">
                         <div>
                           <div className={`text-sm font-bold ${headingClass}`}>总结专用副 API</div>
@@ -822,7 +844,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                 {tab === 'session' && (
                   <div className="space-y-0">
                     {/* 会话存档选择 */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <div className={`text-sm font-bold mb-3 ${headingClass}`}>会话存档选择</div>
                       {archiveOptions.length === 0 ? (
                         <div className="text-xs text-slate-500 text-center py-6">暂无可用存档</div>
@@ -871,26 +893,26 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                       )}
                     </div>
 
-                    <div className="w-full h-[1px] bg-slate-300/20 my-3" />
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
 
                     {/* 书籍内容总结 */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <button
                         type="button"
-                        onClick={() => setModal('book')}
+                        onClick={() => openModal('book')}
                         className={`w-full h-10 rounded-xl text-sm font-bold text-rose-400 ${btnClass} ${activeBtnClass} transition-all`}
                       >
                         书籍总结浮窗
                       </button>
                     </div>
 
-                    <div className="w-full h-[1px] bg-slate-300/20 my-3" />
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
 
                     {/* 聊天记录总结 */}
-                    <div className="py-3">
+                    <div className="py-5">
                       <button
                         type="button"
-                        onClick={() => setModal('chat')}
+                        onClick={() => openModal('chat')}
                         className={`w-full h-10 rounded-xl text-sm font-bold text-rose-400 ${btnClass} ${activeBtnClass} transition-all`}
                       >
                         聊天总结浮窗
