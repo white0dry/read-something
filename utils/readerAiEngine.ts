@@ -727,13 +727,18 @@ export const runConversationGeneration = async (
     const normalizedUnderlineProbability = clamp(Math.floor(aiProactiveUnderlineProbability), 0, 100);
     const allowAiUnderlineInThisReply =
       aiProactiveUnderlineEnabled && Math.random() * 100 < normalizedUnderlineProbability;
-    const normalizedMemoryBubbleCount = clamp(
-      Math.floor(Number(memoryBubbleCount) || DEFAULT_MEMORY_BUBBLE_COUNT),
-      1,
-      5000
-    );
-    const normalizedReplyMin = clamp(Math.floor(Number(replyBubbleMin) || DEFAULT_REPLY_BUBBLE_MIN), 1, 20);
-    const normalizedReplyMax = clamp(Math.floor(Number(replyBubbleMax) || DEFAULT_REPLY_BUBBLE_MAX), 1, 20);
+    const memoryCountRaw = Number(memoryBubbleCount);
+    const normalizedMemoryBubbleCount = Number.isFinite(memoryCountRaw)
+      ? Math.round(memoryCountRaw)
+      : DEFAULT_MEMORY_BUBBLE_COUNT;
+    const replyMinRaw = Number(replyBubbleMin);
+    const normalizedReplyMin = Number.isFinite(replyMinRaw)
+      ? Math.round(replyMinRaw)
+      : DEFAULT_REPLY_BUBBLE_MIN;
+    const replyMaxRaw = Number(replyBubbleMax);
+    const normalizedReplyMax = Number.isFinite(replyMaxRaw)
+      ? Math.round(replyMaxRaw)
+      : DEFAULT_REPLY_BUBBLE_MAX;
     const resolvedReplyBubbleMin = Math.min(normalizedReplyMin, normalizedReplyMax);
     const resolvedReplyBubbleMax = Math.max(normalizedReplyMin, normalizedReplyMax);
 

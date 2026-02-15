@@ -10,6 +10,7 @@ import { deleteImageByRef, migrateDataUrlToImageRef } from './utils/imageStorage
 import { compactBookForState, deleteBookContent, getBookContent, migrateInlineBookContent, saveBookContent } from './utils/bookContentStorage';
 import { buildConversationKey, readConversationBucket, persistConversationBucket } from './utils/readerChatRuntime';
 import { buildCharacterWorldBookSections, buildReadingContextSnapshot, runConversationGeneration } from './utils/readerAiEngine';
+import { DEFAULT_READER_BUBBLE_CSS_PRESETS, normalizeReaderBubbleCssPresets } from './utils/readerBubbleCssPresets';
 
 interface Notification {
   show: boolean;
@@ -45,7 +46,7 @@ const DEFAULT_READER_MORE_SETTINGS = {
     timeGapMinutes: FIXED_MESSAGE_TIME_GAP_MINUTES,
     bubbleCssDraft: '',
     bubbleCssApplied: '',
-    bubbleCssPresets: [],
+    bubbleCssPresets: DEFAULT_READER_BUBBLE_CSS_PRESETS.map((item) => ({ ...item })),
     selectedBubbleCssPresetId: null as string | null,
   },
   feature: {
@@ -57,6 +58,7 @@ const DEFAULT_READER_MORE_SETTINGS = {
     autoBookSummaryEnabled: false,
     autoBookSummaryTriggerChars: 5000,
     summaryApiEnabled: false,
+    summaryApiPresetId: null as string | null,
     summaryApi: {
       provider: 'OPENAI' as ApiProvider,
       endpoint: 'https://api.openai.com/v1',
@@ -144,26 +146,12 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
     featureSource.summaryApi && typeof featureSource.summaryApi === 'object'
       ? (featureSource.summaryApi as Partial<AppSettings['readerMore']['feature']['summaryApi']>)
       : {};
-  const normalizedBubbleCssPresets = Array.isArray(appearanceSource.bubbleCssPresets)
-    ? appearanceSource.bubbleCssPresets
-        .map((item) => {
-          if (!item || typeof item !== 'object') return null;
-          const id = typeof item.id === 'string' ? item.id.trim() : '';
-          const name = typeof item.name === 'string' ? item.name.trim() : '';
-          const css = typeof item.css === 'string' ? item.css : '';
-          if (!id || !name) return null;
-          return { id, name, css };
-        })
-        .filter(
-          (
-            item
-          ): item is {
-            id: string;
-            name: string;
-            css: string;
-          } => Boolean(item)
-        )
-    : [];
+  const summaryApiPresetIdRaw =
+    typeof featureSource.summaryApiPresetId === 'string'
+      ? featureSource.summaryApiPresetId.trim()
+      : '';
+  const summaryApiPresetId = summaryApiPresetIdRaw || null;
+  const normalizedBubbleCssPresets = normalizeReaderBubbleCssPresets(appearanceSource.bubbleCssPresets);
   const selectedBubbleCssPresetIdRaw =
     typeof appearanceSource.selectedBubbleCssPresetId === 'string'
       ? appearanceSource.selectedBubbleCssPresetId
@@ -201,15 +189,15 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
     feature: {
       memoryBubbleCount:
         typeof featureSource.memoryBubbleCount === 'number' && Number.isFinite(featureSource.memoryBubbleCount)
-          ? Math.min(5000, Math.max(20, Math.round(featureSource.memoryBubbleCount)))
+          ? Math.round(featureSource.memoryBubbleCount)
           : DEFAULT_READER_MORE_SETTINGS.feature.memoryBubbleCount,
       replyBubbleMin:
         typeof featureSource.replyBubbleMin === 'number' && Number.isFinite(featureSource.replyBubbleMin)
-          ? Math.min(20, Math.max(1, Math.round(featureSource.replyBubbleMin)))
+          ? Math.round(featureSource.replyBubbleMin)
           : DEFAULT_READER_MORE_SETTINGS.feature.replyBubbleMin,
       replyBubbleMax:
         typeof featureSource.replyBubbleMax === 'number' && Number.isFinite(featureSource.replyBubbleMax)
-          ? Math.min(20, Math.max(1, Math.round(featureSource.replyBubbleMax)))
+          ? Math.round(featureSource.replyBubbleMax)
           : DEFAULT_READER_MORE_SETTINGS.feature.replyBubbleMax,
       autoChatSummaryEnabled:
         typeof featureSource.autoChatSummaryEnabled === 'boolean'
@@ -217,7 +205,7 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
           : DEFAULT_READER_MORE_SETTINGS.feature.autoChatSummaryEnabled,
       autoChatSummaryTriggerCount:
         typeof featureSource.autoChatSummaryTriggerCount === 'number' && Number.isFinite(featureSource.autoChatSummaryTriggerCount)
-          ? Math.min(5000, Math.max(100, Math.round(featureSource.autoChatSummaryTriggerCount)))
+          ? Math.round(featureSource.autoChatSummaryTriggerCount)
           : DEFAULT_READER_MORE_SETTINGS.feature.autoChatSummaryTriggerCount,
       autoBookSummaryEnabled:
         typeof featureSource.autoBookSummaryEnabled === 'boolean'
@@ -225,12 +213,13 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
           : DEFAULT_READER_MORE_SETTINGS.feature.autoBookSummaryEnabled,
       autoBookSummaryTriggerChars:
         typeof featureSource.autoBookSummaryTriggerChars === 'number' && Number.isFinite(featureSource.autoBookSummaryTriggerChars)
-          ? Math.min(50000, Math.max(1000, Math.round(featureSource.autoBookSummaryTriggerChars)))
+          ? Math.round(featureSource.autoBookSummaryTriggerChars)
           : DEFAULT_READER_MORE_SETTINGS.feature.autoBookSummaryTriggerChars,
       summaryApiEnabled:
         typeof featureSource.summaryApiEnabled === 'boolean'
           ? featureSource.summaryApiEnabled
           : DEFAULT_READER_MORE_SETTINGS.feature.summaryApiEnabled,
+      summaryApiPresetId,
       summaryApi: {
         provider:
           summaryApiSource.provider === 'OPENAI' ||
@@ -255,11 +244,6 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
       },
     },
   };
-  const normalizedReplyMin = readerMore.feature.replyBubbleMin;
-  const normalizedReplyMax = readerMore.feature.replyBubbleMax;
-  readerMore.feature.replyBubbleMin = Math.min(normalizedReplyMin, normalizedReplyMax);
-  readerMore.feature.replyBubbleMax = Math.max(normalizedReplyMin, normalizedReplyMax);
-
   return {
     activeCommentsEnabled,
     aiProactiveUnderlineEnabled,
@@ -1380,6 +1364,7 @@ const App: React.FC = () => {
             safeAreaTop={manualSafeAreaTop}
             safeAreaBottom={manualSafeAreaBottom}
             apiConfig={apiConfig}
+            apiPresets={apiPresets}
             personas={personas}
             activePersonaId={activePersonaId}
             onSelectPersona={setActivePersonaId}

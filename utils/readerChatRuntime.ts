@@ -1,4 +1,4 @@
-import { ReaderSummaryCard } from '../types';
+import { ReaderAiUnderlineRange, ReaderSummaryCard } from '../types';
 
 export type ChatSender = 'user' | 'character';
 
@@ -25,8 +25,11 @@ export interface ChatBubble {
 export interface ReaderChatBucket {
   updatedAt: number;
   messages: ChatBubble[];
+  personaName: string;
+  characterName: string;
   chatHistorySummary: string;
   readingPrefixSummaryByBookId: Record<string, string>;
+  readingAiUnderlinesByBookId: Record<string, Record<string, ReaderAiUnderlineRange[]>>;
   chatSummaryCards: ReaderSummaryCard[];
   chatAutoSummaryLastEnd: number;
 }
@@ -82,6 +85,117 @@ export const formatTimestampMinute = (timestamp: number) => {
 export const buildConversationKey = (bookId: string | null, personaId: string | null, characterId: string | null) =>
   `book:${bookId || 'none'}::persona:${personaId || 'none'}::character:${characterId || 'none'}`;
 
+interface ParsedConversationKey {
+  bookId: string | null;
+  personaId: string | null;
+  characterId: string | null;
+}
+
+const parseConversationKey = (conversationKey: string): ParsedConversationKey | null => {
+  const matched = conversationKey.match(/^book:(.+?)::persona:(.+?)::character:(.+)$/);
+  if (!matched) return null;
+  return {
+    bookId: matched[1] === 'none' ? null : matched[1],
+    personaId: matched[2] === 'none' ? null : matched[2],
+    characterId: matched[3] === 'none' ? null : matched[3],
+  };
+};
+
+const buildConversationArchiveIdentity = (conversationKey: string, bucket: ReaderChatBucket) => {
+  const parsed = parseConversationKey(conversationKey);
+  if (!parsed) return '';
+  const personaName = compactText(bucket.personaName || '').toLowerCase();
+  const characterName = compactText(bucket.characterName || '').toLowerCase();
+  if (!personaName || !characterName) return '';
+  return `book:${parsed.bookId || 'none'}::persona-name:${personaName}::character-name:${characterName}`;
+};
+
+const getBucketScore = (bucket: ReaderChatBucket) => {
+  const messageCount = Array.isArray(bucket.messages) ? bucket.messages.length : 0;
+  const summaryCount = Array.isArray(bucket.chatSummaryCards) ? bucket.chatSummaryCards.length : 0;
+  const updatedAt = Number(bucket.updatedAt) || 0;
+  return messageCount * 1_000_000 + summaryCount * 1_000 + updatedAt;
+};
+
+const mergeDuplicateBuckets = (left: ReaderChatBucket, right: ReaderChatBucket): ReaderChatBucket => {
+  const preferLeft = getBucketScore(left) >= getBucketScore(right);
+  const primary = preferLeft ? left : right;
+  const secondary = preferLeft ? right : left;
+  return normalizeChatBucket({
+    ...primary,
+    personaName: primary.personaName || secondary.personaName || '',
+    characterName: primary.characterName || secondary.characterName || '',
+    messages:
+      (Array.isArray(primary.messages) ? primary.messages.length : 0) >=
+      (Array.isArray(secondary.messages) ? secondary.messages.length : 0)
+        ? primary.messages
+        : secondary.messages,
+    chatHistorySummary: primary.chatHistorySummary || secondary.chatHistorySummary || '',
+    readingPrefixSummaryByBookId: {
+      ...(secondary.readingPrefixSummaryByBookId || {}),
+      ...(primary.readingPrefixSummaryByBookId || {}),
+    },
+    readingAiUnderlinesByBookId: {
+      ...(secondary.readingAiUnderlinesByBookId || {}),
+      ...(primary.readingAiUnderlinesByBookId || {}),
+    },
+    chatSummaryCards:
+      (Array.isArray(primary.chatSummaryCards) ? primary.chatSummaryCards.length : 0) >=
+      (Array.isArray(secondary.chatSummaryCards) ? secondary.chatSummaryCards.length : 0)
+        ? primary.chatSummaryCards
+        : secondary.chatSummaryCards,
+    chatAutoSummaryLastEnd: Math.max(
+      Number(primary.chatAutoSummaryLastEnd) || 0,
+      Number(secondary.chatAutoSummaryLastEnd) || 0
+    ),
+    updatedAt: Math.max(Number(primary.updatedAt) || 0, Number(secondary.updatedAt) || 0),
+  });
+};
+
+const dedupeConversationStore = (
+  sourceStore: ReaderChatStore,
+  preferredConversationKey?: string
+): { store: ReaderChatStore; changed: boolean } => {
+  const store: ReaderChatStore = { ...sourceStore };
+  const identityToKey = new Map<string, string>();
+  let changed = false;
+
+  Object.keys(store).forEach((conversationKey) => {
+    const bucket = store[conversationKey];
+    if (!bucket) return;
+    const identity = buildConversationArchiveIdentity(conversationKey, bucket);
+    if (!identity) return;
+    const existingKey = identityToKey.get(identity);
+    if (!existingKey) {
+      identityToKey.set(identity, conversationKey);
+      return;
+    }
+    const existingBucket = store[existingKey];
+    if (!existingBucket) {
+      identityToKey.set(identity, conversationKey);
+      return;
+    }
+
+    const keepKey =
+      preferredConversationKey && (existingKey === preferredConversationKey || conversationKey === preferredConversationKey)
+        ? preferredConversationKey
+        : getBucketScore(existingBucket) >= getBucketScore(bucket)
+          ? existingKey
+          : conversationKey;
+    const dropKey = keepKey === existingKey ? conversationKey : existingKey;
+    const keepBucket = store[keepKey];
+    const dropBucket = store[dropKey];
+    if (!keepBucket || !dropBucket) return;
+
+    store[keepKey] = mergeDuplicateBuckets(keepBucket, dropBucket);
+    delete store[dropKey];
+    identityToKey.set(identity, keepKey);
+    changed = true;
+  });
+
+  return { store, changed };
+};
+
 export const buildUserPromptRecord = (
   userRealName: string,
   content: string,
@@ -103,8 +217,11 @@ export const buildCharacterPromptRecord = (characterRealName: string, content: s
 export const defaultChatBucket = (): ReaderChatBucket => ({
   updatedAt: Date.now(),
   messages: [],
+  personaName: '',
+  characterName: '',
   chatHistorySummary: '',
   readingPrefixSummaryByBookId: {},
+  readingAiUnderlinesByBookId: {},
   chatSummaryCards: [],
   chatAutoSummaryLastEnd: 0,
 });
@@ -195,6 +312,50 @@ const normalizeReadingPrefixSummaryByBookId = (value: unknown) => {
   }, {});
 };
 
+const normalizeAiUnderlineRange = (value: unknown): ReaderAiUnderlineRange | null => {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Partial<ReaderAiUnderlineRange>;
+  const start = Number(source.start);
+  const end = Number(source.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  const safeStart = Math.max(0, Math.floor(Math.min(start, end)));
+  const safeEnd = Math.max(safeStart, Math.floor(Math.max(start, end)));
+  return {
+    start: safeStart,
+    end: safeEnd,
+    generationId:
+      typeof source.generationId === 'string' && source.generationId.trim()
+        ? source.generationId.trim()
+        : undefined,
+  };
+};
+
+const normalizeAiUnderlinesByChapter = (value: unknown) => {
+  if (!value || typeof value !== 'object') return {} as Record<string, ReaderAiUnderlineRange[]>;
+  return Object.entries(value as Record<string, unknown>).reduce<Record<string, ReaderAiUnderlineRange[]>>(
+    (acc, [chapterKey, ranges]) => {
+      if (!chapterKey || !Array.isArray(ranges)) return acc;
+      const normalizedRanges = ranges
+        .map((item) => normalizeAiUnderlineRange(item))
+        .filter((item): item is ReaderAiUnderlineRange => Boolean(item));
+      acc[chapterKey] = normalizedRanges;
+      return acc;
+    },
+    {}
+  );
+};
+
+const normalizeReadingAiUnderlinesByBookId = (value: unknown) => {
+  if (!value || typeof value !== 'object') return {} as Record<string, Record<string, ReaderAiUnderlineRange[]>>;
+  return Object.entries(value as Record<string, unknown>).reduce<
+    Record<string, Record<string, ReaderAiUnderlineRange[]>>
+  >((acc, [bookId, chapterMap]) => {
+    if (!bookId || !chapterMap || typeof chapterMap !== 'object') return acc;
+    acc[bookId] = normalizeAiUnderlinesByChapter(chapterMap);
+    return acc;
+  }, {});
+};
+
 const normalizeChatBucket = (value: unknown): ReaderChatBucket => {
   if (!value || typeof value !== 'object') return defaultChatBucket();
   const source = value as Partial<ReaderChatBucket>;
@@ -204,8 +365,11 @@ const normalizeChatBucket = (value: unknown): ReaderChatBucket => {
   return {
     updatedAt: Number.isFinite(Number(source.updatedAt)) ? Number(source.updatedAt) : Date.now(),
     messages,
+    personaName: typeof source.personaName === 'string' ? source.personaName.trim() : '',
+    characterName: typeof source.characterName === 'string' ? source.characterName.trim() : '',
     chatHistorySummary: typeof source.chatHistorySummary === 'string' ? source.chatHistorySummary : '',
     readingPrefixSummaryByBookId: normalizeReadingPrefixSummaryByBookId(source.readingPrefixSummaryByBookId),
+    readingAiUnderlinesByBookId: normalizeReadingAiUnderlinesByBookId(source.readingAiUnderlinesByBookId),
     chatSummaryCards: normalizeSummaryCards(source.chatSummaryCards),
     chatAutoSummaryLastEnd: Number.isFinite(Number(source.chatAutoSummaryLastEnd))
       ? Math.max(0, Math.floor(Number(source.chatAutoSummaryLastEnd)))
@@ -236,16 +400,30 @@ export const readChatStore = (): ReaderChatStore => {
       if (!key || !value || typeof value !== 'object') return;
       normalized[key] = normalizeChatBucket(value);
     });
-    return normalized;
+    const deduped = dedupeConversationStore(normalized);
+    if (deduped.changed) {
+      try {
+        window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(deduped.store));
+      } catch {
+        // ignore localStorage failures
+      }
+    }
+    return deduped.store;
   } catch {
     return {};
   }
 };
 
-export const saveChatStore = (store: ReaderChatStore) => {
+export const saveChatStore = (store: ReaderChatStore, preferredConversationKey?: string) => {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(store));
+    const normalized: ReaderChatStore = {};
+    Object.entries(store || {}).forEach(([key, value]) => {
+      if (!key || !value || typeof value !== 'object') return;
+      normalized[key] = normalizeChatBucket(value);
+    });
+    const deduped = dedupeConversationStore(normalized, preferredConversationKey);
+    window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(deduped.store));
   } catch {
     // ignore localStorage failures (private mode / quota limits)
   }
@@ -274,12 +452,15 @@ export const ensureConversationBucket = (conversationKey: string, legacyConversa
   }
 
   if (changed) {
-    saveChatStore(store);
+    const deduped = dedupeConversationStore(store, conversationKey);
+    const resolvedBucket = deduped.store[conversationKey] || nextBucket;
+    saveChatStore(deduped.store, conversationKey);
     emitChatStoreUpdated({
       conversationKey,
-      bucket: nextBucket,
+      bucket: resolvedBucket,
       reason: legacyBucket ? 'migrate-legacy-key' : 'init-bucket',
     });
+    return resolvedBucket;
   }
 
   return nextBucket;
@@ -309,13 +490,15 @@ export const persistConversationBucket = (
     updatedAt: Date.now(),
   });
   store[conversationKey] = nextBucket;
-  saveChatStore(store);
+  const deduped = dedupeConversationStore(store, conversationKey);
+  const finalBucket = deduped.store[conversationKey] || nextBucket;
+  saveChatStore(deduped.store, conversationKey);
   emitChatStoreUpdated({
     conversationKey,
-    bucket: nextBucket,
+    bucket: finalBucket,
     reason,
   });
-  return nextBucket;
+  return finalBucket;
 };
 
 export const persistConversationMessages = (conversationKey: string, messages: ChatBubble[], reason?: string) =>
@@ -434,6 +617,21 @@ export const abortConversationGeneration = (
     previousMode: existing.mode,
     reason,
   });
+};
+
+export const deleteConversationBucket = (conversationKey: string, reason = 'delete-bucket') => {
+  if (!conversationKey) return false;
+  const store = readChatStore();
+  if (!store[conversationKey]) return false;
+  delete store[conversationKey];
+  saveChatStore(store);
+  abortConversationGeneration(conversationKey, reason);
+  emitChatStoreUpdated({
+    conversationKey,
+    bucket: defaultChatBucket(),
+    reason,
+  });
+  return true;
 };
 
 export const onChatStoreUpdated = (listener: (detail: ChatStoreUpdatedEventDetail) => void) => {

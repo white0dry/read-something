@@ -10,13 +10,14 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { ApiConfig, AppSettings, Book, Chapter, ReaderSummaryCard, ReaderHighlightRange, ReaderPositionState } from '../types';
+import { ApiConfig, ApiPreset, AppSettings, Book, Chapter, ReaderSummaryCard, ReaderHighlightRange, ReaderPositionState } from '../types';
 import { Character, Persona, WorldBookEntry } from './settings/types';
 import ResolvedImage from './ResolvedImage';
 import ReaderMoreSettingsPanel, { ReaderArchiveOption } from './ReaderMoreSettingsPanel';
 import { deleteImageByRef, saveImageFile } from '../utils/imageStorage';
 import { getBookContent, saveBookSummaryState } from '../utils/bookContentStorage';
 import {
+  abortConversationGeneration,
   buildCharacterPromptRecord,
   buildConversationKey,
   buildUserPromptRecord,
@@ -25,6 +26,7 @@ import {
   ChatQuotePayload,
   clamp,
   compactText,
+  deleteConversationBucket,
   ensureConversationBucket,
   formatTimestampMinute,
   GenerationMode,
@@ -34,6 +36,7 @@ import {
   persistConversationBucket,
   persistConversationMessages,
   readChatStore,
+  saveChatStore,
 } from '../utils/readerChatRuntime';
 import {
   buildCharacterWorldBookSections,
@@ -41,10 +44,14 @@ import {
   ReadingContextSnapshot,
   runConversationGeneration,
 } from '../utils/readerAiEngine';
+import { DEFAULT_READER_BUBBLE_CSS_PRESETS } from '../utils/readerBubbleCssPresets';
 
 interface ReaderMessagePanelProps {
   isDarkMode: boolean;
   apiConfig: ApiConfig;
+  apiPresets: ApiPreset[];
+  safeAreaTop: number;
+  safeAreaBottom: number;
   activeBook: Book | null;
   appSettings: AppSettings;
   setAppSettings: React.Dispatch<React.SetStateAction<AppSettings>>;
@@ -104,7 +111,35 @@ const SUMMARY_CHAT_PRIORITY = 2;
 const SUMMARY_BOOK_PRIORITY = 1;
 const SUMMARY_MANUAL_BOOST = 10;
 const MESSAGE_TIME_GAP_MS = 60 * 60 * 1000;
-const clampSummary = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const FIXED_MESSAGE_TIME_GAP_MINUTES = 60;
+const DEFAULT_READER_MORE_APPEARANCE: AppSettings['readerMore']['appearance'] = {
+  bubbleFontSizeScale: 1,
+  chatBackgroundImage: '',
+  showMessageTime: false,
+  timeGapMinutes: FIXED_MESSAGE_TIME_GAP_MINUTES,
+  bubbleCssDraft: '',
+  bubbleCssApplied: '',
+  bubbleCssPresets: DEFAULT_READER_BUBBLE_CSS_PRESETS.map((item) => ({ ...item })),
+  selectedBubbleCssPresetId: null,
+};
+const DEFAULT_READER_MORE_FEATURE: AppSettings['readerMore']['feature'] = {
+  memoryBubbleCount: 100,
+  replyBubbleMin: 3,
+  replyBubbleMax: 8,
+  autoChatSummaryEnabled: false,
+  autoChatSummaryTriggerCount: 500,
+  autoBookSummaryEnabled: false,
+  autoBookSummaryTriggerChars: 5000,
+  summaryApiEnabled: false,
+  summaryApiPresetId: null,
+  summaryApi: {
+    provider: 'OPENAI',
+    endpoint: 'https://api.openai.com/v1',
+    apiKey: '',
+    model: '',
+  },
+};
+const normalizeLooseInt = (value: number) => (Number.isFinite(value) ? Math.round(value) : 0);
 
 type SummaryTaskKind = 'chat' | 'book';
 type SummaryTriggerKind = 'auto' | 'manual';
@@ -235,6 +270,40 @@ const parseConversationKey = (key: string) => {
   };
 };
 
+const normalizeArchiveIdentityValue = (value: string) => compactText(value || '').toLowerCase();
+
+const buildArchiveIdentityKey = (bookId: string | null, personaName: string, characterName: string) => {
+  const normalizedPersonaName = normalizeArchiveIdentityValue(personaName);
+  const normalizedCharacterName = normalizeArchiveIdentityValue(characterName);
+  if (!normalizedPersonaName || !normalizedCharacterName) return '';
+  return `book:${bookId || 'none'}::persona-name:${normalizedPersonaName}::character-name:${normalizedCharacterName}`;
+};
+
+const extractSenderNameFromPromptRecord = (promptRecord: string) => {
+  const source = (promptRecord || '').trim();
+  if (!source) return '';
+  const directMatched = source.match(/发送者[:：]\s*([^\]]+)/);
+  if (directMatched?.[1]) return compactText(directMatched[1]);
+  const englishMatched = source.match(/sender[:：]\s*([^\]]+)/i);
+  if (englishMatched?.[1]) return compactText(englishMatched[1]);
+  const secondBracket = source.match(/\[[^\]]+\]\[([^\]]+)\]/);
+  if (!secondBracket?.[1]) return '';
+  const segment = secondBracket[1];
+  const segmentMatched = segment.match(/[:：]\s*(.+)$/);
+  if (segmentMatched?.[1]) return compactText(segmentMatched[1]);
+  return '';
+};
+
+const inferArchivedNameFromMessages = (messages: ChatBubble[], sender: ChatSender) => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.sender !== sender) continue;
+    const inferred = extractSenderNameFromPromptRecord(message.promptRecord || '');
+    if (inferred) return inferred;
+  }
+  return '';
+};
+
 const callSummaryModel = async (prompt: string, config: ApiConfig) => {
   const provider = config.provider;
   const endpoint = normalizeEndpoint(config.endpoint || '');
@@ -311,6 +380,9 @@ const callSummaryModel = async (prompt: string, config: ApiConfig) => {
 const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   isDarkMode,
   apiConfig,
+  apiPresets,
+  safeAreaTop,
+  safeAreaBottom,
   activeBook,
   appSettings,
   setAppSettings,
@@ -378,6 +450,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const [summaryApiModels, setSummaryApiModels] = useState<string[]>([]);
   const [summaryApiFetchState, setSummaryApiFetchState] = useState<FetchState>('IDLE');
   const [summaryApiFetchError, setSummaryApiFetchError] = useState('');
+  const [archiveVersion, setArchiveVersion] = useState(0);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isAiPanelOpenRef = useRef(isAiPanelOpen);
@@ -399,13 +472,18 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     committedMessages: ChatBubble[];
     remainingMessages: ChatBubble[];
   } | null>(null);
-  const summaryTaskQueueRef = useRef<SummaryTask[]>([]);
-  const summaryTaskRunningRef = useRef(false);
   const summaryTaskDebounceRef = useRef<Record<string, number>>({});
+  const activeSummaryTaskRef = useRef<SummaryTask | null>(null);
+  const summaryTaskQueueRef = useRef<SummaryTask[]>([]);
   const chatSummaryCardsRef = useRef<ReaderSummaryCard[]>([]);
   const bookSummaryCardsRef = useRef<ReaderSummaryCard[]>([]);
   const chatAutoSummaryLastEndRef = useRef(0);
   const bookAutoSummaryLastEndRef = useRef(0);
+  const prevAutoChatSummaryEnabledRef = useRef(false);
+  const prevAutoBookSummaryEnabledRef = useRef(false);
+  const conversationProfileValidRef = useRef(true);
+  const lockToastAtRef = useRef(0);
+  const deletedConversationKeyRef = useRef<string | null>(null);
   const longPressMetaRef = useRef<{ bubbleId: string | null; x: number; y: number }>({
     bubbleId: null,
     x: 0,
@@ -423,6 +501,15 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     () => characters.find((character) => character.id === activeCharacterId) || null,
     [characters, activeCharacterId]
   );
+  const hasDefaultConversationParticipant = !activePersonaId || !activeCharacterId;
+  const isConversationProfileValid = Boolean(activePersona && activeCharacter);
+  const conversationLockMessage = hasDefaultConversationParticipant
+    ? '请先在设置中添加用户和角色'
+    : !activePersona && !activeCharacter
+      ? '该会话关联的用户和角色人设已被删除'
+      : !activePersona
+        ? '该会话关联的用户人设已被删除'
+        : '该会话关联的角色人设已被删除';
 
   const userRealName = activePersona?.name?.trim() || DEFAULT_USER_NAME;
   const userNickname = activePersona?.userNickname?.trim() || userRealName;
@@ -460,17 +547,26 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const hiddenBubbleIdSet = useMemo(() => new Set(hiddenBubbleIds), [hiddenBubbleIds]);
   const readerMoreAppearance = appSettings.readerMore.appearance;
   const readerMoreFeature = appSettings.readerMore.feature;
+  const selectedSummaryApiPreset = useMemo(
+    () => apiPresets.find((preset) => preset.id === readerMoreFeature.summaryApiPresetId) || null,
+    [apiPresets, readerMoreFeature.summaryApiPresetId]
+  );
   const summaryApiConfig: ApiConfig = useMemo(
     () =>
       readerMoreFeature.summaryApiEnabled
-        ? {
-            provider: readerMoreFeature.summaryApi.provider,
-            endpoint: readerMoreFeature.summaryApi.endpoint,
-            apiKey: readerMoreFeature.summaryApi.apiKey,
-            model: readerMoreFeature.summaryApi.model,
-          }
+        ? selectedSummaryApiPreset
+          ? {
+              ...selectedSummaryApiPreset.config,
+            }
+          : {
+              provider: readerMoreFeature.summaryApi.provider,
+              endpoint: readerMoreFeature.summaryApi.endpoint,
+              apiKey: readerMoreFeature.summaryApi.apiKey,
+              model: readerMoreFeature.summaryApi.model,
+            }
         : apiConfig,
     [
+      selectedSummaryApiPreset,
       readerMoreFeature.summaryApiEnabled,
       readerMoreFeature.summaryApi.provider,
       readerMoreFeature.summaryApi.endpoint,
@@ -580,18 +676,28 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       toastTimerRef.current = null;
     }, 1800);
   }, []);
+  const showConversationLockedToast = useCallback(() => {
+    const now = Date.now();
+    if (now - lockToastAtRef.current < 1000) return;
+    lockToastAtRef.current = now;
+    showToast(`${conversationLockMessage}，无法继续聊天`, 'error');
+  }, [conversationLockMessage, showToast]);
 
   const applyChatSummaryCards = useCallback(
     (nextCards: ReaderSummaryCard[]) => {
       const safeCards = nextCards
-        .map((card) => ({
-          ...card,
-          start: Math.max(1, Math.floor(card.start)),
-          end: Math.max(Math.floor(card.start), Math.floor(card.end)),
-          content: card.content.trim(),
-          updatedAt: Number.isFinite(card.updatedAt) ? card.updatedAt : Date.now(),
-          createdAt: Number.isFinite(card.createdAt) ? card.createdAt : Date.now(),
-        }))
+        .map((card) => {
+          const safeStart = normalizeLooseInt(card.start);
+          const safeEnd = normalizeLooseInt(card.end);
+          return {
+            ...card,
+            start: Math.min(safeStart, safeEnd),
+            end: Math.max(safeStart, safeEnd),
+            content: card.content.trim(),
+            updatedAt: Number.isFinite(card.updatedAt) ? card.updatedAt : Date.now(),
+            createdAt: Number.isFinite(card.createdAt) ? card.createdAt : Date.now(),
+          };
+        })
         .filter((card) => card.content);
       const summaryText = aggregateSummaryCardsText(safeCards);
       setChatSummaryCards(safeCards);
@@ -603,14 +709,18 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const applyBookSummaryCards = useCallback(
     (nextCards: ReaderSummaryCard[]) => {
       const safeCards = nextCards
-        .map((card) => ({
-          ...card,
-          start: Math.max(1, Math.floor(card.start)),
-          end: Math.max(Math.floor(card.start), Math.floor(card.end)),
-          content: card.content.trim(),
-          updatedAt: Number.isFinite(card.updatedAt) ? card.updatedAt : Date.now(),
-          createdAt: Number.isFinite(card.createdAt) ? card.createdAt : Date.now(),
-        }))
+        .map((card) => {
+          const safeStart = normalizeLooseInt(card.start);
+          const safeEnd = normalizeLooseInt(card.end);
+          return {
+            ...card,
+            start: Math.min(safeStart, safeEnd),
+            end: Math.max(safeStart, safeEnd),
+            content: card.content.trim(),
+            updatedAt: Number.isFinite(card.updatedAt) ? card.updatedAt : Date.now(),
+            createdAt: Number.isFinite(card.createdAt) ? card.createdAt : Date.now(),
+          };
+        })
         .filter((card) => card.content);
       setBookSummaryCards(safeCards);
       if (!activeBook?.id) return;
@@ -735,7 +845,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const handleSelectBubbleCssPreset = useCallback(
     (presetId: string | null) => {
       if (!presetId) {
-        updateReaderMoreAppearanceSettings({ selectedBubbleCssPresetId: null });
+        updateReaderMoreAppearanceSettings({ selectedBubbleCssPresetId: null, bubbleCssDraft: '' });
         return;
       }
       const preset = appSettings.readerMore.appearance.bubbleCssPresets.find((item) => item.id === presetId);
@@ -747,6 +857,34 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     },
     [appSettings.readerMore.appearance.bubbleCssPresets, updateReaderMoreAppearanceSettings]
   );
+  const handleResetAppearanceSettings = useCallback(() => {
+    setAppSettings((prev) => ({
+      ...prev,
+      readerMore: {
+        ...prev.readerMore,
+        appearance: {
+          ...DEFAULT_READER_MORE_APPEARANCE,
+        },
+      },
+    }));
+  }, [setAppSettings]);
+  const handleResetFeatureSettings = useCallback(() => {
+    setAppSettings((prev) => ({
+      ...prev,
+      readerMore: {
+        ...prev.readerMore,
+        feature: {
+          ...DEFAULT_READER_MORE_FEATURE,
+          summaryApiEnabled: false,
+          summaryApiPresetId: prev.readerMore.feature.summaryApiPresetId || null,
+          summaryApi: {
+            ...prev.readerMore.feature.summaryApi,
+          },
+        },
+      },
+    }));
+    setSummaryTaskQueue((prev) => prev.filter((task) => task.trigger === 'manual'));
+  }, [setAppSettings]);
 
   const fetchSummaryApiModels = useCallback(async () => {
     const config = summaryApiConfig;
@@ -821,28 +959,48 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   }, [summaryApiConfig, summaryApiCacheKey, updateSummaryApiSettings]);
 
   const queueSummaryTask = useCallback((task: Omit<SummaryTask, 'id' | 'createdAt'>) => {
-    const key = `${task.conversationKey}::${task.kind}::${task.trigger}::${task.start}-${task.end}`;
+    const normalizedTask = {
+      ...task,
+      start: normalizeLooseInt(task.start),
+      end: normalizeLooseInt(task.end),
+    };
+    if (normalizedTask.trigger === 'auto' && !conversationProfileValidRef.current) return;
+    const key = `${normalizedTask.conversationKey}::${normalizedTask.kind}::${normalizedTask.trigger}::${normalizedTask.start}-${normalizedTask.end}`;
     const now = Date.now();
-    const lastQueuedAt = summaryTaskDebounceRef.current[key] || 0;
-    if (now - lastQueuedAt < SUMMARY_TASK_DEBOUNCE_MS) return;
-    summaryTaskDebounceRef.current[key] = now;
+    if (normalizedTask.trigger === 'auto') {
+      const lastQueuedAt = summaryTaskDebounceRef.current[key] || 0;
+      if (now - lastQueuedAt < SUMMARY_TASK_DEBOUNCE_MS) return;
+      summaryTaskDebounceRef.current[key] = now;
+    }
 
     setSummaryTaskQueue((prev) => {
+      const baseQueue =
+        normalizedTask.trigger === 'manual'
+          ? prev.filter(
+              (item) =>
+                !(
+                  item.conversationKey === normalizedTask.conversationKey &&
+                  item.kind === normalizedTask.kind &&
+                  item.trigger === 'auto'
+                )
+            )
+          : prev;
       if (
-        prev.some(
+        baseQueue.some(
           (item) =>
-            item.conversationKey === task.conversationKey &&
-            item.kind === task.kind &&
-            item.start === task.start &&
-            item.end === task.end
+            item.conversationKey === normalizedTask.conversationKey &&
+            item.kind === normalizedTask.kind &&
+            item.trigger === normalizedTask.trigger &&
+            item.start === normalizedTask.start &&
+            item.end === normalizedTask.end
         )
       ) {
-        return prev;
+        return baseQueue;
       }
       return [
-        ...prev,
+        ...baseQueue,
         {
-          ...task,
+          ...normalizedTask,
           id: `sum-${now}-${Math.random().toString(36).slice(2, 8)}`,
           createdAt: now,
         },
@@ -866,12 +1024,19 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   }, []);
 
   useEffect(() => {
-    if (summaryTaskRunningRef.current) return;
-    const queue = summaryTaskQueueRef.current;
+    if (summaryTaskRunning) return;
+    if (!isConversationProfileValid) return;
     const nextTask = selectNextSummaryTask(
-      queue.filter((task) => task.conversationKey === conversationKey)
+      summaryTaskQueue.filter((task) => task.conversationKey === conversationKey)
     );
     if (!nextTask) return;
+    if (readerMoreFeature.summaryApiEnabled && !selectedSummaryApiPreset) {
+      if (nextTask.trigger === 'manual') {
+        showToast('请先在 API 设置中保存并选择总结副 API 预设', 'error');
+      }
+      setSummaryTaskQueue((prev) => prev.filter((task) => task.id !== nextTask.id));
+      return;
+    }
 
     const isChatBusy = activeGenerationMode !== null;
     if (isChatBusy && isSameApiConfig(summaryApiConfig, apiConfig)) {
@@ -879,29 +1044,32 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     }
 
     setSummaryTaskRunning(true);
+    activeSummaryTaskRef.current = nextTask;
     const runTask = async () => {
       try {
         const timestamp = Date.now();
+        const taskStart = Math.min(nextTask.start, nextTask.end);
+        const taskEnd = Math.max(nextTask.start, nextTask.end);
         const buildPrompt = () => {
+          const sliceStart = Math.max(0, taskStart - 1);
+          const sliceEnd = Math.max(sliceStart, taskEnd);
           if (nextTask.kind === 'chat') {
             const messageSlice = messagesRef.current
-              .slice(Math.max(0, nextTask.start - 1), Math.max(0, nextTask.end))
+              .slice(sliceStart, sliceEnd)
               .map((item) => `[${item.sender === 'user' ? '用户' : 'AI'}] ${item.content}`)
               .join('\n');
             return [
               `请将以下聊天记录总结为 100-200 字，第三人称、凝练、可读性强。`,
-              `消息区间：${nextTask.start}-${nextTask.end}`,
+              `消息区间：${taskStart}-${taskEnd}`,
               `不要使用列表，不要加入未出现的信息。`,
               '',
               messageSlice || '（空）',
             ].join('\n');
           }
-          const safeStart = clampSummary(nextTask.start, 1, Math.max(1, bookText.length || 1));
-          const safeEnd = clampSummary(nextTask.end, safeStart, Math.max(safeStart, bookText.length || 1));
-          const excerpt = bookText.slice(safeStart - 1, safeEnd);
+          const excerpt = bookText.slice(sliceStart, sliceEnd);
           return [
             `请将以下书籍片段总结为 100-200 字，语言凝练，不剧透范围外内容。`,
-            `字符区间：${safeStart}-${safeEnd}`,
+            `字符区间：${taskStart}-${taskEnd}`,
             `总结应基于文本事实，不要虚构。`,
             '',
             excerpt || '（空）',
@@ -909,14 +1077,23 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         };
 
         const summaryTextRaw = await callSummaryModel(buildPrompt(), summaryApiConfig);
+        const hasPendingManualOverride =
+          nextTask.trigger === 'auto' &&
+          summaryTaskQueueRef.current.some(
+            (item) =>
+              item.conversationKey === nextTask.conversationKey &&
+              item.kind === nextTask.kind &&
+              item.trigger === 'manual'
+          );
+        if (hasPendingManualOverride || !conversationProfileValidRef.current) return;
         const summaryText = summaryTextRaw.trim();
         if (!summaryText) throw new Error('总结结果为空');
 
         const card: ReaderSummaryCard = {
           id: `card-${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
           content: summaryText,
-          start: nextTask.start,
-          end: nextTask.end,
+          start: taskStart,
+          end: taskEnd,
           createdAt: timestamp,
           updatedAt: timestamp,
         };
@@ -924,7 +1101,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         if (nextTask.kind === 'chat') {
           applyChatSummaryCards([...chatSummaryCardsRef.current, card]);
           if (nextTask.trigger === 'auto') {
-            setChatAutoSummaryLastEnd((prev) => Math.max(prev, nextTask.end));
+            setChatAutoSummaryLastEnd((prev) => Math.max(prev, taskEnd));
           }
         } else {
           const nextCards = [...bookSummaryCardsRef.current, card];
@@ -933,29 +1110,32 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
             cards: nextCards,
             autoLastEnd:
               nextTask.trigger === 'auto'
-                ? Math.max(bookAutoSummaryLastEndRef.current, nextTask.end)
+                ? Math.max(bookAutoSummaryLastEndRef.current, taskEnd)
                 : bookAutoSummaryLastEndRef.current,
           });
           if (nextTask.trigger === 'auto') {
-            setBookAutoSummaryLastEnd((prev) => Math.max(prev, nextTask.end));
+            setBookAutoSummaryLastEnd((prev) => Math.max(prev, taskEnd));
           }
         }
-
-        setSummaryTaskQueue((prev) => prev.filter((item) => item.id !== nextTask.id));
       } catch (error) {
         console.error('Summary task failed', error);
         if (nextTask.trigger === 'manual') {
           showToast(error instanceof Error ? error.message : '总结失败', 'error');
         }
-        setSummaryTaskQueue((prev) => prev.filter((item) => item.id !== nextTask.id));
       } finally {
+        setSummaryTaskQueue((prev) => prev.filter((item) => item.id !== nextTask.id));
+        activeSummaryTaskRef.current = null;
         setSummaryTaskRunning(false);
       }
     };
     void runTask();
   }, [
     summaryTaskQueue,
+    summaryTaskRunning,
     conversationKey,
+    isConversationProfileValid,
+    readerMoreFeature.summaryApiEnabled,
+    selectedSummaryApiPreset,
     activeGenerationMode,
     summaryApiConfig,
     apiConfig,
@@ -968,9 +1148,70 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   ]);
 
   useEffect(() => {
+    conversationProfileValidRef.current = isConversationProfileValid;
+  }, [isConversationProfileValid]);
+
+  useEffect(() => {
+    if (isConversationProfileValid) return;
+    abortConversationGeneration(conversationKey, 'invalid-persona-or-character');
+    setActiveGenerationMode(null);
+    setSummaryTaskQueue((prev) =>
+      prev.filter((task) => task.conversationKey !== conversationKey)
+    );
+  }, [conversationKey, isConversationProfileValid]);
+
+  useEffect(() => {
+    const enabled = readerMoreFeature.autoChatSummaryEnabled;
+    if (enabled && !prevAutoChatSummaryEnabledRef.current) {
+      const baseline = Math.max(0, messagesRef.current.length);
+      setChatAutoSummaryLastEnd(baseline);
+    }
+    prevAutoChatSummaryEnabledRef.current = enabled;
+  }, [readerMoreFeature.autoChatSummaryEnabled, conversationKey]);
+
+  useEffect(() => {
+    if (readerMoreFeature.autoChatSummaryEnabled) return;
+    setSummaryTaskQueue((prev) =>
+      prev.filter(
+        (task) =>
+          !(
+            task.conversationKey === conversationKey &&
+            task.kind === 'chat' &&
+            task.trigger === 'auto'
+          )
+      )
+    );
+  }, [readerMoreFeature.autoChatSummaryEnabled, conversationKey]);
+
+  useEffect(() => {
+    const enabled = readerMoreFeature.autoBookSummaryEnabled;
+    if (enabled && !prevAutoBookSummaryEnabledRef.current) {
+      const baseline = Math.max(0, normalizeLooseInt(getLatestReadingPosition()?.globalCharOffset || 0));
+      setBookAutoSummaryLastEnd(baseline);
+    }
+    prevAutoBookSummaryEnabledRef.current = enabled;
+  }, [readerMoreFeature.autoBookSummaryEnabled, conversationKey, activeBook?.id, getLatestReadingPosition]);
+
+  useEffect(() => {
+    if (readerMoreFeature.autoBookSummaryEnabled) return;
+    setSummaryTaskQueue((prev) =>
+      prev.filter(
+        (task) =>
+          !(
+            task.conversationKey === conversationKey &&
+            task.kind === 'book' &&
+            task.trigger === 'auto'
+          )
+      )
+    );
+  }, [readerMoreFeature.autoBookSummaryEnabled, conversationKey]);
+
+  useEffect(() => {
     if (!isConversationHydrated) return;
     if (!readerMoreFeature.autoChatSummaryEnabled) return;
-    const triggerCount = clampSummary(readerMoreFeature.autoChatSummaryTriggerCount, 100, 5000);
+    if (!isConversationProfileValid) return;
+    const triggerCount = normalizeLooseInt(readerMoreFeature.autoChatSummaryTriggerCount);
+    if (triggerCount <= 0) return;
     const total = messages.length;
     let cursor = Math.max(0, chatAutoSummaryLastEndRef.current);
     while (total - cursor >= triggerCount) {
@@ -987,6 +1228,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     }
   }, [
     isConversationHydrated,
+    isConversationProfileValid,
     readerMoreFeature.autoChatSummaryEnabled,
     readerMoreFeature.autoChatSummaryTriggerCount,
     messages.length,
@@ -997,13 +1239,12 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   useEffect(() => {
     if (!readerMoreFeature.autoBookSummaryEnabled) return;
     if (!activeBook?.id) return;
-    const triggerChars = clampSummary(readerMoreFeature.autoBookSummaryTriggerChars, 1000, 50000);
+    if (!isConversationProfileValid) return;
+    const triggerChars = normalizeLooseInt(readerMoreFeature.autoBookSummaryTriggerChars);
+    if (triggerChars <= 0) return;
     const interval = window.setInterval(() => {
       const position = getLatestReadingPosition();
-      const totalRead = Math.max(
-        0,
-        Math.min(bookText.length || 0, Math.floor(position?.globalCharOffset || 0))
-      );
+      const totalRead = Math.max(0, normalizeLooseInt(position?.globalCharOffset || 0));
       let cursor = Math.max(0, bookAutoSummaryLastEndRef.current);
       while (totalRead - cursor >= triggerChars) {
         const start = cursor + 1;
@@ -1020,18 +1261,46 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     }, 3000);
     return () => window.clearInterval(interval);
   }, [
+    isConversationProfileValid,
     readerMoreFeature.autoBookSummaryEnabled,
     readerMoreFeature.autoBookSummaryTriggerChars,
     activeBook?.id,
-    bookText.length,
     getLatestReadingPosition,
     queueSummaryTask,
     conversationKey,
   ]);
 
+  useEffect(() => {
+    if (!activeBook?.id) return;
+    const store = readChatStore();
+    let changed = false;
+    Object.entries(store).forEach(([key, bucket]) => {
+      const parsed = parseConversationKey(key);
+      if (!parsed || parsed.bookId !== activeBook.id) return;
+      if (!parsed.personaId && !parsed.characterId) return;
+      const persona = personas.find((item) => item.id === parsed.personaId) || null;
+      const character = characters.find((item) => item.id === parsed.characterId) || null;
+      const personaName = persona?.name?.trim() || '';
+      const characterName = character?.name?.trim() || '';
+      const nextPersonaName = bucket.personaName || '';
+      const nextCharacterName = bucket.characterName || '';
+      if ((personaName && nextPersonaName !== personaName) || (characterName && nextCharacterName !== characterName)) {
+        store[key] = {
+          ...bucket,
+          personaName: personaName || nextPersonaName,
+          characterName: characterName || nextCharacterName,
+        };
+        changed = true;
+      }
+    });
+    if (!changed) return;
+    saveChatStore(store, conversationKey);
+    setArchiveVersion((prev) => prev + 1);
+  }, [activeBook?.id, personas, characters, conversationKey]);
+
   const archiveOptions = useMemo<ReaderArchiveOption[]>(() => {
     const store = readChatStore();
-    const options = Object.entries(store)
+    const rawOptions = Object.entries(store)
       .map(([key, bucket]) => {
         const parsed = parseConversationKey(key);
         if (!parsed) return null;
@@ -1039,40 +1308,103 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         const persona = personas.find((item) => item.id === parsed.personaId) || null;
         const character = characters.find((item) => item.id === parsed.characterId) || null;
         const isValid = Boolean(persona && character);
+        const archivedPersonaName =
+          bucket.personaName ||
+          inferArchivedNameFromMessages(bucket.messages || [], 'user') ||
+          '';
+        const archivedCharacterName =
+          bucket.characterName ||
+          inferArchivedNameFromMessages(bucket.messages || [], 'character') ||
+          '';
+        const resolvedPersonaName = persona?.name || archivedPersonaName || '已失效用户人设';
+        const resolvedCharacterName = character?.name || archivedCharacterName || '已失效角色人设';
         return {
           conversationKey: key,
           personaId: parsed.personaId,
-          personaName: persona?.name || '已失效用户人设',
+          personaName: resolvedPersonaName,
           characterId: parsed.characterId,
-          characterName: character?.name || '已失效角色人设',
+          characterName: resolvedCharacterName,
           updatedAt: bucket.updatedAt || 0,
           isValid,
           isCurrent: key === conversationKey,
-        } as ReaderArchiveOption;
+          dedupeIdentity: buildArchiveIdentityKey(parsed.bookId, resolvedPersonaName, resolvedCharacterName),
+        };
       })
-      .filter((item): item is ReaderArchiveOption => Boolean(item))
+      .filter((item): item is ReaderArchiveOption & { dedupeIdentity: string } => Boolean(item));
+
+    const dedupedByIdentity = new Map<string, ReaderArchiveOption & { dedupeIdentity: string }>();
+    rawOptions.forEach((option) => {
+      const identity = option.dedupeIdentity || `key:${option.conversationKey}`;
+      const existing = dedupedByIdentity.get(identity);
+      if (!existing) {
+        dedupedByIdentity.set(identity, option);
+        return;
+      }
+      const shouldReplace =
+        option.isCurrent ||
+        (!existing.isCurrent && option.updatedAt > existing.updatedAt);
+      if (shouldReplace) {
+        dedupedByIdentity.set(identity, option);
+      }
+    });
+
+    const options: ReaderArchiveOption[] = [];
+    dedupedByIdentity.forEach((option) => {
+      options.push({
+        conversationKey: option.conversationKey,
+        personaId: option.personaId,
+        personaName: option.personaName,
+        characterId: option.characterId,
+        characterName: option.characterName,
+        updatedAt: option.updatedAt,
+        isValid: option.isValid,
+        isCurrent: option.isCurrent,
+      });
+    });
+
+    return options
       .sort((left, right) => {
         if (left.isCurrent !== right.isCurrent) return left.isCurrent ? -1 : 1;
         return right.updatedAt - left.updatedAt;
       });
-    return options;
-  }, [activeBook?.id, characters, personas, conversationKey, messages.length]);
+  }, [activeBook?.id, characters, personas, conversationKey, messages.length, archiveVersion]);
 
   const handleSelectArchive = useCallback(
     (archive: ReaderArchiveOption) => {
-      if (!archive.isValid || archive.isCurrent) return;
+      if (archive.isCurrent) return;
       onSelectPersona(archive.personaId);
       onSelectCharacter(archive.characterId);
       onCloseMoreSettings();
     },
     [onSelectPersona, onSelectCharacter, onCloseMoreSettings]
   );
+  const handleDeleteArchive = useCallback(
+    (targetConversationKey: string) => {
+      if (!deleteConversationBucket(targetConversationKey, 'panel-delete-archive')) return;
+      if (targetConversationKey === conversationKey) {
+        deletedConversationKeyRef.current = targetConversationKey;
+        setMessages([]);
+        messagesRef.current = [];
+        setChatHistorySummary('');
+        setReadingPrefixSummaryByBookId({});
+        setChatSummaryCards([]);
+        setChatAutoSummaryLastEnd(0);
+        setSummaryTaskQueue((prev) => prev.filter((task) => task.conversationKey !== targetConversationKey));
+      }
+      setArchiveVersion((prev) => prev + 1);
+      showToast('会话存档已删除');
+    },
+    [conversationKey, showToast]
+  );
 
   const handleRequestManualChatSummary = useCallback(
     (start: number, end: number) => {
-      const maxCount = Math.max(1, messagesRef.current.length);
-      const safeStart = clampSummary(Math.min(start, end), 1, maxCount);
-      const safeEnd = clampSummary(Math.max(start, end), 1, maxCount);
+      if (!isConversationProfileValid) {
+        showConversationLockedToast();
+        return;
+      }
+      const safeStart = Math.min(normalizeLooseInt(start), normalizeLooseInt(end));
+      const safeEnd = Math.max(normalizeLooseInt(start), normalizeLooseInt(end));
       queueSummaryTask({
         kind: 'chat',
         trigger: 'manual',
@@ -1081,14 +1413,17 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         conversationKey,
       });
     },
-    [queueSummaryTask, conversationKey]
+    [queueSummaryTask, conversationKey, isConversationProfileValid, showConversationLockedToast]
   );
 
   const handleRequestManualBookSummary = useCallback(
     (start: number, end: number) => {
-      const maxCount = Math.max(1, bookText.length);
-      const safeStart = clampSummary(Math.min(start, end), 1, maxCount);
-      const safeEnd = clampSummary(Math.max(start, end), 1, maxCount);
+      if (!isConversationProfileValid) {
+        showConversationLockedToast();
+        return;
+      }
+      const safeStart = Math.min(normalizeLooseInt(start), normalizeLooseInt(end));
+      const safeEnd = Math.max(normalizeLooseInt(start), normalizeLooseInt(end));
       queueSummaryTask({
         kind: 'book',
         trigger: 'manual',
@@ -1097,7 +1432,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         conversationKey,
       });
     },
-    [queueSummaryTask, conversationKey, bookText.length]
+    [queueSummaryTask, conversationKey, isConversationProfileValid, showConversationLockedToast]
   );
 
   const handleEditChatSummaryCard = useCallback(
@@ -1229,6 +1564,9 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     hiddenBubbleIdsRef.current = [];
     setHiddenBubbleIds([]);
     setIsConversationHydrated(false);
+    deletedConversationKeyRef.current = null;
+    prevAutoChatSummaryEnabledRef.current = false;
+    prevAutoBookSummaryEnabledRef.current = false;
     const bucket = ensureConversationBucket(conversationKey, legacyConversationKey);
     const status = getConversationGenerationStatus(conversationKey);
     setMessages(bucket.messages);
@@ -1236,7 +1574,11 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     setChatHistorySummary(bucket.chatHistorySummary || '');
     setReadingPrefixSummaryByBookId(bucket.readingPrefixSummaryByBookId || {});
     setChatSummaryCards(bucket.chatSummaryCards || []);
-    setChatAutoSummaryLastEnd(Math.max(0, bucket.chatAutoSummaryLastEnd || 0));
+    setChatAutoSummaryLastEnd(
+      readerMoreFeature.autoChatSummaryEnabled
+        ? Math.max(0, bucket.messages.length)
+        : Math.max(0, bucket.chatAutoSummaryLastEnd || 0)
+    );
     setActiveGenerationMode(status.isLoading ? status.mode : null);
     setInputText('');
     setQuotedMessageId(null);
@@ -1256,7 +1598,12 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       const content = await getBookContent(activeBook.id).catch(() => null);
       if (cancelled) return;
       setBookSummaryCards(content?.bookSummaryCards || []);
-      setBookAutoSummaryLastEnd(Math.max(0, content?.bookAutoSummaryLastEnd || 0));
+      if (readerMoreFeature.autoBookSummaryEnabled) {
+        const baseline = Math.max(0, normalizeLooseInt(getLatestReadingPosition()?.globalCharOffset || 0));
+        setBookAutoSummaryLastEnd(baseline);
+      } else {
+        setBookAutoSummaryLastEnd(Math.max(0, content?.bookAutoSummaryLastEnd || 0));
+      }
     })();
     return () => {
       cancelled = true;
@@ -1265,10 +1612,15 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
   useEffect(() => {
     if (!isConversationHydrated) return;
+    if (deletedConversationKeyRef.current === conversationKey) return;
+    const personaName = activePersona?.name?.trim() || '';
+    const characterName = activeCharacter?.name?.trim() || '';
     persistConversationBucket(
       conversationKey,
       (existing) => ({
         ...existing,
+        personaName: personaName || existing.personaName || '',
+        characterName: characterName || existing.characterName || '',
         messages,
         chatHistorySummary,
         readingPrefixSummaryByBookId,
@@ -1285,6 +1637,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     chatSummaryCards,
     chatAutoSummaryLastEnd,
     isConversationHydrated,
+    activePersona?.name,
+    activeCharacter?.name,
   ]);
 
   useEffect(() => {
@@ -1325,10 +1679,6 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   useEffect(() => {
     summaryTaskQueueRef.current = summaryTaskQueue;
   }, [summaryTaskQueue]);
-
-  useEffect(() => {
-    summaryTaskRunningRef.current = summaryTaskRunning;
-  }, [summaryTaskRunning]);
 
   useEffect(() => {
     if (!activeBook?.id) return;
@@ -1780,6 +2130,10 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
   const requestAiReply = async (sourceMessages: ChatBubble[]) => {
     if (isManualLoading) return;
+    if (!isConversationProfileValid) {
+      showConversationLockedToast();
+      return;
+    }
     const readingContext = buildReadingContext();
     const requestConversationKey = conversationKey;
     setContextMenu(null);
@@ -1877,6 +2231,10 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
   const handleQueueUserBubble = () => {
     if (isManualLoading || isDeleteMode) return;
+    if (!isConversationProfileValid) {
+      showConversationLockedToast();
+      return;
+    }
     const text = compactText(inputText);
     if (!text) return;
 
@@ -2026,6 +2384,10 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
   const handleRefreshReply = async () => {
     if (isManualLoading) return;
+    if (!isConversationProfileValid) {
+      showConversationLockedToast();
+      return;
+    }
     if (messages.length === 0 || messages[messages.length - 1].sender !== 'character') {
       showToast('目前没有可以重答的回复', 'info');
       return;
@@ -2115,7 +2477,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           className={`reader-ai-fab absolute right-6 w-12 h-12 neu-btn rounded-full z-20 text-rose-400 ${
             isAiFabOpening ? 'neu-btn-active' : ''
           }`}
-          style={{ bottom: `${fabBottomPx}px` }}
+          style={{ bottom: `${fabBottomPx + Math.max(0, safeAreaBottom || 0)}px` }}
         >
           <Sparkles size={20} />
           <span
@@ -2136,6 +2498,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         }`}
         style={{
           height: `${resolvedPanelHeight}px`,
+          bottom: `${Math.max(0, safeAreaBottom || 0)}px`,
         }}
       >
         <div
@@ -2292,10 +2655,10 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
             </div>
           </div>
 
-          <div className="p-4 pb-6 relative">
+          <div className="p-4 pb-6 relative z-10">
             {toast && (
               <div
-                className={`absolute left-1/2 -translate-x-1/2 -top-8 px-6 py-2 rounded-full flex items-center gap-2 border backdrop-blur-md text-xs font-bold ${
+                className={`absolute z-20 left-1/2 -translate-x-1/2 -top-8 px-6 py-2 rounded-full flex items-center gap-2 border backdrop-blur-md text-xs font-bold ${
                   isDarkMode
                     ? 'bg-[#2d3748] border-slate-700/70 shadow-[6px_6px_12px_#232b39,-6px_-6px_12px_#374357]'
                     : 'bg-[#e0e5ec] border-white/20 shadow-[6px_6px_12px_rgba(0,0,0,0.1),-6px_-6px_12px_rgba(255,255,255,0.8)]'
@@ -2431,11 +2794,13 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         isDarkMode={isDarkMode}
         isOpen={isMoreSettingsOpen}
         onClose={onCloseMoreSettings}
+        safeAreaTop={Math.max(0, safeAreaTop || 0)}
+        safeAreaBottom={Math.max(0, safeAreaBottom || 0)}
         appearanceSettings={readerMoreAppearance}
         featureSettings={readerMoreFeature}
+        apiPresets={apiPresets}
         onUpdateAppearanceSettings={updateReaderMoreAppearanceSettings}
         onUpdateFeatureSettings={updateReaderMoreFeatureSettings}
-        onUpdateSummaryApiSettings={updateSummaryApiSettings}
         onUploadChatBackgroundImage={handleUploadChatBackgroundImage}
         onSetChatBackgroundImageFromUrl={handleSetChatBackgroundFromUrl}
         onClearChatBackgroundImage={handleClearChatBackground}
@@ -2444,9 +2809,14 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         onDeleteBubbleCssPreset={handleDeleteBubbleCssPreset}
         onRenameBubbleCssPreset={handleRenameBubbleCssPreset}
         onSelectBubbleCssPreset={handleSelectBubbleCssPreset}
-        onClearBubbleCssDraft={() => updateReaderMoreAppearanceSettings({ bubbleCssDraft: '' })}
+        onClearBubbleCssDraft={() =>
+          updateReaderMoreAppearanceSettings({ bubbleCssDraft: '', selectedBubbleCssPresetId: null })
+        }
+        onResetAppearanceSettings={handleResetAppearanceSettings}
+        onResetFeatureSettings={handleResetFeatureSettings}
         archiveOptions={archiveOptions}
         onSelectArchive={handleSelectArchive}
+        onDeleteArchive={handleDeleteArchive}
         bookSummaryCards={bookSummaryCards}
         chatSummaryCards={chatSummaryCards}
         onEditBookSummaryCard={handleEditBookSummaryCard}
@@ -2459,10 +2829,6 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         totalBookChars={bookText.length}
         totalMessages={messages.length}
         summaryTaskRunning={summaryTaskRunning}
-        onFetchSummaryModels={fetchSummaryApiModels}
-        summaryApiModels={summaryApiModels}
-        summaryApiFetchState={summaryApiFetchState}
-        summaryApiFetchError={summaryApiFetchError}
       />
 
       {contextMenu && !isDeleteMode && (

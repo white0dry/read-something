@@ -155,6 +155,7 @@ export interface ReaderMoreFeatureSettings {
   autoBookSummaryEnabled: boolean;
   autoBookSummaryTriggerChars: number;
   summaryApiEnabled: boolean;
+  summaryApiPresetId: string | null;
   summaryApi: ReaderSummaryApiSettings;
 }
 

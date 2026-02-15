@@ -17,6 +17,7 @@ import {
 import {
   AppSettings,
   ApiConfig,
+  ApiPreset,
   Book,
   Chapter,
   ReaderAiUnderlineRange,
@@ -28,6 +29,7 @@ import {
 } from '../types';
 import { Character, Persona, WorldBookEntry } from './settings/types';
 import { getBookContent, saveBookReaderState } from '../utils/bookContentStorage';
+import { buildConversationKey, persistConversationBucket, readConversationBucket } from '../utils/readerChatRuntime';
 import ReaderMessagePanel from './ReaderMessagePanel';
 
 interface ReaderProps {
@@ -37,6 +39,7 @@ interface ReaderProps {
   appSettings: AppSettings;
   setAppSettings: React.Dispatch<React.SetStateAction<AppSettings>>;
   apiConfig: ApiConfig;
+  apiPresets: ApiPreset[];
   personas: Persona[];
   activePersonaId: string | null;
   onSelectPersona: (personaId: string | null) => void;
@@ -515,6 +518,7 @@ const Reader: React.FC<ReaderProps> = ({
   appSettings,
   setAppSettings,
   apiConfig,
+  apiPresets,
   personas,
   activePersonaId,
   onSelectPersona,
@@ -596,6 +600,10 @@ const Reader: React.FC<ReaderProps> = ({
   const isHighlighterPanelOpen = activeFloatingPanel === 'highlighter';
   const isTypographyPanelOpen = activeFloatingPanel === 'typography';
   const isFloatingPanelVisible = activeFloatingPanel !== 'none';
+  const conversationKey = useMemo(
+    () => buildConversationKey(activeBook?.id || null, activePersonaId, activeCharacterId),
+    [activeBook?.id, activePersonaId, activeCharacterId]
+  );
 
   const refreshReaderScrollbar = () => {
     const scroller = readerScrollRef.current;
@@ -912,14 +920,12 @@ const Reader: React.FC<ReaderProps> = ({
         const readerState = content?.readerState;
         const persistedColor = readerState?.highlightColor;
         const persistedRanges = readerState?.highlightsByChapter;
-        const persistedAiUnderlines = readerState?.aiUnderlinesByChapter;
         const persistedPosition = normalizeReaderPosition(readerState?.readingPosition);
 
         if (cancelled) return;
 
         setChapters(resolvedChapters);
         setHighlightRangesByChapter(persistedRanges || {});
-        setAiUnderlineRangesByChapter(persistedAiUnderlines || {});
         if (persistedColor && isValidHexColor(persistedColor.toUpperCase())) {
           const normalized = persistedColor.toUpperCase();
           setHighlightColor(normalized);
@@ -1025,6 +1031,16 @@ const Reader: React.FC<ReaderProps> = ({
       cancelled = true;
     };
   }, [activeBook?.id]);
+
+  useEffect(() => {
+    if (!activeBook?.id) {
+      setAiUnderlineRangesByChapter({});
+      return;
+    }
+    const bucket = readConversationBucket(conversationKey);
+    const byBook = bucket.readingAiUnderlinesByBookId || {};
+    setAiUnderlineRangesByChapter(byBook[activeBook.id] || {});
+  }, [conversationKey, activeBook?.id]);
 
   useLayoutEffect(() => {
     const pending = pendingRestorePositionRef.current;
@@ -1319,7 +1335,6 @@ const Reader: React.FC<ReaderProps> = ({
       const readerState: ReaderBookState = {
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
-        aiUnderlinesByChapter: aiUnderlineRangesByChapter,
         readingPosition,
       };
       saveBookReaderState(activeBook.id, readerState).catch((error) => {
@@ -1339,6 +1354,26 @@ const Reader: React.FC<ReaderProps> = ({
     hydratedBookId,
     highlightColor,
     highlightRangesByChapter,
+  ]);
+
+  useEffect(() => {
+    if (!activeBook?.id || !isReaderStateHydrated || hydratedBookId !== activeBook.id) return;
+    persistConversationBucket(
+      conversationKey,
+      (existing) => ({
+        ...existing,
+        readingAiUnderlinesByBookId: {
+          ...(existing.readingAiUnderlinesByBookId || {}),
+          [activeBook.id]: aiUnderlineRangesByChapter,
+        },
+      }),
+      'reader-ai-underlines-sync'
+    );
+  }, [
+    activeBook?.id,
+    conversationKey,
+    hydratedBookId,
+    isReaderStateHydrated,
     aiUnderlineRangesByChapter,
   ]);
 
@@ -2166,7 +2201,6 @@ const Reader: React.FC<ReaderProps> = ({
       const readerState: ReaderBookState = {
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
-        aiUnderlinesByChapter: aiUnderlineRangesByChapter,
         readingPosition: sessionSnapshot.readingPosition,
       };
       saveBookReaderState(sessionSnapshot.bookId, readerState).catch((error) => {
@@ -2771,6 +2805,9 @@ const Reader: React.FC<ReaderProps> = ({
       <ReaderMessagePanel
         isDarkMode={isDarkMode}
         apiConfig={apiConfig}
+        apiPresets={apiPresets}
+        safeAreaTop={Math.max(0, safeAreaTop)}
+        safeAreaBottom={Math.max(0, safeAreaBottom)}
         activeBook={activeBook}
         appSettings={appSettings}
         setAppSettings={setAppSettings}

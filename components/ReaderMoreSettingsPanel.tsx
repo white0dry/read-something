@@ -1,6 +1,6 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Check, ChevronDown, Trash2, Image as ImageIcon, Link as LinkIcon, Loader2, X, RefreshCw, Zap, Save, Edit2, Palette, Settings, Archive } from 'lucide-react';
-import { ApiProvider, AppSettings, ReaderSummaryCard } from '../types';
+import { ArrowLeft, Check, ChevronDown, Trash2, AlertTriangle, Image as ImageIcon, Link as LinkIcon, Loader2, X, RefreshCw, Save, Edit2, Palette, Settings, Archive } from 'lucide-react';
+import { ApiPreset, AppSettings, ReaderSummaryCard } from '../types';
 import ResolvedImage from './ResolvedImage';
 
 export interface ReaderArchiveOption {
@@ -14,21 +14,23 @@ export interface ReaderArchiveOption {
   isCurrent: boolean;
 }
 
-type FetchState = 'IDLE' | 'LOADING' | 'SUCCESS' | 'ERROR';
 type TabKey = 'appearance' | 'feature' | 'session';
 type ModalType = 'none' | 'book' | 'chat' | 'bgUrl';
-const PANEL_VIEW_TRANSITION_MS = 260;
+const PANEL_VIEW_TRANSITION_MS = 420;
 const MODAL_FADE_TRANSITION_MS = 220;
+const NONE_BUBBLE_PRESET_VALUE = '__none__';
 
 interface Props {
   isDarkMode: boolean;
   isOpen: boolean;
   onClose: () => void;
+  safeAreaTop: number;
+  safeAreaBottom: number;
   appearanceSettings: AppSettings['readerMore']['appearance'];
   featureSettings: AppSettings['readerMore']['feature'];
+  apiPresets: ApiPreset[];
   onUpdateAppearanceSettings: (updater: Partial<AppSettings['readerMore']['appearance']>) => void;
   onUpdateFeatureSettings: (updater: Partial<AppSettings['readerMore']['feature']>) => void;
-  onUpdateSummaryApiSettings: (updater: Partial<AppSettings['readerMore']['feature']['summaryApi']>) => void;
   onUploadChatBackgroundImage: (file: File) => Promise<void>;
   onSetChatBackgroundImageFromUrl: (url: string) => void;
   onClearChatBackgroundImage: () => void;
@@ -38,6 +40,8 @@ interface Props {
   onRenameBubbleCssPreset: (presetId: string, name: string) => void;
   onSelectBubbleCssPreset: (presetId: string | null) => void;
   onClearBubbleCssDraft: () => void;
+  onResetAppearanceSettings: () => void;
+  onResetFeatureSettings: () => void;
   archiveOptions: ReaderArchiveOption[];
   onSelectArchive: (archive: ReaderArchiveOption) => void;
   onDeleteArchive?: (conversationKey: string) => void;
@@ -53,28 +57,60 @@ interface Props {
   totalBookChars: number;
   totalMessages: number;
   summaryTaskRunning: boolean;
-  onFetchSummaryModels: () => Promise<void>;
-  summaryApiModels: string[];
-  summaryApiFetchState: FetchState;
-  summaryApiFetchError: string;
 }
 
-const PROVIDERS: Array<{ value: ApiProvider; label: string; endpoint: string }> = [
-  { value: 'OPENAI', label: 'OpenAI', endpoint: 'https://api.openai.com/v1' },
-  { value: 'DEEPSEEK', label: 'DeepSeek', endpoint: 'https://api.deepseek.com' },
-  { value: 'GEMINI', label: 'Gemini', endpoint: 'https://generativelanguage.googleapis.com/v1beta' },
-  { value: 'CLAUDE', label: 'Claude', endpoint: 'https://api.anthropic.com' },
-  { value: 'CUSTOM', label: '自定义', endpoint: '' },
-];
 const TAB_ITEMS: Array<{ key: TabKey; label: string; icon: React.ComponentType<{ size?: number }> }> = [
   { key: 'appearance', label: '美化', icon: Palette },
   { key: 'feature', label: '功能', icon: Settings },
   { key: 'session', label: '会话', icon: Archive },
 ];
 const TAB_ORDER: TabKey[] = ['appearance', 'feature', 'session'];
+const BUBBLE_CSS_PLACEHOLDER = [
+  '可自定义类名：',
+  '.rm-bubble',
+  '.rm-bubble-user',
+  '.rm-bubble-ai',
+  '',
+  '示意代码，不会自动生效：',
+  '.rm-bubble-user {',
+  '  background: #ffdbe5;',
+  '  color: #7a2941;',
+  '  border: 1px solid rgba(190,83,107,0.35);',
+  '  border-radius: 22px 22px 8px 22px;',
+  '  box-shadow: 6px 6px 12px rgba(163,177,198,0.35), -4px -4px 10px rgba(255,255,255,0.65);',
+  '}',
+  '',
+  '.rm-bubble-ai {',
+  '  background: #f4f7fb;',
+  '  color: #334155;',
+  '  border: 1px solid rgba(148,163,184,0.4);',
+  '  border-radius: 22px 22px 22px 8px;',
+  '  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.75), 6px 6px 12px rgba(163,177,198,0.28);',
+  '}',
+].join('\n');
 
 const clampInt = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, Number.isFinite(value) ? Math.round(value) : min));
+
+const normalizeLooseInt = (raw: string) => {
+  const parsed = Number(raw.trim());
+  return Number.isFinite(parsed) ? Math.round(parsed) : 0;
+};
+
+const stabilizeScrollBoundary = (el: HTMLDivElement) => {
+  if (el.scrollHeight <= el.clientHeight + 1) {
+    if (el.scrollTop !== 0) el.scrollTop = 0;
+    return;
+  }
+  if (el.scrollTop <= 0) {
+    el.scrollTop = 1;
+    return;
+  }
+  const maxScrollTop = Math.max(1, el.scrollHeight - el.clientHeight - 1);
+  if (el.scrollTop >= maxScrollTop) {
+    el.scrollTop = maxScrollTop;
+  }
+};
 
 const ts = (v: number) =>
   new Date(v).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
@@ -187,16 +223,57 @@ const SingleSelectDropdown = ({
   );
 };
 
+const LooseNumberInput = ({
+  value,
+  onCommit,
+  className,
+}: {
+  value: number;
+  onCommit: (value: number) => void;
+  className: string;
+}) => {
+  const [draft, setDraft] = useState(`${value}`);
+
+  useEffect(() => {
+    setDraft(`${value}`);
+  }, [value]);
+
+  const commit = () => {
+    const normalized = normalizeLooseInt(draft);
+    onCommit(normalized);
+    setDraft(`${normalized}`);
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        commit();
+        e.currentTarget.blur();
+      }}
+      className={className}
+    />
+  );
+};
+
 const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
   const {
     isDarkMode,
     isOpen,
     onClose,
+    safeAreaTop,
+    safeAreaBottom,
     appearanceSettings,
     featureSettings,
+    apiPresets,
     onUpdateAppearanceSettings,
     onUpdateFeatureSettings,
-    onUpdateSummaryApiSettings,
     onUploadChatBackgroundImage,
     onSetChatBackgroundImageFromUrl,
     onClearChatBackgroundImage,
@@ -206,6 +283,8 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     onRenameBubbleCssPreset,
     onSelectBubbleCssPreset,
     onClearBubbleCssDraft,
+    onResetAppearanceSettings,
+    onResetFeatureSettings,
     archiveOptions,
     onSelectArchive,
     onDeleteArchive,
@@ -221,10 +300,6 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     totalBookChars,
     totalMessages,
     summaryTaskRunning,
-    onFetchSummaryModels,
-    summaryApiModels,
-    summaryApiFetchState,
-    summaryApiFetchError,
   } = props;
 
   const [tab, setTab] = useState<TabKey>('appearance');
@@ -236,11 +311,13 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
   const [bgUrlInput, setBgUrlInput] = useState('');
   const [presetName, setPresetName] = useState('');
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
-  const [bookRange, setBookRange] = useState({ start: 1, end: 1 });
-  const [chatRange, setChatRange] = useState({ start: 1, end: 1 });
+  const [bookRangeDraft, setBookRangeDraft] = useState({ start: '1', end: '1' });
+  const [chatRangeDraft, setChatRangeDraft] = useState({ start: '1', end: '1' });
   const closeTimerRef = useRef<number | null>(null);
   const modalCloseTimerRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const contentScrollRef = useRef<HTMLDivElement>(null);
+  const contentTouchStartYRef = useRef(0);
 
   useEffect(() => {
     if (isOpen) {
@@ -264,13 +341,36 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
     if (modalCloseTimerRef.current) window.clearTimeout(modalCloseTimerRef.current);
   }, []);
-  useEffect(() => setBookRange({ start: 1, end: Math.max(1, currentReadCharOffset || 1) }), [currentReadCharOffset, modal]);
-  useEffect(() => setChatRange({ start: 1, end: Math.max(1, totalMessages || 1) }), [totalMessages, modal]);
+  useEffect(() => {
+    const end = Math.max(1, Math.floor(currentReadCharOffset || 0));
+    setBookRangeDraft({ start: '1', end: `${end}` });
+  }, [currentReadCharOffset, modal]);
+  useEffect(() => {
+    const end = Math.max(1, Math.floor(totalMessages || 0));
+    setChatRangeDraft({ start: '1', end: `${end}` });
+  }, [totalMessages, modal]);
 
   const selectedPreset = useMemo(
     () => appearanceSettings.bubbleCssPresets.find((x) => x.id === appearanceSettings.selectedBubbleCssPresetId) || null,
     [appearanceSettings.bubbleCssPresets, appearanceSettings.selectedBubbleCssPresetId]
   );
+  const summaryApiPresetOptions = useMemo(() => {
+    return apiPresets
+      .map((preset, index) => {
+        const value = `${preset.id || ''}`.trim();
+        const label = typeof preset.name === 'string' && preset.name.trim()
+          ? preset.name.trim()
+          : `预设 ${index + 1}`;
+        if (!value) return null;
+        return { value, label };
+      })
+      .filter((item): item is { value: string; label: string } => Boolean(item));
+  }, [apiPresets]);
+  const summaryApiPresetValue = useMemo(() => {
+    const id = `${featureSettings.summaryApiPresetId || ''}`.trim();
+    if (!id) return '';
+    return summaryApiPresetOptions.some((preset) => preset.value === id) ? id : '';
+  }, [summaryApiPresetOptions, featureSettings.summaryApiPresetId]);
   const cardClass = isDarkMode
     ? 'bg-[#2d3748] shadow-[6px_6px_12px_#232b39,-6px_-6px_12px_#374357]'
     : 'bg-[#e0e5ec] shadow-[6px_6px_12px_#a3b1c6,-6px_-6px_12px_#ffffff]';
@@ -289,11 +389,26 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
   const panelSurfaceShadowClass = isDarkMode
     ? 'shadow-[4px_6px_12px_rgba(35,43,57,0.28),-4px_6px_12px_rgba(35,43,57,0.28)]'
     : 'shadow-[4px_6px_12px_rgba(163,177,198,0.28),-4px_6px_12px_rgba(163,177,198,0.28)]';
+  const tabSideShadowClass = isDarkMode
+    ? 'shadow-[6px_7px_14px_rgba(35,43,57,0.36),-6px_7px_14px_rgba(35,43,57,0.36)]'
+    : 'shadow-[6px_7px_14px_rgba(163,177,198,0.36),-6px_7px_14px_rgba(163,177,198,0.36)]';
+  const tabTopSoftShadowClass = isDarkMode
+    ? 'shadow-[0_-4px_10px_rgba(35,43,57,0.28)]'
+    : 'shadow-[0_-4px_10px_rgba(163,177,198,0.28)]';
   const panelMainCardShadowClass = panelSurfaceShadowClass;
-  const tabActivePlateClass = `${panelMainCardBaseClass} ${panelSurfaceShadowClass}`;
+  const tabActivePlateClass = `${panelMainCardBaseClass} ${tabSideShadowClass} ${tabTopSoftShadowClass}`;
   const activeBtnClass = isDarkMode
     ? 'active:shadow-[inset_3px_3px_6px_#232b39,inset_-3px_-3px_6px_#374357] active:translate-y-px'
     : 'active:shadow-[inset_3px_3px_6px_#a3b1c6,inset_-3px_-3px_6px_#ffffff] active:translate-y-px';
+  const iconDangerEnabledClass = isDarkMode ? 'text-[#cf8f97]' : 'text-[#bf616b]';
+  const iconDisabledGrayClass = isDarkMode ? 'text-slate-500' : 'text-slate-400';
+  const disabledIconButtonClass = `${btnClass} ${iconDisabledGrayClass} opacity-55 cursor-not-allowed`;
+  const enabledDangerIconButtonClass = `${iconDangerEnabledClass} ${btnClass} ${activeBtnClass}`;
+  const archiveCardDefaultClass = isDarkMode ? 'bg-[#1a202c] text-slate-200' : 'bg-white text-slate-700';
+  const archiveCardCurrentClass = isDarkMode
+    ? 'bg-rose-500/20 text-slate-100 border border-rose-300/40'
+    : 'bg-rose-200 text-slate-700 border border-rose-400/60';
+  const archiveWarningIconClass = isDarkMode ? 'text-amber-300/90' : 'text-amber-600/85';
   const activeTabIndex = TAB_ORDER.indexOf(tab);
   const tabContentAnimClass = tabDirection === 'right' ? 'stats-slide-left' : 'stats-slide-right';
   const panelMotionStyle = { animationDuration: `${PANEL_VIEW_TRANSITION_MS}ms` } as const;
@@ -306,9 +421,12 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     setTab(newTab);
   };
 
-  const numInput = (value: number, onChange: (v: number) => void, min: number, max: number) => (
-    <input type="number" min={min} max={max} value={value} onChange={(e) => onChange(Number(e.target.value || '0'))}
-      className={`w-14 h-8 rounded-lg px-2 text-xs text-right outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${inputClass}`} />
+  const numInput = (value: number, onChange: (v: number) => void) => (
+    <LooseNumberInput
+      value={value}
+      onCommit={onChange}
+      className={`w-14 h-8 rounded-lg px-2 text-xs text-right outline-none [appearance:textfield] ${inputClass}`}
+    />
   );
   const openModal = (nextModal: Exclude<ModalType, 'none'>) => {
     if (modalCloseTimerRef.current) window.clearTimeout(modalCloseTimerRef.current);
@@ -325,10 +443,38 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     }, MODAL_FADE_TRANSITION_MS);
   };
 
-  const applySummaryApiSettings = () => {
-    // Visual feedback for applying settings
-    // In a real scenario, this could trigger a save or validation
-  };
+  useEffect(() => {
+    if (!rendered || !isOpen) return;
+    const el = contentScrollRef.current;
+    if (!el) return;
+    const onTouchStart = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      if (!touch) return;
+      stabilizeScrollBoundary(el);
+      contentTouchStartYRef.current = touch.clientY;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      if (!touch) return;
+      const isScrollable = el.scrollHeight > el.clientHeight + 1;
+      if (!isScrollable) {
+        if (event.cancelable) event.preventDefault();
+        return;
+      }
+      const deltaY = touch.clientY - contentTouchStartYRef.current;
+      const atTop = el.scrollTop <= 0;
+      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+      if ((atTop && deltaY > 0) || (atBottom && deltaY < 0)) {
+        if (event.cancelable) event.preventDefault();
+      }
+    };
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    el.addEventListener('touchmove', onTouchMove, { passive: false });
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+    };
+  }, [rendered, isOpen]);
 
   const renderSummaryModal = () => {
     if (modal !== 'book' && modal !== 'chat') return null;
@@ -336,12 +482,29 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     const cards = isBook ? bookSummaryCards : chatSummaryCards;
     const onEdit = isBook ? onEditBookSummaryCard : onEditChatSummaryCard;
     const onDelete = isBook ? onDeleteBookSummaryCard : onDeleteChatSummaryCard;
-    const max = isBook ? Math.max(1, totalBookChars || currentReadCharOffset || 1) : Math.max(1, totalMessages || 1);
-    const start = isBook ? bookRange.start : chatRange.start;
-    const end = isBook ? bookRange.end : chatRange.end;
+    const startDraft = isBook ? bookRangeDraft.start : chatRangeDraft.start;
+    const endDraft = isBook ? bookRangeDraft.end : chatRangeDraft.end;
+    const commitRangeField = (field: 'start' | 'end') => {
+      if (isBook) {
+        const source = field === 'start' ? bookRangeDraft.start : bookRangeDraft.end;
+        const normalized = normalizeLooseInt(source);
+        setBookRangeDraft((prev) => ({ ...prev, [field]: `${normalized}` }));
+        return;
+      }
+      const source = field === 'start' ? chatRangeDraft.start : chatRangeDraft.end;
+      const normalized = normalizeLooseInt(source);
+      setChatRangeDraft((prev) => ({ ...prev, [field]: `${normalized}` }));
+    };
     const trigger = () => {
-      const s = clampInt(Math.min(start, end), 1, max);
-      const e = clampInt(Math.max(start, end), 1, max);
+      const rawStart = normalizeLooseInt(startDraft);
+      const rawEnd = normalizeLooseInt(endDraft);
+      const s = Math.min(rawStart, rawEnd);
+      const e = Math.max(rawStart, rawEnd);
+      if (isBook) {
+        setBookRangeDraft({ start: `${rawStart}`, end: `${rawEnd}` });
+      } else {
+        setChatRangeDraft({ start: `${rawStart}`, end: `${rawEnd}` });
+      }
       if (isBook) onRequestManualBookSummary(s, e);
       else onRequestManualChatSummary(s, e);
     };
@@ -359,14 +522,28 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
             <div className="text-xs text-slate-500 mb-3">
               {isBook ? `当前阅读：${currentReadCharOffset}` : `当前消息总数：${totalMessages}`}
             </div>
-            <div className="flex items-center gap-2 mb-3">
-              <input type="number" value={start} min={1} max={max}
-                onChange={(e) => isBook ? setBookRange((p) => ({ ...p, start: clampInt(Number(e.target.value || '1'), 1, max) })) : setChatRange((p) => ({ ...p, start: clampInt(Number(e.target.value || '1'), 1, max) }))}
-                className={`flex-1 h-10 rounded-xl px-3 text-sm outline-none ${inputClass}`} />
-              <span className="text-slate-500">—</span>
-              <input type="number" value={end} min={1} max={max}
-                onChange={(e) => isBook ? setBookRange((p) => ({ ...p, end: clampInt(Number(e.target.value || '1'), 1, max) })) : setChatRange((p) => ({ ...p, end: clampInt(Number(e.target.value || '1'), 1, max) }))}
-                className={`flex-1 h-10 rounded-xl px-3 text-sm outline-none ${inputClass}`} />
+            <div className="w-full max-w-sm mx-auto flex items-center gap-2 mb-3">
+              <input type="text" inputMode="decimal" value={startDraft}
+                onChange={(e) => isBook ? setBookRangeDraft((p) => ({ ...p, start: e.target.value })) : setChatRangeDraft((p) => ({ ...p, start: e.target.value }))}
+                onBlur={() => commitRangeField('start')}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return;
+                  e.preventDefault();
+                  commitRangeField('start');
+                  e.currentTarget.blur();
+                }}
+                className={`min-w-0 flex-1 h-10 rounded-xl px-3 text-sm outline-none ${inputClass}`} />
+              <span className="w-5 text-center text-slate-500">—</span>
+              <input type="text" inputMode="decimal" value={endDraft}
+                onChange={(e) => isBook ? setBookRangeDraft((p) => ({ ...p, end: e.target.value })) : setChatRangeDraft((p) => ({ ...p, end: e.target.value }))}
+                onBlur={() => commitRangeField('end')}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return;
+                  e.preventDefault();
+                  commitRangeField('end');
+                  e.currentTarget.blur();
+                }}
+                className={`min-w-0 flex-1 h-10 rounded-xl px-3 text-sm outline-none ${inputClass}`} />
             </div>
             <button type="button" onClick={trigger} disabled={summaryTaskRunning}
               className={`w-full h-10 rounded-xl text-sm font-bold flex items-center justify-center gap-2 text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all disabled:opacity-50 disabled:active:scale-100 ${summaryTaskRunning ? 'cursor-not-allowed' : ''}`}>
@@ -385,7 +562,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                     <span>{isBook ? `字符区间` : `消息区间`}：{card.start}-{card.end}</span>
                     <div className="flex items-center gap-2">
                       <span>{ts(card.updatedAt)}</span>
-                      <button type="button" onClick={() => onDelete(card.id)} className={`w-7 h-7 rounded-full text-rose-400 flex items-center justify-center transition-all ${btnClass} ${activeBtnClass}`}>
+                      <button type="button" onClick={() => onDelete(card.id)} className={`w-7 h-7 rounded-full flex items-center justify-center transition-all ${enabledDangerIconButtonClass}`}>
                         <Trash2 size={13} />
                       </button>
                     </div>
@@ -441,11 +618,17 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
 
   return (
     <>
-      <div className="absolute inset-0 z-[90]">
-        <div className={`absolute inset-0 ${closing ? 'app-view-exit-right' : 'app-view-enter-left'} ${isDarkMode ? 'bg-[#2d3748]' : 'bg-[#e0e5ec]'}`} style={panelMotionStyle}>
+      <div
+        className="absolute inset-0 z-[90]"
+        style={{
+          paddingTop: `${Math.max(0, safeAreaTop || 0)}px`,
+          paddingBottom: `${Math.max(0, safeAreaBottom || 0)}px`,
+        }}
+      >
+        <div className={`h-full overflow-hidden overscroll-none ${closing ? 'app-view-exit-right' : 'app-view-enter-left'} ${isDarkMode ? 'bg-[#2d3748]' : 'bg-[#e0e5ec]'}`} style={panelMotionStyle}>
           <div className="h-full flex flex-col">
             {/* Header */}
-            <div className="px-4 pt-4 pb-3 flex items-center gap-3">
+            <div className={`flex items-center gap-3 p-4 z-10 transition-colors ${isDarkMode ? 'bg-[#2d3748]' : 'bg-[#e0e5ec]'}`}>
               <button type="button" onClick={onClose} className={`w-10 h-10 rounded-full flex items-center justify-center hover:text-rose-400 transition-colors ${btnClass} ${activeBtnClass}`}>
                 <ArrowLeft size={18} />
               </button>
@@ -453,8 +636,8 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
             </div>
 
             {/* Bookmark-style Tabs */}
-            <div className="px-4 pb-0">
-              <div className="relative grid grid-cols-3">
+            <div className="px-4 pt-2 pb-0">
+              <div className="relative grid grid-cols-3 overflow-visible">
                 <div
                   className="absolute inset-y-0 left-0 w-1/3 pointer-events-none transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
                   style={{ transform: `translateX(${Math.max(0, activeTabIndex) * 100}%)` }}
@@ -483,7 +666,11 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
             </div>
 
             {/* Content Area */}
-            <div className="flex-1 overflow-y-auto no-scrollbar px-4 pb-6 overflow-visible">
+            <div
+              ref={contentScrollRef}
+              className="flex-1 min-h-0 overflow-y-auto overscroll-none no-scrollbar px-4 pb-6"
+              style={{ overscrollBehaviorY: 'none', WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}
+            >
               <div className={closing ? 'app-view-exit-right' : 'app-view-enter-left'} style={panelMotionStyle}>
                 <div key={tab} className={tabContentAnimClass}>
                   <div className={`rounded-t-none rounded-b-2xl p-4 ${panelMainCardBaseClass} ${panelMainCardShadowClass}`}>
@@ -534,8 +721,8 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                           disabled={!appearanceSettings.chatBackgroundImage}
                           className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${
                             appearanceSettings.chatBackgroundImage
-                              ? `text-rose-400 ${btnClass} ${activeBtnClass}`
-                              : `text-slate-400 opacity-50 cursor-not-allowed ${btnClass}`
+                              ? enabledDangerIconButtonClass
+                              : disabledIconButtonClass
                           }`}
                         >
                           <Trash2 size={16} />
@@ -561,32 +748,38 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                       <div className={`text-sm font-bold mb-3 ${headingClass}`}>自定义气泡 CSS</div>
                       <textarea
                         value={appearanceSettings.bubbleCssDraft}
-                        onChange={(e) => onUpdateAppearanceSettings({ bubbleCssDraft: e.target.value })}
+                        onChange={(e) => {
+                          const nextDraft = e.target.value;
+                          const shouldSwitchToNone =
+                            nextDraft.trim().length === 0 ||
+                            (selectedPreset ? nextDraft !== selectedPreset.css : false);
+                          onUpdateAppearanceSettings({
+                            bubbleCssDraft: nextDraft,
+                            ...(shouldSwitchToNone ? { selectedBubbleCssPresetId: null } : {}),
+                          });
+                        }}
+                        placeholder={BUBBLE_CSS_PLACEHOLDER}
                         className={`w-full min-h-[120px] rounded-xl p-3 text-xs outline-none resize-y ${inputClass} mb-3`}
                       />
                       <style>{appearanceSettings.bubbleCssDraft || ''}</style>
 
                       {/* 预览区域 - 添加凹陷边框和字体缩放 */}
-                      <div className={`rounded-xl p-3 mb-3 ${pressedClass}`}>
+                      <div className={`rm-bubble-preview reader-message-scroll overflow-hidden rounded-xl p-3 mb-3 ${pressedClass}`}>
                         <div className="space-y-2" style={{ fontSize: `${14 * appearanceSettings.bubbleFontSizeScale}px` }}>
                           <div className="flex justify-start">
                             <div className={`rm-bubble rm-bubble-ai max-w-[86%] rounded-2xl rounded-bl px-5 py-3 ${
-                              appearanceSettings.bubbleCssDraft
-                                ? ''
-                                : isDarkMode
-                                  ? 'bg-[#1a202c] text-slate-300 shadow-md'
-                                  : 'bg-[#e0e5ec] shadow-[5px_5px_10px_#c3c8ce,-5px_-5px_10px_#fdffff] text-slate-700'
+                              isDarkMode
+                                ? 'bg-[#1a202c] text-slate-300 shadow-md'
+                                : 'bg-[#e0e5ec] shadow-[5px_5px_10px_#c3c8ce,-5px_-5px_10px_#fdffff] text-slate-700'
                             }`}>
                               AI 气泡预览
                             </div>
                           </div>
                           <div className="flex justify-end">
                             <div className={`rm-bubble rm-bubble-user max-w-[86%] rounded-2xl rounded-br px-5 py-3 ${
-                              appearanceSettings.bubbleCssDraft
-                                ? ''
-                                : isDarkMode
-                                  ? 'bg-rose-500 text-white shadow-md'
-                                  : 'bg-rose-400 text-white shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
+                              isDarkMode
+                                ? 'bg-rose-500 text-white shadow-md'
+                                : 'bg-rose-400 text-white shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
                             }`}>
                               用户气泡预览
                             </div>
@@ -597,9 +790,12 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                       {/* 预设选择 */}
                       <div className="mb-3">
                         <SingleSelectDropdown
-                          options={appearanceSettings.bubbleCssPresets.map(p => ({ value: p.id, label: p.name }))}
-                          value={appearanceSettings.selectedBubbleCssPresetId || ''}
-                          onChange={(val) => onSelectBubbleCssPreset(val || null)}
+                          options={[
+                            { value: NONE_BUBBLE_PRESET_VALUE, label: '无' },
+                            ...appearanceSettings.bubbleCssPresets.map((p) => ({ value: p.id, label: p.name })),
+                          ]}
+                          value={appearanceSettings.selectedBubbleCssPresetId || NONE_BUBBLE_PRESET_VALUE}
+                          onChange={(val) => onSelectBubbleCssPreset(val === NONE_BUBBLE_PRESET_VALUE ? null : val || null)}
                           placeholder="选择预设"
                           inputClass={inputClass}
                           cardClass={cardClass}
@@ -654,7 +850,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                                 setEditingPresetId(selectedPreset.id);
                               }
                             }}
-                            className={`w-10 h-10 aspect-square shrink-0 rounded-xl flex items-center justify-center transition-all ${selectedPreset ? `${btnClass} ${activeBtnClass}` : 'opacity-40 cursor-not-allowed bg-transparent'}`}
+                            className={`w-10 h-10 aspect-square shrink-0 rounded-xl flex items-center justify-center transition-all ${selectedPreset ? `${btnClass} ${activeBtnClass}` : disabledIconButtonClass}`}
                             title="重命名"
                           >
                             <Edit2 size={16} />
@@ -665,8 +861,8 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                             onClick={() => selectedPreset && onDeleteBubbleCssPreset(selectedPreset.id)}
                             className={`w-10 h-10 aspect-square shrink-0 rounded-xl flex items-center justify-center transition-all ${
                               selectedPreset
-                                ? `text-rose-400 ${btnClass} ${activeBtnClass}`
-                                : 'text-slate-400 opacity-40 cursor-not-allowed bg-transparent'
+                                ? enabledDangerIconButtonClass
+                                : disabledIconButtonClass
                             }`}
                             title="删除"
                           >
@@ -674,6 +870,19 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                           </button>
                         </div>
                       </div>
+                    </div>
+
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
+
+                    <div className="py-5">
+                      <button
+                        type="button"
+                        onClick={onResetAppearanceSettings}
+                        className={`w-full h-10 rounded-xl text-sm font-bold flex items-center justify-center gap-2 text-slate-500 ${btnClass} ${activeBtnClass} transition-all`}
+                      >
+                        <RefreshCw size={14} />
+                        重置美化设置
+                      </button>
                     </div>
                   </div>
                 )}
@@ -684,7 +893,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                     <div className="py-5">
                       <div className="flex items-center justify-between">
                         <span className={`text-sm font-bold ${headingClass}`}>记忆消息条数</span>
-                        {numInput(featureSettings.memoryBubbleCount, (v) => onUpdateFeatureSettings({ memoryBubbleCount: clampInt(v, 20, 5000) }), 20, 5000)}
+                        {numInput(featureSettings.memoryBubbleCount, (v) => onUpdateFeatureSettings({ memoryBubbleCount: v }))}
                       </div>
                     </div>
 
@@ -694,7 +903,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                     <div className="py-5">
                       <div className="flex items-center justify-between">
                         <span className={`text-sm font-bold ${headingClass}`}>回复最小条数</span>
-                        {numInput(featureSettings.replyBubbleMin, (v) => onUpdateFeatureSettings({ replyBubbleMin: clampInt(v, 1, 20), replyBubbleMax: Math.max(clampInt(v, 1, 20), featureSettings.replyBubbleMax) }), 1, 20)}
+                        {numInput(featureSettings.replyBubbleMin, (v) => onUpdateFeatureSettings({ replyBubbleMin: v }))}
                       </div>
                     </div>
 
@@ -704,7 +913,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                     <div className="py-5">
                       <div className="flex items-center justify-between">
                         <span className={`text-sm font-bold ${headingClass}`}>回复最大条数</span>
-                        {numInput(featureSettings.replyBubbleMax, (v) => onUpdateFeatureSettings({ replyBubbleMax: clampInt(v, 1, 20), replyBubbleMin: Math.min(clampInt(v, 1, 20), featureSettings.replyBubbleMin) }), 1, 20)}
+                        {numInput(featureSettings.replyBubbleMax, (v) => onUpdateFeatureSettings({ replyBubbleMax: v }))}
                       </div>
                     </div>
 
@@ -720,7 +929,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                         <div className="overflow-hidden">
                           <div className="pt-2 flex items-center justify-between text-xs text-slate-500">
                             <span>触发条数</span>
-                            {numInput(featureSettings.autoChatSummaryTriggerCount, (v) => onUpdateFeatureSettings({ autoChatSummaryTriggerCount: clampInt(v, 100, 5000) }), 100, 5000)}
+                            {numInput(featureSettings.autoChatSummaryTriggerCount, (v) => onUpdateFeatureSettings({ autoChatSummaryTriggerCount: v }))}
                           </div>
                         </div>
                       </div>
@@ -738,7 +947,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                         <div className="overflow-hidden">
                           <div className="pt-2 flex items-center justify-between text-xs text-slate-500">
                             <span>触发字数</span>
-                            {numInput(featureSettings.autoBookSummaryTriggerChars, (v) => onUpdateFeatureSettings({ autoBookSummaryTriggerChars: clampInt(v, 1000, 50000) }), 1000, 50000)}
+                            {numInput(featureSettings.autoBookSummaryTriggerChars, (v) => onUpdateFeatureSettings({ autoBookSummaryTriggerChars: v }))}
                           </div>
                         </div>
                       </div>
@@ -756,87 +965,37 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                         <Toggle checked={featureSettings.summaryApiEnabled} onClick={() => onUpdateFeatureSettings({ summaryApiEnabled: !featureSettings.summaryApiEnabled })} pressedClass={pressedClass} activeClass={activeBtnClass} />
                       </div>
                       <div className={`grid transition-[grid-template-rows] duration-300 ${featureSettings.summaryApiEnabled ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
-                        <div className="overflow-hidden">
+                        <div className={featureSettings.summaryApiEnabled ? 'overflow-visible' : 'overflow-hidden'}>
                           <div className="pt-3 space-y-3">
-                            {/* 服务商选择 */}
                             <SingleSelectDropdown
-                              options={PROVIDERS.map(p => ({ value: p.value, label: p.label }))}
-                              value={featureSettings.summaryApi.provider}
-                              onChange={(val) => {
-                                const provider = val as ApiProvider;
-                                const endpoint = PROVIDERS.find((p) => p.value === provider)?.endpoint || '';
-                                onUpdateSummaryApiSettings({ provider, endpoint, model: '' });
-                              }}
-                              placeholder="选择服务商"
+                              options={summaryApiPresetOptions}
+                              value={summaryApiPresetValue}
+                              onChange={(val) => onUpdateFeatureSettings({ summaryApiPresetId: val || null })}
+                              placeholder={summaryApiPresetOptions.length > 0 ? '选择已保存预设' : '请先到 API 设置保存预设'}
                               inputClass={inputClass}
                               cardClass={cardClass}
                               isDarkMode={isDarkMode}
+                              disabled={summaryApiPresetOptions.length === 0}
                             />
-
-                            <input
-                              type="text"
-                              value={featureSettings.summaryApi.endpoint}
-                              onChange={(e) => onUpdateSummaryApiSettings({ endpoint: e.target.value })}
-                              className={`w-full h-10 rounded-xl px-3 text-sm outline-none ${inputClass}`}
-                              placeholder="API 地址"
-                            />
-
-                            <input
-                              type="password"
-                              value={featureSettings.summaryApi.apiKey}
-                              onChange={(e) => onUpdateSummaryApiSettings({ apiKey: e.target.value })}
-                              className={`w-full h-10 rounded-xl px-3 text-sm outline-none ${inputClass}`}
-                              placeholder="API Key"
-                            />
-
-                            <div className="flex items-center gap-2">
-                              <div className="flex-1">
-                                <SingleSelectDropdown
-                                  options={summaryApiModels.map(m => ({ value: m, label: m }))}
-                                  value={featureSettings.summaryApi.model}
-                                  onChange={(val) => onUpdateSummaryApiSettings({ model: val })}
-                                  placeholder={summaryApiModels.length > 0 ? "选择模型..." : "请先拉取模型..."}
-                                  inputClass={inputClass}
-                                  cardClass={cardClass}
-                                  isDarkMode={isDarkMode}
-                                />
-                              </div>
-
-                              {/* 状态指示灯 */}
-                              <div className={`w-2.5 h-2.5 rounded-full transition-all duration-300 ${
-                                summaryApiFetchState === 'SUCCESS' ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]' :
-                                summaryApiFetchState === 'ERROR' ? 'bg-red-500 shadow-[0_0_8px_#ef4444]' :
-                                summaryApiFetchState === 'LOADING' ? 'bg-amber-400 animate-pulse' : 'bg-slate-300'
-                              }`} />
-
-                              <button
-                                type="button"
-                                onClick={() => void onFetchSummaryModels()}
-                                disabled={summaryApiFetchState === 'LOADING'}
-                                className={`h-10 px-3 rounded-xl text-xs text-slate-500 flex items-center gap-1 transition-all ${
-                                  summaryApiFetchState === 'LOADING'
-                                    ? 'opacity-50 cursor-not-allowed'
-                                    : activeBtnClass
-                                } ${btnClass}`}
-                              >
-                                <RefreshCw size={10} className={summaryApiFetchState === 'LOADING' ? 'animate-spin' : ''} />
-                                拉取模型
-                              </button>
-                            </div>
-
-                            {summaryApiFetchError && <div className="text-[11px] text-rose-400">{summaryApiFetchError}</div>}
-
-                            <button
-                              type="button"
-                              onClick={applySummaryApiSettings}
-                              className={`w-full h-10 rounded-xl text-sm font-bold flex items-center justify-center gap-2 text-white bg-rose-400 shadow-lg hover:bg-rose-500 ${activeBtnClass} transition-all`}
-                            >
-                              <Zap size={16} />
-                              应用设置
-                            </button>
+                            {summaryApiPresetOptions.length === 0 && (
+                              <div className="text-[11px] text-slate-500">请先在设置 - API 配置中保存预设</div>
+                            )}
                           </div>
                         </div>
                       </div>
+                    </div>
+
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
+
+                    <div className="py-5">
+                      <button
+                        type="button"
+                        onClick={onResetFeatureSettings}
+                        className={`w-full h-10 rounded-xl text-sm font-bold flex items-center justify-center gap-2 text-slate-500 ${btnClass} ${activeBtnClass} transition-all`}
+                      >
+                        <RefreshCw size={14} />
+                        重置功能设置
+                      </button>
                     </div>
                   </div>
                 )}
@@ -855,36 +1014,43 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                               key={a.conversationKey}
                               className={`rounded-xl p-3 flex items-center justify-between ${
                                 a.isCurrent
-                                  ? (isDarkMode ? 'bg-[#1a202c] text-rose-300' : 'bg-white text-rose-500')
-                                  : a.isValid
-                                    ? `${pressedClass} ${!a.isCurrent ? 'cursor-pointer hover:opacity-80' : ''}`
-                                    : 'bg-rose-500/10 text-rose-400 border border-rose-300/40'
-                              } ${!a.isValid || a.isCurrent ? 'opacity-70' : ''}`}
+                                  ? archiveCardCurrentClass
+                                  : archiveCardDefaultClass
+                              }`}
                             >
                               <button
                                 type="button"
-                                disabled={!a.isValid || a.isCurrent}
+                                disabled={a.isCurrent}
                                 onClick={() => onSelectArchive(a)}
-                                className={`flex-1 text-left transition-all ${a.isValid && !a.isCurrent ? activeBtnClass : ''}`}
+                                className={`flex-1 text-left transition-all ${!a.isCurrent ? 'cursor-pointer hover:opacity-80' : ''}`}
                               >
                                 <div className="text-sm font-bold">{a.personaName} × {a.characterName}</div>
                                 <div className="text-[11px] opacity-70 mt-1">更新时间：{ts(a.updatedAt)}</div>
                               </button>
 
-                              <div className="flex items-center gap-2">
+                              <div className="flex shrink-0 items-center gap-2">
                                 {a.isCurrent && (
                                   <span className="w-5 h-5 rounded-full bg-rose-400 text-white flex items-center justify-center">
                                     <Check size={12} />
                                   </span>
                                 )}
-                                {!a.isValid && (
+                                {onDeleteArchive && (
                                   <button
                                     type="button"
-                                    onClick={() => onDeleteArchive?.(a.conversationKey)}
-                                    className="w-5 h-5 rounded-full bg-rose-400 text-white flex items-center justify-center active:scale-95 transition-all"
+                                    onClick={() => onDeleteArchive(a.conversationKey)}
+                                    className={`w-5 h-5 rounded-full flex items-center justify-center transition-all ${enabledDangerIconButtonClass}`}
+                                    title="删除会话存档"
                                   >
                                     <Trash2 size={12} />
                                   </button>
+                                )}
+                                {!a.isValid && (
+                                  <span
+                                    className={`w-5 h-5 flex items-center justify-center ${archiveWarningIconClass}`}
+                                    title="该存档引用的角色或用户已删除"
+                                  >
+                                    <AlertTriangle size={12} />
+                                  </span>
                                 )}
                               </div>
                             </div>
@@ -902,7 +1068,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                         onClick={() => openModal('book')}
                         className={`w-full h-10 rounded-xl text-sm font-bold text-rose-400 ${btnClass} ${activeBtnClass} transition-all`}
                       >
-                        书籍总结浮窗
+                        书籍内容总结
                       </button>
                     </div>
 
@@ -915,7 +1081,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                         onClick={() => openModal('chat')}
                         className={`w-full h-10 rounded-xl text-sm font-bold text-rose-400 ${btnClass} ${activeBtnClass} transition-all`}
                       >
-                        聊天总结浮窗
+                        聊天记录总结
                       </button>
                     </div>
                   </div>
