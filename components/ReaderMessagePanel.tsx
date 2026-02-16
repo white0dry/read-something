@@ -1068,7 +1068,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
               messageSlice || '（空）',
             ].join('\n');
           }
-          const excerpt = bookText.slice(sliceStart, sliceEnd);
+          const fullBookText = chapters.length > 0 ? chapters.map((chapter) => chapter.content || '').join('') : (bookText || '');
+          const excerpt = fullBookText.slice(sliceStart, sliceEnd);
           return [
             `请将以下书籍片段总结为 100-200 字，语言凝练，不剧透范围外内容。`,
             `字符区间：${taskStart}-${taskEnd}`,
@@ -1078,7 +1079,11 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           ].join('\n');
         };
 
-        const summaryTextRaw = await callSummaryModel(buildPrompt(), summaryApiConfig);
+        const summaryPrompt = buildPrompt();
+        console.log(
+          `[SummaryPrompt] trigger=${nextTask.trigger} kind=${nextTask.kind} range=${taskStart}-${taskEnd}\n${summaryPrompt}`
+        );
+        const summaryTextRaw = await callSummaryModel(summaryPrompt, summaryApiConfig);
         const hasPendingManualOverride =
           nextTask.trigger === 'auto' &&
           summaryTaskQueueRef.current.some(
@@ -1141,6 +1146,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     activeGenerationMode,
     summaryApiConfig,
     apiConfig,
+    chapters,
     bookText,
     selectNextSummaryTask,
     applyChatSummaryCards,
@@ -2479,7 +2485,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           className={`reader-ai-fab absolute right-6 w-12 h-12 neu-btn rounded-full z-20 text-rose-400 ${
             isAiFabOpening ? 'neu-btn-active' : ''
           }`}
-          style={{ bottom: `${fabBottomPx + Math.max(0, safeAreaBottom || 0)}px` }}
+          style={{ bottom: `${fabBottomPx}px` }}
         >
           <Sparkles size={20} />
           <span

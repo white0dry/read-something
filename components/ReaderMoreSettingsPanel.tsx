@@ -315,6 +315,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
   const [chatRangeDraft, setChatRangeDraft] = useState({ start: '1', end: '1' });
   const closeTimerRef = useRef<number | null>(null);
   const modalCloseTimerRef = useRef<number | null>(null);
+  const prevModalRef = useRef<ModalType>('none');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const contentScrollRef = useRef<HTMLDivElement>(null);
   const contentTouchStartYRef = useRef(0);
@@ -342,13 +343,18 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     if (modalCloseTimerRef.current) window.clearTimeout(modalCloseTimerRef.current);
   }, []);
   useEffect(() => {
-    const end = Math.max(1, Math.floor(currentReadCharOffset || 0));
-    setBookRangeDraft({ start: '1', end: `${end}` });
-  }, [currentReadCharOffset, modal]);
-  useEffect(() => {
-    const end = Math.max(1, Math.floor(totalMessages || 0));
-    setChatRangeDraft({ start: '1', end: `${end}` });
-  }, [totalMessages, modal]);
+    const prevModal = prevModalRef.current;
+    prevModalRef.current = modal;
+    if (modal === 'book' && prevModal !== 'book') {
+      const end = Math.max(1, Math.floor(currentReadCharOffset || 0));
+      setBookRangeDraft({ start: '1', end: `${end}` });
+      return;
+    }
+    if (modal === 'chat' && prevModal !== 'chat') {
+      const end = Math.max(1, Math.floor(totalMessages || 0));
+      setChatRangeDraft({ start: '1', end: `${end}` });
+    }
+  }, [modal, currentReadCharOffset, totalMessages]);
 
   const selectedPreset = useMemo(
     () => appearanceSettings.bubbleCssPresets.find((x) => x.id === appearanceSettings.selectedBubbleCssPresetId) || null,
@@ -619,7 +625,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
   return (
     <>
       <div
-        className="absolute inset-0 z-[90]"
+        className={`absolute inset-0 z-[90] ${isDarkMode ? 'bg-[#2d3748]' : 'bg-[#e0e5ec]'}`}
         style={{
           paddingTop: `${Math.max(0, safeAreaTop || 0)}px`,
           paddingBottom: `${Math.max(0, safeAreaBottom || 0)}px`,
