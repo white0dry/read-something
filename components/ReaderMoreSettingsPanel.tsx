@@ -863,7 +863,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                       <div className={`rm-bubble-preview rm-bubble-preview-scroll overflow-hidden rounded-xl p-3 mb-3 ${pressedClass}`}>
                         <div className="space-y-2" style={{ fontSize: `${14 * appearanceSettings.bubbleFontSizeScale}px` }}>
                           <div className="flex justify-start">
-                            <div className={`rm-preview-bubble rm-preview-bubble-ai max-w-[86%] rounded-2xl rounded-bl px-5 py-3 ${
+                            <div className={`rm-preview-bubble rm-preview-bubble-ai max-w-[86%] rounded-2xl rounded-bl px-5 py-3 border-none ${
                               isDarkMode
                                 ? 'bg-[#1a202c] text-slate-300 shadow-md'
                                 : 'bg-[#e0e5ec] shadow-[5px_5px_10px_#c3c8ce,-5px_-5px_10px_#fdffff] text-slate-700'
@@ -872,10 +872,10 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                             </div>
                           </div>
                           <div className="flex justify-end">
-                            <div className={`rm-preview-bubble rm-preview-bubble-user max-w-[86%] rounded-2xl rounded-br px-5 py-3 ${
+                            <div className={`rm-preview-bubble rm-preview-bubble-user max-w-[86%] rounded-2xl rounded-br px-5 py-3 border-none ${
                               isDarkMode
-                                ? 'bg-rose-500 text-white shadow-md'
-                                : 'bg-rose-400 text-white shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
+                                ? 'bg-[rgb(var(--theme-500)_/_1)] text-white shadow-md'
+                                : 'bg-[rgb(var(--theme-400)_/_1)] text-white shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
                             }`}>
                               用户气泡预览
                             </div>

@@ -46,6 +46,7 @@ import {
 } from '../utils/readerAiEngine';
 import {
   DEFAULT_NEUMORPHISM_BUBBLE_CSS,
+  LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS,
   DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID,
   DEFAULT_READER_BUBBLE_CSS_PRESETS,
   normalizeReaderBubbleCssPresets,
@@ -145,6 +146,10 @@ const DEFAULT_READER_MORE_FEATURE: AppSettings['readerMore']['feature'] = {
   },
 };
 const normalizeLooseInt = (value: number) => (Number.isFinite(value) ? Math.round(value) : 0);
+const normalizeBubbleCssSignature = (css: string) => css.replace(/\s+/g, ' ').trim();
+const LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS_SIGNATURE = normalizeBubbleCssSignature(LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS);
+const isLegacyDefaultNeumorphismBubbleCss = (css: string) =>
+  normalizeBubbleCssSignature(css) === LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS_SIGNATURE;
 
 type SummaryTaskKind = 'chat' | 'book';
 type SummaryTriggerKind = 'auto' | 'manual';
@@ -713,6 +718,25 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   }, [
     appSettings.readerMore.appearance.bubbleCssPresets,
     appSettings.readerMore.appearance.selectedBubbleCssPresetId,
+    updateReaderMoreAppearanceSettings,
+  ]);
+  useEffect(() => {
+    const { bubbleCssDraft, bubbleCssApplied } = appSettings.readerMore.appearance;
+    const nextUpdater: Partial<AppSettings['readerMore']['appearance']> = {};
+    let hasUpdate = false;
+    if (bubbleCssDraft && isLegacyDefaultNeumorphismBubbleCss(bubbleCssDraft)) {
+      nextUpdater.bubbleCssDraft = DEFAULT_NEUMORPHISM_BUBBLE_CSS;
+      hasUpdate = true;
+    }
+    if (bubbleCssApplied && isLegacyDefaultNeumorphismBubbleCss(bubbleCssApplied)) {
+      nextUpdater.bubbleCssApplied = DEFAULT_NEUMORPHISM_BUBBLE_CSS;
+      hasUpdate = true;
+    }
+    if (!hasUpdate) return;
+    updateReaderMoreAppearanceSettings(nextUpdater);
+  }, [
+    appSettings.readerMore.appearance.bubbleCssApplied,
+    appSettings.readerMore.appearance.bubbleCssDraft,
     updateReaderMoreAppearanceSettings,
   ]);
 
@@ -2744,11 +2768,11 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                       )}
 
                       <div
-                        className={`rm-bubble ${isUser ? 'rm-bubble-user' : 'rm-bubble-ai'} px-5 py-3 text-sm leading-relaxed transition-colors ${
+                        className={`rm-bubble ${isUser ? 'rm-bubble-user' : 'rm-bubble-ai'} px-5 py-3 text-sm leading-relaxed transition-colors border-none ${
                           isUser
                             ? isDarkMode
-                              ? 'bg-rose-500 text-white rounded-2xl rounded-br shadow-md'
-                              : 'bg-rose-400 text-white rounded-2xl rounded-br shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
+                              ? 'bg-[rgb(var(--theme-500)_/_1)] text-white rounded-2xl rounded-br shadow-md'
+                              : 'bg-[rgb(var(--theme-400)_/_1)] text-white rounded-2xl rounded-br shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
                             : isDarkMode
                             ? 'bg-[#1a202c] text-slate-300 rounded-2xl rounded-bl shadow-md'
                             : 'neu-flat text-slate-700 rounded-2xl rounded-bl'

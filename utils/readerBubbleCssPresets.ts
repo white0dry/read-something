@@ -12,7 +12,7 @@ const REMOVED_PRESET_NAMES = new Set<string>([
   '闆鏃фⅵ',
 ]);
 
-export const DEFAULT_NEUMORPHISM_BUBBLE_CSS = [
+export const LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS = [
   '/* Default neumorphism bubble style */',
   '.rm-bubble {',
   '  border-style: solid;',
@@ -45,6 +45,38 @@ export const DEFAULT_NEUMORPHISM_BUBBLE_CSS = [
   '  color: #ffffff;',
   '  border-color: rgba(255, 255, 255, 0.18);',
   '  box-shadow: 0 8px 16px rgba(244, 63, 94, 0.28);',
+  '}',
+].join('\n');
+
+export const DEFAULT_NEUMORPHISM_BUBBLE_CSS = [
+  '/* Default neumorphism bubble style */',
+  '.rm-bubble {',
+  '  border: none;',
+  '  transition: background 0.25s ease, color 0.25s ease, box-shadow 0.25s ease;',
+  '}',
+  '',
+  '.rm-bubble-ai {',
+  '  background: #e0e5ec;',
+  '  color: #334155;',
+  '  box-shadow: 5px 5px 10px #c3c8ce, -5px -5px 10px #fdffff;',
+  '}',
+  '',
+  '.rm-bubble-user {',
+  '  background: rgb(var(--theme-400) / 1);',
+  '  color: #ffffff;',
+  '  box-shadow: 5px 5px 10px rgba(163, 177, 198, 0.34), -5px -5px 10px rgba(255, 255, 255, 0.84);',
+  '}',
+  '',
+  '.dark-mode .rm-bubble-ai {',
+  '  background: #1a202c;',
+  '  color: #cbd5e1;',
+  '  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.38);',
+  '}',
+  '',
+  '.dark-mode .rm-bubble-user {',
+  '  background: rgb(var(--theme-500) / 1);',
+  '  color: #ffffff;',
+  '  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgb(var(--theme-300) / 0.16);',
   '}',
 ].join('\n');
 

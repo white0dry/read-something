@@ -13,6 +13,7 @@ import { buildCharacterWorldBookSections, buildReadingContextSnapshot, runConver
 import {
   DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID,
   DEFAULT_NEUMORPHISM_BUBBLE_CSS,
+  LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS,
   DEFAULT_READER_BUBBLE_CSS_PRESETS,
   normalizeReaderBubbleCssPresets,
 } from './utils/readerBubbleCssPresets';
@@ -85,6 +86,12 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   safeAreaBottom: 0,
   readerMore: DEFAULT_READER_MORE_SETTINGS,
 };
+const normalizeBubbleCssSignature = (css: string) => css.replace(/\s+/g, ' ').trim();
+const LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS_SIGNATURE = normalizeBubbleCssSignature(LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS);
+const migrateLegacyDefaultBubbleCss = (css: string) =>
+  normalizeBubbleCssSignature(css) === LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS_SIGNATURE
+    ? DEFAULT_NEUMORPHISM_BUBBLE_CSS
+    : css;
 
 const normalizeAppSettings = (raw: unknown): AppSettings => {
   const source =
@@ -169,9 +176,18 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
     typeof appearanceSource.bubbleCssDraft === 'string'
       ? appearanceSource.bubbleCssDraft
       : DEFAULT_READER_MORE_SETTINGS.appearance.bubbleCssDraft;
-  const bubbleCssDraft = bubbleCssDraftRaw.length > 0
-    ? bubbleCssDraftRaw
-    : DEFAULT_NEUMORPHISM_BUBBLE_CSS;
+  const bubbleCssDraft = migrateLegacyDefaultBubbleCss(
+    bubbleCssDraftRaw.length > 0
+      ? bubbleCssDraftRaw
+      : DEFAULT_NEUMORPHISM_BUBBLE_CSS
+  );
+  const bubbleCssAppliedRaw =
+    typeof appearanceSource.bubbleCssApplied === 'string'
+      ? appearanceSource.bubbleCssApplied
+      : DEFAULT_READER_MORE_SETTINGS.appearance.bubbleCssApplied;
+  const bubbleCssApplied = bubbleCssAppliedRaw
+    ? migrateLegacyDefaultBubbleCss(bubbleCssAppliedRaw)
+    : bubbleCssAppliedRaw;
   const readerMore = {
     appearance: {
       bubbleFontSizeScale:
@@ -188,10 +204,7 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
           : DEFAULT_READER_MORE_SETTINGS.appearance.showMessageTime,
       timeGapMinutes: FIXED_MESSAGE_TIME_GAP_MINUTES,
       bubbleCssDraft,
-      bubbleCssApplied:
-        typeof appearanceSource.bubbleCssApplied === 'string'
-          ? appearanceSource.bubbleCssApplied
-          : DEFAULT_READER_MORE_SETTINGS.appearance.bubbleCssApplied,
+      bubbleCssApplied,
       bubbleCssPresets: normalizedBubbleCssPresets,
       selectedBubbleCssPresetId,
     },
