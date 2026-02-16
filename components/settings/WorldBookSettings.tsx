@@ -24,6 +24,7 @@ interface WorldBookSettingsProps {
 }
 
 const INNER_VIEW_TRANSITION_MS = 260;
+const INSERT_POSITION_SLIDE_MS = 220;
 const DEFAULT_CATEGORY = '未分类';
 
 type InsertPosition = WorldBookEntry['insertPosition'];
@@ -42,6 +43,7 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
   const [editingWorldBookId, setEditingWorldBookId] = useState<string | null>(null);
   const [innerAnimationClass, setInnerAnimationClass] = useState(theme.animationClass || 'app-view-enter-left');
   const [isSwitchingInnerView, setIsSwitchingInnerView] = useState(false);
+  const [insertPositionVisualState, setInsertPositionVisualState] = useState<Record<string, InsertPosition>>({});
 
   // Pointer-drag state (mobile + desktop)
   const dragEntryIdRef = useRef<string | null>(null);
@@ -55,6 +57,7 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
 
   const innerTransitionTimerRef = useRef<number | null>(null);
   const innerTransitionUnlockTimerRef = useRef<number | null>(null);
+  const insertPositionCommitTimersRef = useRef<Record<string, number>>({});
 
   const {
     containerClass,
@@ -72,6 +75,8 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
     return () => {
       if (innerTransitionTimerRef.current) window.clearTimeout(innerTransitionTimerRef.current);
       if (innerTransitionUnlockTimerRef.current) window.clearTimeout(innerTransitionUnlockTimerRef.current);
+      Object.values(insertPositionCommitTimersRef.current).forEach((timerId) => window.clearTimeout(timerId));
+      insertPositionCommitTimersRef.current = {};
     };
   }, []);
 
@@ -162,6 +167,35 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
     );
   };
 
+  const clearInsertPositionCommitTimer = (entryId: string) => {
+    const timerId = insertPositionCommitTimersRef.current[entryId];
+    if (!timerId) return;
+    window.clearTimeout(timerId);
+    delete insertPositionCommitTimersRef.current[entryId];
+  };
+
+  const clearInsertPositionVisualState = (entryId: string) => {
+    setInsertPositionVisualState((prev) => {
+      if (!(entryId in prev)) return prev;
+      const next = { ...prev };
+      delete next[entryId];
+      return next;
+    });
+  };
+
+  const switchInsertPositionWithSlide = (entryId: string, currentVisual: InsertPosition, nextPosition: InsertPosition) => {
+    if (currentVisual === nextPosition) return;
+    clearInsertPositionCommitTimer(entryId);
+    setInsertPositionVisualState((prev) => ({ ...prev, [entryId]: nextPosition }));
+    insertPositionCommitTimersRef.current[entryId] = window.setTimeout(() => {
+      setWorldBookEntries((prev) =>
+        prev.map((entry) => (entry.id === entryId ? { ...entry, insertPosition: nextPosition } : entry))
+      );
+      clearInsertPositionVisualState(entryId);
+      delete insertPositionCommitTimersRef.current[entryId];
+    }, INSERT_POSITION_SLIDE_MS);
+  };
+
   const addNewWorldBookEntry = () => {
     if (!viewingCategory) return;
     const newId = Date.now().toString();
@@ -180,6 +214,8 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
   };
 
   const deleteWorldBookEntry = (id: string) => {
+    clearInsertPositionCommitTimer(id);
+    clearInsertPositionVisualState(id);
     setWorldBookEntries((prev) => prev.filter((entry) => entry.id !== id));
     if (editingWorldBookId === id) setEditingWorldBookId(null);
   };
@@ -393,6 +429,7 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
             const isEditing = editingWorldBookId === entry.id;
             const isDragging = draggingEntryId === entry.id;
             const isDragOver = !isDragging && !!draggingEntryId && dragOverEntryId === entry.id;
+            const visualInsertPosition = insertPositionVisualState[entry.id] || entry.insertPosition;
 
             return (
               <div
@@ -483,26 +520,31 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
                     />
                     <div className="flex items-center justify-between px-2">
                       <span className="text-xs font-bold text-slate-400 uppercase">插入位置</span>
-                      <div className={`flex rounded-lg p-1 ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
+                      <div className={`relative grid grid-cols-2 rounded-lg p-1 overflow-hidden ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
+                        <div
+                          className={`pointer-events-none absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-md transition-transform duration-300 ${
+                            visualInsertPosition === 'AFTER' ? 'translate-x-full' : 'translate-x-0'
+                          } ${isDarkMode ? 'bg-slate-600' : 'neu-flat'}`}
+                        />
                         <button
-                          onClick={() => updateWorldBookEntry(entry.id, 'insertPosition', 'BEFORE')}
-                          className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${
-                            entry.insertPosition === 'BEFORE'
+                          onClick={() => switchInsertPositionWithSlide(entry.id, visualInsertPosition, 'BEFORE')}
+                          className={`relative z-10 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                            visualInsertPosition === 'BEFORE'
                               ? isDarkMode
-                                ? 'bg-slate-600 text-white'
-                                : 'neu-flat text-rose-400'
+                                ? 'text-white'
+                                : 'text-rose-400'
                               : 'text-slate-500'
                           }`}
                         >
                           角色定义前
                         </button>
                         <button
-                          onClick={() => updateWorldBookEntry(entry.id, 'insertPosition', 'AFTER')}
-                          className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${
-                            entry.insertPosition === 'AFTER'
+                          onClick={() => switchInsertPositionWithSlide(entry.id, visualInsertPosition, 'AFTER')}
+                          className={`relative z-10 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                            visualInsertPosition === 'AFTER'
                               ? isDarkMode
-                                ? 'bg-slate-600 text-white'
-                                : 'neu-flat text-rose-400'
+                                ? 'text-white'
+                                : 'text-rose-400'
                               : 'text-slate-500'
                           }`}
                         >

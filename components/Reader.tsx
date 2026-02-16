@@ -3287,45 +3287,47 @@ const Reader: React.FC<ReaderProps> = ({
             onClick={closeBookmarkModal}
           />
           <div
-            className={`absolute z-50 right-4 w-[min(22rem,calc(100vw-2rem))] rounded-2xl p-4 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${isBookmarkModalClosing ? 'reader-flyout-exit' : 'reader-flyout-enter'}`}
+            className={`absolute z-50 right-4 w-[min(22rem,calc(100vw-2rem))] rounded-2xl p-2 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${isBookmarkModalClosing ? 'reader-flyout-exit' : 'reader-flyout-enter'}`}
             style={floatingPanelAnchorStyle}
           >
-            <div className={`text-sm font-bold mb-2 ${isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>{'\u65b0\u5efa\u4e66\u7b7e'}</div>
-            <input
-              ref={bookmarkNameInputRef}
-              type="text"
-              value={bookmarkNameDraft}
-              onChange={(e) => setBookmarkNameDraft(e.target.value.slice(0, BOOKMARK_NAME_MAX_LENGTH))}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  handleConfirmAddBookmark();
-                  return;
-                }
-                if (e.key === 'Escape') {
-                  e.preventDefault();
-                  closeBookmarkModal();
-                }
-              }}
-              maxLength={BOOKMARK_NAME_MAX_LENGTH}
-              placeholder={'\u8bf7\u8f93\u5165\u4e66\u7b7e\u540d\u79f0'}
-              className={`w-full h-10 rounded-xl px-3 text-sm outline-none ${isDarkMode ? 'bg-[#1a202c] text-slate-200 placeholder-slate-500' : 'neu-pressed text-slate-700 placeholder-slate-400'}`}
-            />
-            <div className="mt-3 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={closeBookmarkModal}
-                className={`flex-1 h-8 rounded-full text-xs font-bold ${isDarkMode ? 'bg-[#1a202c] text-slate-300 hover:text-slate-100' : 'neu-btn text-slate-500 hover:text-slate-700'}`}
-              >
-                {'\u53d6\u6d88'}
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmAddBookmark}
-                className="flex-1 h-8 rounded-full text-xs font-bold text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all"
-              >
-                {'\u4fdd\u5b58'}
-              </button>
+            <div className="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 py-1">{'\u65b0\u5efa\u4e66\u7b7e'}</div>
+            <div className="px-1 pb-1">
+              <input
+                ref={bookmarkNameInputRef}
+                type="text"
+                value={bookmarkNameDraft}
+                onChange={(e) => setBookmarkNameDraft(e.target.value.slice(0, BOOKMARK_NAME_MAX_LENGTH))}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleConfirmAddBookmark();
+                    return;
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    closeBookmarkModal();
+                  }
+                }}
+                maxLength={BOOKMARK_NAME_MAX_LENGTH}
+                placeholder={'\u8bf7\u8f93\u5165\u4e66\u7b7e\u540d\u79f0'}
+                className={`w-full h-10 rounded-xl px-3 text-sm outline-none ${isDarkMode ? 'bg-[#1a202c] text-slate-200 placeholder-slate-500' : 'neu-pressed text-slate-700 placeholder-slate-400'}`}
+              />
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={closeBookmarkModal}
+                  className={`flex-1 h-7 rounded-full text-[11px] font-bold ${isDarkMode ? 'bg-[#1a202c] text-slate-300 hover:text-slate-100' : 'neu-btn text-slate-500 hover:text-slate-700'}`}
+                >
+                  {'\u53d6\u6d88'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmAddBookmark}
+                  className="flex-1 h-7 rounded-full text-[11px] font-bold text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all"
+                >
+                  {'\u4fdd\u5b58'}
+                </button>
+              </div>
             </div>
           </div>
         </>
