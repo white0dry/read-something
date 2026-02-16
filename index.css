@@ -349,6 +349,23 @@
       .app-card-press:active .app-card-press-media {
         transform: scale(0.985);
       }
+
+      /* Library grid cover: softer inset press to match neumorphic import card */
+      .lib-cover-card-press {
+        transition: transform 170ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 190ms ease, filter 190ms ease;
+        transform-origin: center;
+      }
+      .lib-cover-card-press:active {
+        transform: translateY(1px) scale(0.982);
+        box-shadow: inset 5px 5px 10px var(--neu-shadow-dark), inset -5px -5px 10px var(--neu-shadow-light);
+        filter: saturate(0.98);
+      }
+      .lib-cover-card-media {
+        transition: opacity 170ms ease;
+      }
+      .lib-cover-card-press:active .lib-cover-card-media {
+        opacity: 0.94;
+      }
       
       .neu-input {
         background: var(--neu-bg);

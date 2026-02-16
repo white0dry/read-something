@@ -1,243 +1,107 @@
 import { ReaderCssPreset } from '../types';
 
+export const DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID = 'builtin-default-neumorphism-v1';
 export const GLASS_MORPHISM_BUBBLE_CSS_PRESET_ID = 'builtin-glass-morphism-v1';
-export const RETRO_SNOW_BUBBLE_CSS_PRESET_ID = 'builtin-retro-snow-v1';
 
-const GLASS_MORPHISM_BUBBLE_CSS = [
-  '/* =========================================',
-  '   1. 定义颜色与光影变量 (冰蓝色系)',
-  '   ========================================= */',
-  ':root {',
-  '  /* AI 气泡保持极简冰霜玻璃不变 */',
-  '  --bubble-ai-bg: linear-gradient(135deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.3));',
-  '  --bubble-ai-border: rgba(255, 255, 255, 0.8);',
-  '  --bubble-ai-text: #1e293b;',
-  '  --bubble-ai-shadow: 0 8px 32px rgba(0, 0, 0, 0.06);',
-  '  --bubble-ai-inset: inset 0 1px 1px rgba(255, 255, 255, 0.9);',
-  '',
-  '  /* User 气泡 - 亮色模式：清澈的冰霜蓝 (Frosty Ice Blue) */',
-  '  --bubble-user-bg: linear-gradient(135deg, rgba(125, 211, 252, 0.55), rgba(56, 189, 248, 0.30));',
-  '  --bubble-user-border: rgba(255, 255, 255, 0.6);',
-  '  /* 使用深海蓝作为文字颜色，在浅冰蓝背景上既高级又清晰 */',
-  '  --bubble-user-text: #082f49;',
-  '  --bubble-user-shadow: 0 8px 32px rgba(56, 189, 248, 0.15);',
-  '  --bubble-user-inset: inset 0 1px 1px rgba(255, 255, 255, 0.7);',
-  '}',
-  '',
-  '.dark-mode {',
-  '  /* AI 气泡保持深黑透玻璃不变 */',
-  '  --bubble-ai-bg: linear-gradient(135deg, rgba(30, 41, 59, 0.6), rgba(15, 23, 42, 0.4));',
-  '  --bubble-ai-border: rgba(255, 255, 255, 0.12);',
-  '  --bubble-ai-text: #f8fafc;',
-  '  --bubble-ai-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);',
-  '  --bubble-ai-inset: inset 0 1px 1px rgba(255, 255, 255, 0.08);',
-  '',
-  '  /* User 气泡 - 暗色模式：深邃荧光冰蓝 (Neon Ice Blue) */',
-  '  --bubble-user-bg: linear-gradient(135deg, rgba(2, 132, 199, 0.45), rgba(3, 105, 161, 0.25));',
-  '  --bubble-user-border: rgba(125, 211, 252, 0.25);',
-  '  --bubble-user-text: #f0f9ff;',
-  '  --bubble-user-shadow: 0 8px 32px rgba(2, 132, 199, 0.3);',
-  '  --bubble-user-inset: inset 0 1px 1px rgba(255, 255, 255, 0.15);',
-  '}',
-  '/* =========================================',
-  '   2. 气泡基础样式',
-  '   ========================================= */',
+const REMOVED_PRESET_IDS = new Set<string>([
+  'builtin-retro-snow-v1',
+]);
+
+const REMOVED_PRESET_NAMES = new Set<string>([
+  '雪笺旧梦',
+  '闆鏃фⅵ',
+]);
+
+export const DEFAULT_NEUMORPHISM_BUBBLE_CSS = [
+  '/* Default neumorphism bubble style */',
   '.rm-bubble {',
-  '  /* 稍微提升模糊度和饱和度，让背景透出的颜色更惊艳 */',
-  '  backdrop-filter: blur(16px) saturate(180%);',
-  '  -webkit-backdrop-filter: blur(16px) saturate(180%);',
-  '  border-width: 1px;',
   '  border-style: solid;',
-  '  border-radius: 18px; /* 现代 UI 通常使用稍微大一点的圆角 */',
-  '',
-  '  /* 增加丝滑的过渡动画，亮暗模式切换时不会生硬 */',
-  '  transition: background 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease, color 0.4s ease;',
+  '  transition: background 0.25s ease, color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;',
   '}',
   '',
-  '/* =========================================',
-  '   3. 应用不同角色的样式',
-  '   ========================================= */',
   '.rm-bubble-ai {',
-  '  background: var(--bubble-ai-bg);',
-  '  border-color: var(--bubble-ai-border);',
-  '  color: var(--bubble-ai-text);',
-  '  /* 组合外阴影（悬浮感）与内阴影（玻璃顶部边缘的高光反射） */',
-  '  box-shadow: var(--bubble-ai-shadow), var(--bubble-ai-inset);',
+  '  background: #e0e5ec;',
+  '  color: #334155;',
+  '  border-color: rgba(148, 163, 184, 0.35);',
+  '  box-shadow: 5px 5px 10px #c3c8ce, -5px -5px 10px #fdffff;',
   '}',
   '',
   '.rm-bubble-user {',
-  '  background: var(--bubble-user-bg);',
-  '  border-color: var(--bubble-user-border);',
-  '  color: var(--bubble-user-text);',
-  '  box-shadow: var(--bubble-user-shadow), var(--bubble-user-inset);',
-  '}',
-].join('\n');
-
-const RETRO_SNOW_BUBBLE_CSS = [
-  '/* =========================================',
-  '   字体引入 (保持不变)',
-  '   ========================================= */',
-  '@import url("https://fontsapi.zeoseven.com/7/main/result.css");',
-  '',
-  'body {',
-  '  font-family: "Zhuque Fangsong (technical preview)", "FangSong", serif;',
-  '  font-weight: normal;',
-  '}',
-  '',
-  '.reader-message-scroll,',
-  '.reader-message-scroll * {',
-  '  font-family: "Zhuque Fangsong (technical preview)", "FangSong", serif;',
-  '  font-weight: normal;',
-  '}',
-  '',
-  '.reader-message-scroll {',
-  '  position: relative;',
-  '}',
-  '',
-  '/* =========================================',
-  '   1. 气泡基础样式 (复古信笺切割感)',
-  '   ========================================= */',
-  '.rm-bubble {',
-  '  position: relative; /* 为伪元素定位做准备 */',
-  '  border-width: 1px;',
-  '  border-style: solid;',
-  '  /* 不对称圆角，模拟古风折纸或信签的边缘 */',
-  '  border-radius: 2px 16px 2px 16px;',
-  '  padding: 12px 16px;',
-  '  /* 柔和的纸张阴影 */',
-  '  box-shadow: 2px 4px 12px rgba(44, 34, 27, 0.08), inset 0 0 8px rgba(255, 255, 255, 0.1);',
-  '  transition: all 0.4s ease;',
-  '  z-index: 1;',
-  '}',
-  '',
-  '/* =========================================',
-  '   2. 伪元素：动态漂浮物与信笺水印',
-  '   ========================================= */',
-  '/* 左上/右下的呼吸感漂浮星芒(碎雪) */',
-  '.rm-bubble::before {',
-  '  content: "✦";',
-  '  position: absolute;',
-  '  font-size: 12px;',
-  '  opacity: 0;',
-  '  pointer-events: none;',
-  '  animation: retroFloat 4s ease-in-out infinite alternate;',
-  '}',
-  '',
-  '/* 气泡底部的微弱“水印” */',
-  '.rm-bubble::after {',
-  '  content: "笺";',
-  '  position: absolute;',
-  '  font-size: 48px;',
-  '  bottom: -8px;',
-  '  line-height: 1;',
-  '  opacity: 0.03; /* 极低的透明度，若隐若现 */',
-  '  pointer-events: none;',
-  '  user-select: none;',
-  '  z-index: -1;',
-  '}',
-  '',
-  '/* =========================================',
-  '   3. 亮色模式 (旧纸与朱砂)',
-  '   ========================================= */',
-  '/* AI 气泡：泛黄的旧宣纸 */',
-  '.rm-bubble-ai {',
-  '  background: linear-gradient(120deg, #f5ecd8, #eaddc5);',
-  '  border-color: #d1c1ab;',
-  '  color: #3e2f24; /* 黛黑色文字 */',
-  '}',
-  '',
-  '.rm-bubble-ai::before {',
-  '  top: -12px;',
-  '  left: -12px;',
-  '  color: #c4b097;',
-  '}',
-  '',
-  '.rm-bubble-ai::after {',
-  '  right: 8px;',
-  '  color: #3e2f24;',
-  '}',
-  '',
-  '/* User 气泡：沉淀的朱砂红 */',
-  '.rm-bubble-user {',
-  '  background: linear-gradient(120deg, #8a3f38, #73312a);',
-  '  border-color: #5c241e;',
-  '  color: #fdf6eb; /* 纸白色文字 */',
-  '  border-radius: 16px 2px 16px 2px; /* 用户气泡对调圆角方向 */',
-  '}',
-  '',
-  '.rm-bubble-user::before {',
-  '  bottom: -12px;',
-  '  right: -12px;',
-  '  color: #b8756d;',
-  '}',
-  '',
-  '.rm-bubble-user::after {',
-  '  left: 8px;',
+  '  background: #fb7185;',
   '  color: #ffffff;',
+  '  border-color: rgba(255, 255, 255, 0.24);',
+  '  box-shadow: 5px 5px 10px rgba(209, 213, 219, 0.9), -5px -5px 10px rgba(255, 255, 255, 0.96);',
   '}',
   '',
-  '/* =========================================',
-  '   4. 暗色模式 (沉木与暗金)',
-  '   ========================================= */',
   '.dark-mode .rm-bubble-ai {',
-  '  background: linear-gradient(120deg, #38312b, #2c2520);',
-  '  border-color: #4a413a;',
-  '  color: #d8cebf;',
-  '  box-shadow: 2px 4px 12px rgba(0, 0, 0, 0.3);',
-  '}',
-  '',
-  '.dark-mode .rm-bubble-ai::before {',
-  '  color: #5c5249;',
-  '}',
-  '',
-  '.dark-mode .rm-bubble-ai::after {',
-  '  color: #ffffff;',
-  '  opacity: 0.02;',
+  '  background: #1a202c;',
+  '  color: #cbd5e1;',
+  '  border-color: rgba(148, 163, 184, 0.2);',
+  '  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.38);',
   '}',
   '',
   '.dark-mode .rm-bubble-user {',
-  '  background: linear-gradient(120deg, #59312c, #42211d);',
-  '  border-color: #693c36;',
-  '  color: #eeddd3;',
-  '  box-shadow: 2px 4px 12px rgba(0, 0, 0, 0.3);',
-  '}',
-  '',
-  '.dark-mode .rm-bubble-user::before {',
-  '  color: #8c5b55;',
-  '}',
-  '',
-  '.dark-mode .rm-bubble-user::after {',
+  '  background: #f43f5e;',
   '  color: #ffffff;',
-  '  opacity: 0.02;',
-  '}',
-  '',
-  '/* =========================================',
-  '   5. 漂浮动画关键帧',
-  '   ========================================= */',
-  '@keyframes retroFloat {',
-  '  0% {',
-  '    transform: translateY(0) rotate(0deg) scale(0.8);',
-  '    opacity: 0.2;',
-  '  }',
-  '  100% {',
-  '    transform: translateY(-8px) rotate(15deg) scale(1.1);',
-  '    opacity: 0.6;',
-  '  }',
+  '  border-color: rgba(255, 255, 255, 0.18);',
+  '  box-shadow: 0 8px 16px rgba(244, 63, 94, 0.28);',
   '}',
 ].join('\n');
 
-export const DEFAULT_READER_BUBBLE_CSS_PRESETS: ReaderCssPreset[] = [
+const GLASS_MORPHISM_BUBBLE_CSS = [
+  '/* Glass morphism */',
+  '.rm-bubble {',
+  '  border-width: 1px;',
+  '  border-style: solid;',
+  '  backdrop-filter: blur(14px) saturate(170%);',
+  '  -webkit-backdrop-filter: blur(14px) saturate(170%);',
+  '}',
+  '',
+  '.rm-bubble-ai {',
+  '  background: linear-gradient(135deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.32));',
+  '  border-color: rgba(255, 255, 255, 0.75);',
+  '  color: #1e293b;',
+  '  box-shadow: 0 8px 24px rgba(30, 41, 59, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.72);',
+  '}',
+  '',
+  '.rm-bubble-user {',
+  '  background: linear-gradient(135deg, rgba(125, 211, 252, 0.58), rgba(56, 189, 248, 0.33));',
+  '  border-color: rgba(255, 255, 255, 0.58);',
+  '  color: #082f49;',
+  '  box-shadow: 0 8px 24px rgba(14, 116, 144, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.56);',
+  '}',
+  '',
+  '.dark-mode .rm-bubble-ai {',
+  '  background: linear-gradient(135deg, rgba(30, 41, 59, 0.66), rgba(15, 23, 42, 0.46));',
+  '  border-color: rgba(255, 255, 255, 0.12);',
+  '  color: #f8fafc;',
+  '  box-shadow: 0 8px 24px rgba(2, 6, 23, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);',
+  '}',
+  '',
+  '.dark-mode .rm-bubble-user {',
+  '  background: linear-gradient(135deg, rgba(2, 132, 199, 0.46), rgba(3, 105, 161, 0.28));',
+  '  border-color: rgba(125, 211, 252, 0.26);',
+  '  color: #f0f9ff;',
+  '  box-shadow: 0 8px 24px rgba(2, 132, 199, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.14);',
+  '}',
+].join('\n');
+
+const BUILTIN_READER_BUBBLE_CSS_PRESETS: ReaderCssPreset[] = [
+  {
+    id: DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID,
+    name: '默认',
+    css: DEFAULT_NEUMORPHISM_BUBBLE_CSS,
+  },
   {
     id: GLASS_MORPHISM_BUBBLE_CSS_PRESET_ID,
     name: '玻璃拟态',
     css: GLASS_MORPHISM_BUBBLE_CSS,
   },
-  {
-    id: RETRO_SNOW_BUBBLE_CSS_PRESET_ID,
-    name: '雪笺旧梦',
-    css: RETRO_SNOW_BUBBLE_CSS,
-  },
 ];
+
+export const DEFAULT_READER_BUBBLE_CSS_PRESETS: ReaderCssPreset[] = BUILTIN_READER_BUBBLE_CSS_PRESETS.map((item) => ({ ...item }));
+
+const BUILTIN_IDS = new Set<string>(BUILTIN_READER_BUBBLE_CSS_PRESETS.map((item) => item.id));
 
 const normalizeReaderCssPreset = (value: unknown): ReaderCssPreset | null => {
   if (!value || typeof value !== 'object') return null;
@@ -251,36 +115,23 @@ const normalizeReaderCssPreset = (value: unknown): ReaderCssPreset | null => {
 
 export const normalizeReaderBubbleCssPresets = (source: unknown): ReaderCssPreset[] => {
   if (!Array.isArray(source)) return DEFAULT_READER_BUBBLE_CSS_PRESETS.map((item) => ({ ...item }));
-  return source
-    .map((item) => normalizeReaderCssPreset(item))
-    .map((item) => {
-      if (!item) return item;
-      if (item.id === GLASS_MORPHISM_BUBBLE_CSS_PRESET_ID) {
-        const legacyName = item.name.includes('内置');
-        const legacyCss =
-          item.css.includes('blur(14px) saturate(155%)') &&
-          item.css.includes('rgba(255,120,170,0.36)');
-        if (!legacyName && !legacyCss) return item;
-        return {
-          id: GLASS_MORPHISM_BUBBLE_CSS_PRESET_ID,
-          name: '玻璃拟态',
-          css: GLASS_MORPHISM_BUBBLE_CSS,
-        };
-      }
-      if (item.id === RETRO_SNOW_BUBBLE_CSS_PRESET_ID) {
-        const legacyName = item.name.includes('内置') || item.name.includes('复古');
-        const legacyCss =
-          item.css.includes('.reader-message-scroll::before') ||
-          item.css.includes('@keyframes rmSnowFall') ||
-          item.css.includes('backdrop-filter: blur(3px)');
-        if (!legacyName && !legacyCss) return item;
-        return {
-          id: RETRO_SNOW_BUBBLE_CSS_PRESET_ID,
-          name: '雪笺旧梦',
-          css: RETRO_SNOW_BUBBLE_CSS,
-        };
-      }
-      return item;
-    })
-    .filter((item): item is ReaderCssPreset => Boolean(item));
+
+  const customPresets: ReaderCssPreset[] = [];
+  const seenCustomIds = new Set<string>();
+
+  source.forEach((rawItem) => {
+    const preset = normalizeReaderCssPreset(rawItem);
+    if (!preset) return;
+    if (BUILTIN_IDS.has(preset.id)) return;
+    if (REMOVED_PRESET_IDS.has(preset.id)) return;
+    if (REMOVED_PRESET_NAMES.has(preset.name)) return;
+    if (seenCustomIds.has(preset.id)) return;
+    seenCustomIds.add(preset.id);
+    customPresets.push(preset);
+  });
+
+  return [
+    ...BUILTIN_READER_BUBBLE_CSS_PRESETS.map((item) => ({ ...item })),
+    ...customPresets.map((item) => ({ ...item })),
+  ];
 };

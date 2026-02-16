@@ -1,4 +1,4 @@
-﻿import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { 
   Settings as SettingsIcon, 
   Book, 
@@ -10,6 +10,7 @@ import {
   Download,
   Upload,
   Palette,
+  Loader2,
   X,
   ImageIcon,
   Link as LinkIcon
@@ -22,6 +23,13 @@ import AppearanceSettings from './settings/AppearanceSettings';
 import ApiSettings from './settings/ApiSettings';
 import ModalPortal from './ModalPortal';
 import { deleteImageByRef, saveImageFile } from '../utils/imageStorage';
+import {
+  StorageAnalysisResult,
+  analyzeAppStorageUsage,
+  createAppArchivePayload,
+  formatBytes,
+  restoreAppArchivePayload,
+} from '../utils/appArchive';
 
 interface SettingsProps {
   isDarkMode: boolean;
@@ -52,6 +60,43 @@ const FeatherIcon = ({ size = 16, className = "" }: { size?: number, className?:
     <path d="M15.807.531c-.174-.177-.41-.289-.64-.363a3.8 3.8 0 0 0-.833-.15c-.62-.049-1.394 0-2.252.175C10.365.545 8.264 1.415 6.315 3.1S3.147 6.824 2.557 8.523c-.294.847-.44 1.634-.429 2.268.005.316.05.62.154.88q.025.061.056.122A68 68 0 0 0 .08 15.198a.53.53 0 0 0 .157.72.504.504 0 0 0 .705-.16 68 68 0 0 1 2.158-3.26c.285.141.616.195.958.182.513-.02 1.098-.188 1.723-.49 1.25-.605 2.744-1.787 4.303-3.642l1.518-1.55a.53.53 0 0 0 0-.739l-.729-.744 1.311.209a.5.5 0 0 0 .443-.15l.663-.684c.663-.68 1.292-1.325 1.763-1.892.314-.378.585-.752.754-1.107.163-.345.278-.773.112-1.188a.5.5 0 0 0-.112-.172M3.733 11.62C5.385 9.374 7.24 7.215 9.309 5.394l1.21 1.234-1.171 1.196-.027.03c-1.5 1.789-2.891 2.867-3.977 3.393-.544.263-.99.378-1.324.39a1.3 1.3 0 0 1-.287-.018Zm6.769-7.22c1.31-1.028 2.7-1.914 4.172-2.6a7 7 0 0 1-.4.523c-.442.533-1.028 1.134-1.681 1.804l-.51.524zm3.346-3.357C9.594 3.147 6.045 6.8 3.149 10.678c.007-.464.121-1.086.37-1.806.533-1.535 1.65-3.415 3.455-4.976 1.807-1.561 3.746-2.36 5.31-2.68a8 8 0 0 1 1.564-.173"/>
   </svg>
 );
+
+const parseHexColor = (hex: string) => {
+  const raw = (hex || '').trim().replace('#', '');
+  if (!/^[0-9a-fA-F]{6}$/.test(raw)) return null;
+  return {
+    r: parseInt(raw.slice(0, 2), 16),
+    g: parseInt(raw.slice(2, 4), 16),
+    b: parseInt(raw.slice(4, 6), 16),
+  };
+};
+
+const toHexColor = (r: number, g: number, b: number) =>
+  `#${[r, g, b]
+    .map((value) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase()}`;
+
+const blendHexColor = (
+  baseHex: string,
+  target: { r: number; g: number; b: number },
+  ratio: number
+) => {
+  const base = parseHexColor(baseHex);
+  if (!base) return baseHex;
+  const t = Math.max(0, Math.min(1, ratio));
+  return toHexColor(
+    base.r + (target.r - base.r) * t,
+    base.g + (target.g - base.g) * t,
+    base.b + (target.b - base.b) * t
+  );
+};
+
+const resolveStorageColorForMode = (hex: string, isDarkMode: boolean) => {
+  if (!isDarkMode) return hex;
+  const lifted = blendHexColor(hex, { r: 255, g: 255, b: 255 }, 0.2);
+  return blendHexColor(lifted, { r: 88, g: 94, b: 109 }, 0.06);
+};
 
 const Settings: React.FC<SettingsProps> = ({ 
   isDarkMode, 
@@ -85,8 +130,16 @@ const Settings: React.FC<SettingsProps> = ({
   const [urlInputMode, setUrlInputMode] = useState(false);
   const [tempUrl, setTempUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const archiveFileInputRef = useRef<HTMLInputElement>(null);
   const viewTransitionTimerRef = useRef<number | null>(null);
   const viewTransitionUnlockTimerRef = useRef<number | null>(null);
+  const storageDonutAnimRef = useRef<number | null>(null);
+  const [storageAnalysis, setStorageAnalysis] = useState<StorageAnalysisResult | null>(null);
+  const [storageAnalysisLoading, setStorageAnalysisLoading] = useState(false);
+  const [storageAnalysisError, setStorageAnalysisError] = useState('');
+  const [storageDonutReveal, setStorageDonutReveal] = useState(0);
+  const [archiveExporting, setArchiveExporting] = useState(false);
+  const [archiveImporting, setArchiveImporting] = useState(false);
 
   // Theme Classes
   const theme: ThemeClasses = {
@@ -110,6 +163,7 @@ const Settings: React.FC<SettingsProps> = ({
     return () => {
       if (viewTransitionTimerRef.current) window.clearTimeout(viewTransitionTimerRef.current);
       if (viewTransitionUnlockTimerRef.current) window.clearTimeout(viewTransitionUnlockTimerRef.current);
+      if (storageDonutAnimRef.current) window.cancelAnimationFrame(storageDonutAnimRef.current);
     };
   }, []);
 
@@ -162,6 +216,114 @@ const Settings: React.FC<SettingsProps> = ({
 
   const updateSetting = (field: keyof AppSettings, value: any) => {
     setAppSettings(prev => ({ ...prev, [field]: value }));
+  };
+
+  const refreshStorageAnalysis = async () => {
+    setStorageAnalysisLoading(true);
+    setStorageAnalysisError('');
+    try {
+      const analysis = await analyzeAppStorageUsage();
+      setStorageAnalysis(analysis);
+    } catch (error) {
+      console.error('Failed to analyze storage usage:', error);
+      setStorageAnalysisError('存储分析失败，请稍后重试');
+    } finally {
+      setStorageAnalysisLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (currentView !== 'STORAGE') return;
+    void refreshStorageAnalysis();
+  }, [currentView]);
+
+  useEffect(() => {
+    if (storageDonutAnimRef.current) {
+      window.cancelAnimationFrame(storageDonutAnimRef.current);
+      storageDonutAnimRef.current = null;
+    }
+
+    if (currentView !== 'STORAGE') {
+      setStorageDonutReveal(0);
+      return;
+    }
+
+    setStorageDonutReveal(0);
+    const durationMs = 820;
+    let startedAt = 0;
+    const tick = (now: number) => {
+      if (!startedAt) startedAt = now;
+      const progress = Math.max(0, Math.min(1, (now - startedAt) / durationMs));
+      const eased = 1 - (1 - progress) ** 3;
+      setStorageDonutReveal(eased);
+      if (progress < 1) {
+        storageDonutAnimRef.current = window.requestAnimationFrame(tick);
+      } else {
+        storageDonutAnimRef.current = null;
+      }
+    };
+
+    storageDonutAnimRef.current = window.requestAnimationFrame(tick);
+    return () => {
+      if (storageDonutAnimRef.current) {
+        window.cancelAnimationFrame(storageDonutAnimRef.current);
+        storageDonutAnimRef.current = null;
+      }
+    };
+  }, [currentView, storageAnalysis?.generatedAt]);
+
+  const handleExportArchive = async () => {
+    if (archiveExporting || archiveImporting) return;
+    setArchiveExporting(true);
+    try {
+      const payload = await createAppArchivePayload();
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const date = new Date();
+      const pad = (value: number) => `${value}`.padStart(2, '0');
+      const fileName = `读点书-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}.json`;
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to export archive:', error);
+      alert('导出失败，请稍后重试。');
+    } finally {
+      setArchiveExporting(false);
+    }
+  };
+
+  const handleImportArchive = () => {
+    if (archiveExporting || archiveImporting) return;
+    archiveFileInputRef.current?.click();
+  };
+
+  const handleImportArchiveFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    const confirmed = window.confirm('导入将覆盖当前设备上所有本地存档数据，确定继续吗？');
+    if (!confirmed) return;
+
+    setArchiveImporting(true);
+    try {
+      const rawText = await file.text();
+      const parsed = JSON.parse(rawText);
+      await restoreAppArchivePayload(parsed);
+      alert('导入成功，应用即将刷新。');
+      window.location.reload();
+    } catch (error) {
+      console.error('Failed to import archive:', error);
+      const message = error instanceof Error ? error.message : '未知错误';
+      alert(`导入失败：${message}`);
+    } finally {
+      setArchiveImporting(false);
+    }
   };
 
   // --- Avatar Handlers ---
@@ -276,6 +438,46 @@ const Settings: React.FC<SettingsProps> = ({
     );
   };
 
+  const storageTotalBytes = storageAnalysis?.totalBytes || 0;
+  const storageLegendItems = useMemo(() => {
+    const source = storageAnalysis?.items || [];
+    return source.map((item) => ({
+      ...item,
+      color: resolveStorageColorForMode(item.color, isDarkMode),
+    }));
+  }, [storageAnalysis, isDarkMode]);
+  const storageDonutGradient = useMemo(() => {
+    const fallbackColor = isDarkMode ? '#4B5563' : '#CBD5E1';
+    if (storageTotalBytes <= 0 || storageLegendItems.length === 0) {
+      return `conic-gradient(from -90deg, ${fallbackColor} 0deg 360deg)`;
+    }
+
+    const revealAngle = Math.max(0, Math.min(360, 360 * storageDonutReveal));
+    let cursor = 0;
+    const segments: string[] = [];
+
+    storageLegendItems
+      .filter((item) => item.bytes > 0)
+      .forEach((item) => {
+        if (cursor >= revealAngle) return;
+        const start = cursor;
+        const sweep = (item.bytes / storageTotalBytes) * 360;
+        cursor = Math.min(360, cursor + sweep);
+        const visibleEnd = Math.min(cursor, revealAngle);
+        if (visibleEnd > start) {
+          segments.push(`${item.color} ${start}deg ${visibleEnd}deg`);
+        }
+      });
+
+    if (revealAngle < 360) {
+      segments.push(`${fallbackColor} ${revealAngle}deg 360deg`);
+    }
+    if (segments.length === 0) {
+      return `conic-gradient(from -90deg, ${fallbackColor} 0deg 360deg)`;
+    }
+    return `conic-gradient(from -90deg, ${segments.join(', ')})`;
+  }, [isDarkMode, storageLegendItems, storageTotalBytes, storageDonutReveal]);
+
   // --- Render Sub-Menus ---
   
   if (currentView === 'PERSONA') {
@@ -347,6 +549,58 @@ const Settings: React.FC<SettingsProps> = ({
         theme={theme}
         onBack={() => goBack()}
       />
+    );
+  }
+
+  if (currentView === 'STORAGE') {
+    return (
+      <div key="STORAGE" className={`flex-1 flex flex-col p-6 pb-28 overflow-y-auto no-scrollbar relative ${containerClass} ${animationClass}`}>
+        {renderHeader("存储分析", () => goBack())}
+        <div className={`${cardClass} p-5 rounded-2xl`}>
+          {storageAnalysisLoading && (
+            <div className="flex items-center justify-end mb-2">
+              <div className="h-9 px-3 rounded-full text-xs font-bold flex items-center gap-1.5 text-slate-500">
+                <Loader2 size={13} className="animate-spin" />
+                分析中...
+              </div>
+            </div>
+          )}
+
+          {storageAnalysisError && (
+            <div className={`mb-4 rounded-xl p-3 text-xs ${pressedClass}`}>
+              {storageAnalysisError}
+            </div>
+          )}
+
+          <div className="flex flex-col items-center">
+            <div className={`relative w-48 h-48 rounded-full ${pressedClass} p-4`}>
+              <div
+                className="w-full h-full rounded-full"
+                style={{ background: storageDonutGradient }}
+              />
+              <div className={`absolute inset-[34px] rounded-full flex flex-col items-center justify-center ${pressedClass}`}>
+                <div className={`text-[11px] uppercase tracking-wider ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>总占用</div>
+                <div className={`text-lg font-black ${headingClass}`}>{formatBytes(storageTotalBytes)}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 space-y-2">
+            {storageLegendItems.map((item) => (
+              <div key={item.key} className={`rounded-xl px-3 py-2 flex items-center justify-between ${pressedClass}`}>
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: item.color }} />
+                  <span className={`text-sm font-bold truncate ${headingClass}`}>{item.label}</span>
+                </div>
+                <div className="text-right ml-3">
+                  <div className={`text-xs font-semibold ${headingClass}`}>{formatBytes(item.bytes)}</div>
+                  <div className="text-[11px] text-slate-500">{item.percentage.toFixed(1)}%</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
     );
   }
 
@@ -621,14 +875,31 @@ const Settings: React.FC<SettingsProps> = ({
 
       {/* Export/Import Buttons */}
       <div className="mt-8 grid grid-cols-2 gap-4 px-1">
-        <button className={`${cardClass} py-4 rounded-2xl flex flex-col items-center justify-center gap-2 text-slate-500 hover:text-rose-400 transition-colors active:scale-[0.98]`}>
-            <Upload size={24} />
-            <span className="text-xs font-bold">导出存档文件</span>
+        <button
+          type="button"
+          onClick={() => void handleExportArchive()}
+          disabled={archiveExporting || archiveImporting}
+          className={`${cardClass} py-4 rounded-2xl flex flex-col items-center justify-center gap-2 text-slate-500 hover:text-rose-400 transition-colors active:scale-[0.98] disabled:opacity-55 disabled:cursor-not-allowed`}
+        >
+            {archiveExporting ? <Loader2 size={24} className="animate-spin" /> : <Upload size={24} />}
+            <span className="text-xs font-bold">{archiveExporting ? '导出中...' : '导出存档文件'}</span>
         </button>
-        <button className={`${cardClass} py-4 rounded-2xl flex flex-col items-center justify-center gap-2 text-slate-500 hover:text-rose-400 transition-colors active:scale-[0.98]`}>
-            <Download size={24} />
-            <span className="text-xs font-bold">导入存档文件</span>
+        <button
+          type="button"
+          onClick={handleImportArchive}
+          disabled={archiveExporting || archiveImporting}
+          className={`${cardClass} py-4 rounded-2xl flex flex-col items-center justify-center gap-2 text-slate-500 hover:text-rose-400 transition-colors active:scale-[0.98] disabled:opacity-55 disabled:cursor-not-allowed`}
+        >
+            {archiveImporting ? <Loader2 size={24} className="animate-spin" /> : <Download size={24} />}
+            <span className="text-xs font-bold">{archiveImporting ? '导入中...' : '导入存档文件'}</span>
         </button>
+        <input
+          ref={archiveFileInputRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={(e) => { void handleImportArchiveFileSelected(e); }}
+        />
       </div>
     </div>
   );

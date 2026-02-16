@@ -269,3 +269,81 @@ export const compactBookForState = (book: Book): Book => {
   const chapterCount = Array.isArray(book.chapters) ? book.chapters.length : (book.chapterCount || 0);
   return compactBook(book, fullTextLength, chapterCount);
 };
+
+export const getAllBookContents = async (): Promise<Record<string, StoredBookContent>> => {
+  const db = await openBookContentDb();
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BOOK_CONTENT_STORE, 'readonly');
+    const store = tx.objectStore(BOOK_CONTENT_STORE);
+    const request = store.openCursor();
+    const result: Record<string, StoredBookContent> = {};
+
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve(result);
+        return;
+      }
+      const key = typeof cursor.key === 'string' ? cursor.key : `${cursor.key}`;
+      const normalized = normalizeStoredBookContent(cursor.value);
+      if (normalized) {
+        result[key] = normalized;
+      }
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error || new Error('Failed to read all book contents'));
+  });
+};
+
+export const clearAllBookContents = async (): Promise<void> => {
+  const db = await openBookContentDb();
+
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(BOOK_CONTENT_STORE, 'readwrite');
+    const store = tx.objectStore(BOOK_CONTENT_STORE);
+    store.clear();
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('Failed to clear book contents'));
+    tx.onabort = () => reject(tx.error || new Error('Failed to clear book contents'));
+  });
+};
+
+export const replaceAllBookContents = async (nextEntries: Record<string, StoredBookContent>): Promise<void> => {
+  const db = await openBookContentDb();
+  const entries = Object.entries(nextEntries || {});
+
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(BOOK_CONTENT_STORE, 'readwrite');
+    const store = tx.objectStore(BOOK_CONTENT_STORE);
+    store.clear();
+
+    entries.forEach(([bookId, payload]) => {
+      if (!bookId || typeof bookId !== 'string') return;
+      const normalized = normalizeStoredBookContent(payload);
+      if (!normalized) return;
+      store.put(normalized, bookId);
+    });
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('Failed to replace book contents'));
+    tx.onabort = () => reject(tx.error || new Error('Failed to replace book contents'));
+  });
+};
+
+export const getBookContentStorageUsageBytes = async (): Promise<{ totalBytes: number; byBookId: Record<string, number> }> => {
+  const encoder = new TextEncoder();
+  const allContents = await getAllBookContents();
+  const byBookId: Record<string, number> = {};
+
+  let totalBytes = 0;
+  Object.entries(allContents).forEach(([bookId, payload]) => {
+    const serialized = JSON.stringify(payload);
+    const bytes = encoder.encode(serialized).length;
+    byBookId[bookId] = bytes;
+    totalBytes += bytes;
+  });
+
+  return { totalBytes, byBookId };
+};

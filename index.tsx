@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import './index.css';
+import { hydrateReaderChatStore } from './utils/readerChatRuntime';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -9,11 +10,21 @@ if (!rootElement) {
 }
 
 const root = ReactDOM.createRoot(rootElement);
-root.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+const mountApp = () => {
+  root.render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+};
+
+void hydrateReaderChatStore()
+  .catch((error) => {
+    console.error('Failed to hydrate reader chat store before mount', error);
+  })
+  .finally(() => {
+    mountApp();
+  });
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {

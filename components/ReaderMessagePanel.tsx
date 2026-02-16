@@ -44,7 +44,12 @@ import {
   ReadingContextSnapshot,
   runConversationGeneration,
 } from '../utils/readerAiEngine';
-import { DEFAULT_READER_BUBBLE_CSS_PRESETS } from '../utils/readerBubbleCssPresets';
+import {
+  DEFAULT_NEUMORPHISM_BUBBLE_CSS,
+  DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID,
+  DEFAULT_READER_BUBBLE_CSS_PRESETS,
+  normalizeReaderBubbleCssPresets,
+} from '../utils/readerBubbleCssPresets';
 
 interface ReaderMessagePanelProps {
   isDarkMode: boolean;
@@ -117,10 +122,10 @@ const DEFAULT_READER_MORE_APPEARANCE: AppSettings['readerMore']['appearance'] = 
   chatBackgroundImage: '',
   showMessageTime: false,
   timeGapMinutes: FIXED_MESSAGE_TIME_GAP_MINUTES,
-  bubbleCssDraft: '',
+  bubbleCssDraft: DEFAULT_NEUMORPHISM_BUBBLE_CSS,
   bubbleCssApplied: '',
   bubbleCssPresets: DEFAULT_READER_BUBBLE_CSS_PRESETS.map((item) => ({ ...item })),
-  selectedBubbleCssPresetId: null,
+  selectedBubbleCssPresetId: DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID,
 };
 const DEFAULT_READER_MORE_FEATURE: AppSettings['readerMore']['feature'] = {
   memoryBubbleCount: 100,
@@ -202,6 +207,39 @@ const aggregateSummaryCardsText = (cards: ReaderSummaryCard[]) =>
     .map((card) => card.content.trim())
     .filter(Boolean)
     .join('\n');
+
+const sortSummaryCardsByRange = (left: ReaderSummaryCard, right: ReaderSummaryCard) => {
+  if (left.start !== right.start) return left.start - right.start;
+  if (left.end !== right.end) return left.end - right.end;
+  return left.createdAt - right.createdAt;
+};
+
+const mergeSummaryCardsByIds = (cards: ReaderSummaryCard[], cardIds: string[]): ReaderSummaryCard[] | null => {
+  const targetIds = new Set(cardIds.filter(Boolean));
+  if (targetIds.size < 2) return null;
+  const selected = cards.filter((card) => targetIds.has(card.id));
+  if (selected.length < 2) return null;
+  const mergedContent = selected
+    .slice()
+    .sort(sortSummaryCardsByRange)
+    .map((card) => card.content.trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+  if (!mergedContent) return null;
+
+  const now = Date.now();
+  const mergedCard: ReaderSummaryCard = {
+    id: `summary-merge-${now}-${Math.random().toString(36).slice(2, 8)}`,
+    content: mergedContent,
+    start: Math.min(...selected.map((card) => card.start)),
+    end: Math.max(...selected.map((card) => card.end)),
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return [...cards.filter((card) => !targetIds.has(card.id)), mergedCard].sort(sortSummaryCardsByRange);
+};
 
 const fingerprintText = (value: string) => {
   let hash = 2166136261;
@@ -432,6 +470,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   });
   const [isPanelDragging, setIsPanelDragging] = useState(false);
   const [isConversationHydrated, setIsConversationHydrated] = useState(false);
+  const [isBookSummaryHydrated, setIsBookSummaryHydrated] = useState(false);
   const [fabBottomPx, setFabBottomPx] = useState(24);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [contextMenuLayout, setContextMenuLayout] = useState<{ left: number; top: number } | null>(null);
@@ -648,6 +687,35 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     [setAppSettings]
   );
 
+  useEffect(() => {
+    const currentPresets = appSettings.readerMore.appearance.bubbleCssPresets;
+    const normalizedPresets = normalizeReaderBubbleCssPresets(currentPresets);
+    const isSame =
+      normalizedPresets.length === currentPresets.length
+      && normalizedPresets.every((preset, index) => {
+        const current = currentPresets[index];
+        return !!current
+          && current.id === preset.id
+          && current.name === preset.name
+          && current.css === preset.css;
+      });
+    if (isSame) return;
+
+    const currentSelectedPresetId = appSettings.readerMore.appearance.selectedBubbleCssPresetId;
+    const nextSelectedPresetId =
+      currentSelectedPresetId && normalizedPresets.some((item) => item.id === currentSelectedPresetId)
+        ? currentSelectedPresetId
+        : DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID;
+    updateReaderMoreAppearanceSettings({
+      bubbleCssPresets: normalizedPresets,
+      selectedBubbleCssPresetId: nextSelectedPresetId,
+    });
+  }, [
+    appSettings.readerMore.appearance.bubbleCssPresets,
+    appSettings.readerMore.appearance.selectedBubbleCssPresetId,
+    updateReaderMoreAppearanceSettings,
+  ]);
+
   const updateSummaryApiSettings = useCallback(
     (updater: Partial<AppSettings['readerMore']['feature']['summaryApi']>) => {
       setAppSettings((prev) => ({
@@ -811,20 +879,33 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
   const handleDeleteBubbleCssPreset = useCallback(
     (presetId: string) => {
+      if (presetId === DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID) {
+        showToast('默认预设不可删除', 'info');
+        return;
+      }
       const next = appSettings.readerMore.appearance.bubbleCssPresets.filter((item) => item.id !== presetId);
       updateReaderMoreAppearanceSettings({
         bubbleCssPresets: next,
         selectedBubbleCssPresetId:
           appSettings.readerMore.appearance.selectedBubbleCssPresetId === presetId
-            ? null
+            ? DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID
             : appSettings.readerMore.appearance.selectedBubbleCssPresetId,
       });
     },
-    [appSettings.readerMore.appearance.bubbleCssPresets, appSettings.readerMore.appearance.selectedBubbleCssPresetId, updateReaderMoreAppearanceSettings]
+    [
+      appSettings.readerMore.appearance.bubbleCssPresets,
+      appSettings.readerMore.appearance.selectedBubbleCssPresetId,
+      updateReaderMoreAppearanceSettings,
+      showToast,
+    ]
   );
 
   const handleRenameBubbleCssPreset = useCallback(
     (presetId: string, name: string) => {
+      if (presetId === DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID) {
+        showToast('默认预设不可重命名', 'info');
+        return;
+      }
       const safeName = name.trim();
       if (!safeName) {
         showToast('请输入新的预设名称', 'info');
@@ -846,15 +927,29 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
   const handleSelectBubbleCssPreset = useCallback(
     (presetId: string | null) => {
-      if (!presetId) {
-        updateReaderMoreAppearanceSettings({ selectedBubbleCssPresetId: null, bubbleCssDraft: '' });
-        return;
-      }
-      const preset = appSettings.readerMore.appearance.bubbleCssPresets.find((item) => item.id === presetId);
+      const targetPresetId = presetId || DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID;
+      const builtinPreset = DEFAULT_READER_BUBBLE_CSS_PRESETS.find((item) => item.id === targetPresetId) || null;
+      const preset = builtinPreset || appSettings.readerMore.appearance.bubbleCssPresets.find((item) => item.id === targetPresetId);
       if (!preset) return;
+      const nextPresetList = (() => {
+        if (!builtinPreset) return appSettings.readerMore.appearance.bubbleCssPresets;
+        const source = appSettings.readerMore.appearance.bubbleCssPresets;
+        const hasBuiltin = source.some((item) => item.id === builtinPreset.id);
+        if (!hasBuiltin) return [...source, { ...builtinPreset }];
+        return source.map((item) =>
+          item.id === builtinPreset.id
+            ? {
+                ...item,
+                name: builtinPreset.name,
+                css: builtinPreset.css,
+              }
+            : item
+        );
+      })();
       updateReaderMoreAppearanceSettings({
-        selectedBubbleCssPresetId: presetId,
+        selectedBubbleCssPresetId: targetPresetId,
         bubbleCssDraft: preset.css,
+        ...(builtinPreset ? { bubbleCssPresets: nextPresetList } : {}),
       });
     },
     [appSettings.readerMore.appearance.bubbleCssPresets, updateReaderMoreAppearanceSettings]
@@ -1505,6 +1600,34 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     [applyBookSummaryCards, persistBookSummaryLocal]
   );
 
+  const handleMergeChatSummaryCards = useCallback(
+    (cardIds: string[]) => {
+      const nextCards = mergeSummaryCardsByIds(chatSummaryCardsRef.current, cardIds);
+      if (!nextCards) {
+        showToast('请至少选择两张总结卡片', 'info');
+        return;
+      }
+      applyChatSummaryCards(nextCards);
+    },
+    [applyChatSummaryCards, showToast]
+  );
+
+  const handleMergeBookSummaryCards = useCallback(
+    (cardIds: string[]) => {
+      const nextCards = mergeSummaryCardsByIds(bookSummaryCardsRef.current, cardIds);
+      if (!nextCards) {
+        showToast('请至少选择两张总结卡片', 'info');
+        return;
+      }
+      applyBookSummaryCards(nextCards);
+      persistBookSummaryLocal({
+        cards: nextCards,
+        autoLastEnd: bookAutoSummaryLastEndRef.current,
+      });
+    },
+    [applyBookSummaryCards, persistBookSummaryLocal, showToast]
+  );
+
   const scrollMessagesToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     if (!messagesContainerRef.current) return;
     messagesContainerRef.current.scrollTo({
@@ -1572,6 +1695,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     hiddenBubbleIdsRef.current = [];
     setHiddenBubbleIds([]);
     setIsConversationHydrated(false);
+    setIsBookSummaryHydrated(false);
     deletedConversationKeyRef.current = null;
     prevAutoChatSummaryEnabledRef.current = false;
     prevAutoBookSummaryEnabledRef.current = false;
@@ -1599,6 +1723,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     if (!activeBook?.id) {
       setBookSummaryCards([]);
       setBookAutoSummaryLastEnd(0);
+      setIsBookSummaryHydrated(true);
       return;
     }
     let cancelled = false;
@@ -1612,6 +1737,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       } else {
         setBookAutoSummaryLastEnd(Math.max(0, content?.bookAutoSummaryLastEnd || 0));
       }
+      setIsBookSummaryHydrated(true);
     })();
     return () => {
       cancelled = true;
@@ -1697,12 +1823,12 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   }, [activeBook?.id, bookSummaryCards]);
 
   useEffect(() => {
-    if (!activeBook?.id) return;
+    if (!activeBook?.id || !isBookSummaryHydrated) return;
     persistBookSummaryLocal({
       cards: bookSummaryCards,
       autoLastEnd: bookAutoSummaryLastEnd,
     });
-  }, [activeBook?.id, bookSummaryCards, bookAutoSummaryLastEnd, persistBookSummaryLocal]);
+  }, [activeBook?.id, bookSummaryCards, bookAutoSummaryLastEnd, persistBookSummaryLocal, isBookSummaryHydrated]);
 
   useEffect(() => {
     if (!summaryApiCacheKey) {
@@ -2817,7 +2943,10 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         onRenameBubbleCssPreset={handleRenameBubbleCssPreset}
         onSelectBubbleCssPreset={handleSelectBubbleCssPreset}
         onClearBubbleCssDraft={() =>
-          updateReaderMoreAppearanceSettings({ bubbleCssDraft: '', selectedBubbleCssPresetId: null })
+          updateReaderMoreAppearanceSettings({
+            bubbleCssDraft: DEFAULT_NEUMORPHISM_BUBBLE_CSS,
+            selectedBubbleCssPresetId: DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID,
+          })
         }
         onResetAppearanceSettings={handleResetAppearanceSettings}
         onResetFeatureSettings={handleResetFeatureSettings}
@@ -2830,6 +2959,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         onDeleteBookSummaryCard={handleDeleteBookSummaryCard}
         onEditChatSummaryCard={handleEditChatSummaryCard}
         onDeleteChatSummaryCard={handleDeleteChatSummaryCard}
+        onMergeBookSummaryCards={handleMergeBookSummaryCards}
+        onMergeChatSummaryCards={handleMergeChatSummaryCards}
         onRequestManualBookSummary={handleRequestManualBookSummary}
         onRequestManualChatSummary={handleRequestManualChatSummary}
         currentReadCharOffset={Math.max(0, getLatestReadingPosition()?.globalCharOffset || 0)}

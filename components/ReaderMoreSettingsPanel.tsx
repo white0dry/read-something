@@ -2,6 +2,7 @@
 import { ArrowLeft, Check, ChevronDown, Trash2, AlertTriangle, Image as ImageIcon, Link as LinkIcon, Loader2, X, RefreshCw, Save, Edit2, Palette, Settings, Archive } from 'lucide-react';
 import { ApiPreset, AppSettings, ReaderSummaryCard } from '../types';
 import ResolvedImage from './ResolvedImage';
+import { DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID } from '../utils/readerBubbleCssPresets';
 
 export interface ReaderArchiveOption {
   conversationKey: string;
@@ -18,7 +19,6 @@ type TabKey = 'appearance' | 'feature' | 'session';
 type ModalType = 'none' | 'book' | 'chat' | 'bgUrl';
 const PANEL_VIEW_TRANSITION_MS = 420;
 const MODAL_FADE_TRANSITION_MS = 220;
-const NONE_BUBBLE_PRESET_VALUE = '__none__';
 
 interface Props {
   isDarkMode: boolean;
@@ -51,6 +51,8 @@ interface Props {
   onDeleteBookSummaryCard: (cardId: string) => void;
   onEditChatSummaryCard: (cardId: string, content: string) => void;
   onDeleteChatSummaryCard: (cardId: string) => void;
+  onMergeBookSummaryCards: (cardIds: string[]) => void;
+  onMergeChatSummaryCards: (cardIds: string[]) => void;
   onRequestManualBookSummary: (start: number, end: number) => void;
   onRequestManualChatSummary: (start: number, end: number) => void;
   currentReadCharOffset: number;
@@ -88,6 +90,13 @@ const BUBBLE_CSS_PLACEHOLDER = [
   '  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.75), 6px 6px 12px rgba(163,177,198,0.28);',
   '}',
 ].join('\n');
+
+const mapDraftCssToPreview = (css: string) =>
+  css
+    .replace(/\.reader-message-scroll\b/g, '.rm-bubble-preview-scroll')
+    .replace(/\.rm-bubble-ai\b/g, '.rm-preview-bubble-ai')
+    .replace(/\.rm-bubble-user\b/g, '.rm-preview-bubble-user')
+    .replace(/\.rm-bubble\b/g, '.rm-preview-bubble');
 
 const clampInt = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, Number.isFinite(value) ? Math.round(value) : min));
@@ -294,6 +303,8 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     onDeleteBookSummaryCard,
     onEditChatSummaryCard,
     onDeleteChatSummaryCard,
+    onMergeBookSummaryCards,
+    onMergeChatSummaryCards,
     onRequestManualBookSummary,
     onRequestManualChatSummary,
     currentReadCharOffset,
@@ -313,6 +324,8 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
   const [bookRangeDraft, setBookRangeDraft] = useState({ start: '1', end: '1' });
   const [chatRangeDraft, setChatRangeDraft] = useState({ start: '1', end: '1' });
+  const [selectedBookSummaryCardIds, setSelectedBookSummaryCardIds] = useState<string[]>([]);
+  const [selectedChatSummaryCardIds, setSelectedChatSummaryCardIds] = useState<string[]>([]);
   const closeTimerRef = useRef<number | null>(null);
   const modalCloseTimerRef = useRef<number | null>(null);
   const prevModalRef = useRef<ModalType>('none');
@@ -348,17 +361,42 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     if (modal === 'book' && prevModal !== 'book') {
       const end = Math.max(1, Math.floor(currentReadCharOffset || 0));
       setBookRangeDraft({ start: '1', end: `${end}` });
+      setSelectedBookSummaryCardIds([]);
       return;
     }
     if (modal === 'chat' && prevModal !== 'chat') {
       const end = Math.max(1, Math.floor(totalMessages || 0));
       setChatRangeDraft({ start: '1', end: `${end}` });
+      setSelectedChatSummaryCardIds([]);
     }
   }, [modal, currentReadCharOffset, totalMessages]);
 
-  const selectedPreset = useMemo(
-    () => appearanceSettings.bubbleCssPresets.find((x) => x.id === appearanceSettings.selectedBubbleCssPresetId) || null,
-    [appearanceSettings.bubbleCssPresets, appearanceSettings.selectedBubbleCssPresetId]
+  useEffect(() => {
+    const cardIdSet = new Set(bookSummaryCards.map((card) => card.id));
+    setSelectedBookSummaryCardIds((prev) => prev.filter((id) => cardIdSet.has(id)));
+  }, [bookSummaryCards]);
+
+  useEffect(() => {
+    const cardIdSet = new Set(chatSummaryCards.map((card) => card.id));
+    setSelectedChatSummaryCardIds((prev) => prev.filter((id) => cardIdSet.has(id)));
+  }, [chatSummaryCards]);
+
+  const defaultBubblePreset = useMemo(
+    () =>
+      appearanceSettings.bubbleCssPresets.find((item) => item.id === DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID)
+      || appearanceSettings.bubbleCssPresets[0]
+      || null,
+    [appearanceSettings.bubbleCssPresets]
+  );
+  const selectedPreset = useMemo(() => {
+    const explicit = appearanceSettings.bubbleCssPresets.find((x) => x.id === appearanceSettings.selectedBubbleCssPresetId) || null;
+    return explicit || defaultBubblePreset;
+  }, [appearanceSettings.bubbleCssPresets, appearanceSettings.selectedBubbleCssPresetId, defaultBubblePreset]);
+  const selectedBubblePresetId = selectedPreset?.id || defaultBubblePreset?.id || '';
+  const isDefaultBubblePresetSelected = selectedPreset?.id === DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID;
+  const previewBubbleCss = useMemo(
+    () => mapDraftCssToPreview(appearanceSettings.bubbleCssDraft || ''),
+    [appearanceSettings.bubbleCssDraft]
   );
   const summaryApiPresetOptions = useMemo(() => {
     return apiPresets
@@ -488,6 +526,10 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     const cards = isBook ? bookSummaryCards : chatSummaryCards;
     const onEdit = isBook ? onEditBookSummaryCard : onEditChatSummaryCard;
     const onDelete = isBook ? onDeleteBookSummaryCard : onDeleteChatSummaryCard;
+    const onMergeCards = isBook ? onMergeBookSummaryCards : onMergeChatSummaryCards;
+    const selectedCardIds = isBook ? selectedBookSummaryCardIds : selectedChatSummaryCardIds;
+    const setSelectedCardIds = isBook ? setSelectedBookSummaryCardIds : setSelectedChatSummaryCardIds;
+    const selectedIdSet = new Set(selectedCardIds);
     const startDraft = isBook ? bookRangeDraft.start : chatRangeDraft.start;
     const endDraft = isBook ? bookRangeDraft.end : chatRangeDraft.end;
     const commitRangeField = (field: 'start' | 'end') => {
@@ -513,6 +555,16 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
       }
       if (isBook) onRequestManualBookSummary(s, e);
       else onRequestManualChatSummary(s, e);
+    };
+    const toggleCardSelected = (cardId: string) => {
+      setSelectedCardIds((prev) =>
+        prev.includes(cardId) ? prev.filter((id) => id !== cardId) : [...prev, cardId]
+      );
+    };
+    const mergeSelectedCards = () => {
+      if (selectedCardIds.length < 2) return;
+      onMergeCards(selectedCardIds);
+      setSelectedCardIds([]);
     };
     return (
       <div className={`fixed inset-0 z-[95] flex items-center justify-center p-6 ${modalClosing ? 'app-fade-exit' : 'app-fade-enter'}`}>
@@ -556,12 +608,49 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
               {summaryTaskRunning && <Loader2 size={14} className="animate-spin" />}
               {summaryTaskRunning ? '处理中...' : '手动总结'}
             </button>
+            <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
+              <span>已选中 {selectedCardIds.length} 张卡片</span>
+              <button
+                type="button"
+                onClick={mergeSelectedCards}
+                disabled={selectedCardIds.length < 2}
+                className={`h-8 px-3 rounded-full text-xs font-bold transition-all ${
+                  selectedCardIds.length >= 2
+                    ? `text-rose-400 ${btnClass} ${activeBtnClass}`
+                    : disabledIconButtonClass
+                }`}
+              >
+                合并选中卡片
+              </button>
+            </div>
           </div>
           <div className="mt-4 flex-1 overflow-y-auto no-scrollbar px-4 py-4">
             <div className="space-y-5">
               {cards.length === 0 && <div className="text-xs text-slate-500 text-center py-10">暂无总结卡片</div>}
-              {cards.map((card) => (
-                <div key={card.id} className={`rounded-2xl p-4 ${raisedCardClass}`}>
+              {cards.map((card) => {
+                const isCardSelected = selectedIdSet.has(card.id);
+                const selectedCheckboxStyle = isCardSelected
+                  ? {
+                      backgroundColor: 'rgb(var(--theme-400) / 1)',
+                      borderColor: 'rgb(var(--theme-400) / 1)',
+                    }
+                  : undefined;
+                return (
+                <div key={card.id} className={`rounded-2xl p-4 ${raisedCardClass} ${isCardSelected ? 'ring-2 ring-rose-300/80' : ''}`}>
+                  <div className="mb-3 flex justify-center">
+                    <button
+                      type="button"
+                      onClick={() => toggleCardSelected(card.id)}
+                      className={`h-8 px-3 rounded-full text-xs font-bold flex items-center justify-center gap-2 transition-all ${btnClass} ${activeBtnClass} !text-slate-500`}
+                    >
+                      <span className={`w-4 h-4 rounded border flex items-center justify-center ${
+                        isCardSelected ? 'text-white' : 'border-slate-400'
+                      }`} style={selectedCheckboxStyle}>
+                        {isCardSelected && <Check size={10} />}
+                      </span>
+                      {isCardSelected ? '已选' : '选择'}
+                    </button>
+                  </div>
                   <textarea defaultValue={card.content} onBlur={(e) => onEdit(card.id, e.target.value)}
                     className={`w-full min-h-[96px] rounded-xl p-3 text-sm outline-none resize-y ${inputClass}`} />
                   <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
@@ -574,7 +663,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                     </div>
                   </div>
                 </div>
-              ))}
+              )})}
             </div>
           </div>
         </div>
@@ -756,24 +845,25 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                         value={appearanceSettings.bubbleCssDraft}
                         onChange={(e) => {
                           const nextDraft = e.target.value;
-                          const shouldSwitchToNone =
-                            nextDraft.trim().length === 0 ||
-                            (selectedPreset ? nextDraft !== selectedPreset.css : false);
-                          onUpdateAppearanceSettings({
-                            bubbleCssDraft: nextDraft,
-                            ...(shouldSwitchToNone ? { selectedBubbleCssPresetId: null } : {}),
-                          });
+                          if (nextDraft.length === 0 && defaultBubblePreset) {
+                            onUpdateAppearanceSettings({
+                              bubbleCssDraft: defaultBubblePreset.css,
+                              selectedBubbleCssPresetId: defaultBubblePreset.id,
+                            });
+                            return;
+                          }
+                          onUpdateAppearanceSettings({ bubbleCssDraft: nextDraft });
                         }}
                         placeholder={BUBBLE_CSS_PLACEHOLDER}
                         className={`w-full min-h-[120px] rounded-xl p-3 text-xs outline-none resize-y ${inputClass} mb-3`}
                       />
-                      <style>{appearanceSettings.bubbleCssDraft || ''}</style>
+                      <style>{previewBubbleCss}</style>
 
                       {/* 预览区域 - 添加凹陷边框和字体缩放 */}
-                      <div className={`rm-bubble-preview reader-message-scroll overflow-hidden rounded-xl p-3 mb-3 ${pressedClass}`}>
+                      <div className={`rm-bubble-preview rm-bubble-preview-scroll overflow-hidden rounded-xl p-3 mb-3 ${pressedClass}`}>
                         <div className="space-y-2" style={{ fontSize: `${14 * appearanceSettings.bubbleFontSizeScale}px` }}>
                           <div className="flex justify-start">
-                            <div className={`rm-bubble rm-bubble-ai max-w-[86%] rounded-2xl rounded-bl px-5 py-3 ${
+                            <div className={`rm-preview-bubble rm-preview-bubble-ai max-w-[86%] rounded-2xl rounded-bl px-5 py-3 ${
                               isDarkMode
                                 ? 'bg-[#1a202c] text-slate-300 shadow-md'
                                 : 'bg-[#e0e5ec] shadow-[5px_5px_10px_#c3c8ce,-5px_-5px_10px_#fdffff] text-slate-700'
@@ -782,7 +872,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                             </div>
                           </div>
                           <div className="flex justify-end">
-                            <div className={`rm-bubble rm-bubble-user max-w-[86%] rounded-2xl rounded-br px-5 py-3 ${
+                            <div className={`rm-preview-bubble rm-preview-bubble-user max-w-[86%] rounded-2xl rounded-br px-5 py-3 ${
                               isDarkMode
                                 ? 'bg-rose-500 text-white shadow-md'
                                 : 'bg-rose-400 text-white shadow-[5px_5px_10px_#d1d5db,-5px_-5px_10px_#ffffff]'
@@ -796,12 +886,9 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                       {/* 预设选择 */}
                       <div className="mb-3">
                         <SingleSelectDropdown
-                          options={[
-                            { value: NONE_BUBBLE_PRESET_VALUE, label: '无' },
-                            ...appearanceSettings.bubbleCssPresets.map((p) => ({ value: p.id, label: p.name })),
-                          ]}
-                          value={appearanceSettings.selectedBubbleCssPresetId || NONE_BUBBLE_PRESET_VALUE}
-                          onChange={(val) => onSelectBubbleCssPreset(val === NONE_BUBBLE_PRESET_VALUE ? null : val || null)}
+                          options={appearanceSettings.bubbleCssPresets.map((p) => ({ value: p.id, label: p.name }))}
+                          value={selectedBubblePresetId}
+                          onChange={(val) => onSelectBubbleCssPreset(val || defaultBubblePreset?.id || null)}
                           placeholder="选择预设"
                           inputClass={inputClass}
                           cardClass={cardClass}
@@ -849,24 +936,28 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                           </button>
                           <button
                             type="button"
-                            disabled={!selectedPreset}
+                            disabled={!selectedPreset || isDefaultBubblePresetSelected}
                             onClick={() => {
-                              if (selectedPreset) {
+                              if (selectedPreset && !isDefaultBubblePresetSelected) {
                                 setPresetName(selectedPreset.name);
                                 setEditingPresetId(selectedPreset.id);
                               }
                             }}
-                            className={`w-10 h-10 aspect-square shrink-0 rounded-xl flex items-center justify-center transition-all ${selectedPreset ? `${btnClass} ${activeBtnClass}` : disabledIconButtonClass}`}
+                            className={`w-10 h-10 aspect-square shrink-0 rounded-xl flex items-center justify-center transition-all ${
+                              selectedPreset && !isDefaultBubblePresetSelected
+                                ? `${btnClass} ${activeBtnClass}`
+                                : disabledIconButtonClass
+                            }`}
                             title="重命名"
                           >
                             <Edit2 size={16} />
                           </button>
                           <button
                             type="button"
-                            disabled={!selectedPreset}
-                            onClick={() => selectedPreset && onDeleteBubbleCssPreset(selectedPreset.id)}
+                            disabled={!selectedPreset || isDefaultBubblePresetSelected}
+                            onClick={() => selectedPreset && !isDefaultBubblePresetSelected && onDeleteBubbleCssPreset(selectedPreset.id)}
                             className={`w-10 h-10 aspect-square shrink-0 rounded-xl flex items-center justify-center transition-all ${
-                              selectedPreset
+                              selectedPreset && !isDefaultBubblePresetSelected
                                 ? enabledDangerIconButtonClass
                                 : disabledIconButtonClass
                             }`}

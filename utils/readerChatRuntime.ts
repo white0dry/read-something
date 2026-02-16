@@ -1,4 +1,8 @@
 import { ReaderAiUnderlineRange, ReaderSummaryCard } from '../types';
+import {
+  getStoredChatHistoryStore,
+  saveStoredChatHistoryStore,
+} from './chatHistoryStorage';
 
 export type ChatSender = 'user' | 'character';
 
@@ -66,6 +70,11 @@ export const CHAT_STORE_UPDATED_EVENT = 'app-reader-chat-store-updated';
 export const GENERATION_STATUS_EVENT = 'app-reader-chat-generation-status';
 
 const generationRegistry = new Map<string, GenerationRecord>();
+let chatStoreCache: ReaderChatStore = {};
+let chatStoreHydrated = false;
+let chatStoreHydrationPromise: Promise<void> | null = null;
+let chatStorePersistQueue: Promise<void> = Promise.resolve();
+let pendingStoreBeforeHydration: ReaderChatStore | null = null;
 
 export const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 export const compactText = (value: string) => value.replace(/\s+/g, ' ').trim();
@@ -377,6 +386,112 @@ const normalizeChatBucket = (value: unknown): ReaderChatBucket => {
   };
 };
 
+const normalizeChatStore = (value: unknown): ReaderChatStore => {
+  if (!value || typeof value !== 'object') return {};
+  const normalized: ReaderChatStore = {};
+  Object.entries(value as Record<string, unknown>).forEach(([key, bucket]) => {
+    if (!key || !bucket || typeof bucket !== 'object') return;
+    normalized[key] = normalizeChatBucket(bucket);
+  });
+  return normalized;
+};
+
+const cloneChatStore = (store: ReaderChatStore): ReaderChatStore => {
+  const cloned: ReaderChatStore = {};
+  Object.entries(store || {}).forEach(([key, bucket]) => {
+    if (!key || !bucket || typeof bucket !== 'object') return;
+    cloned[key] = normalizeChatBucket(bucket);
+  });
+  return cloned;
+};
+
+const readLegacyChatStoreFromLocalStorage = (): ReaderChatStore => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(CHAT_HISTORY_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    const normalized = normalizeChatStore(parsed);
+    const deduped = dedupeConversationStore(normalized);
+    return deduped.store;
+  } catch {
+    return {};
+  }
+};
+
+const queuePersistChatStore = (store: ReaderChatStore) => {
+  const snapshot = cloneChatStore(store);
+  chatStorePersistQueue = chatStorePersistQueue
+    .catch(() => undefined)
+    .then(() => saveStoredChatHistoryStore(snapshot as Record<string, unknown>))
+    .catch((error) => {
+      console.error('Failed to persist chat store into IndexedDB', error);
+    });
+};
+
+export const hydrateReaderChatStore = async () => {
+  if (chatStoreHydrated) return;
+  if (chatStoreHydrationPromise) {
+    await chatStoreHydrationPromise;
+    return;
+  }
+
+  chatStoreHydrationPromise = (async () => {
+    let loaded = {} as ReaderChatStore;
+    let hasLegacyMigration = false;
+    try {
+      const stored = await getStoredChatHistoryStore();
+      loaded = normalizeChatStore(stored);
+    } catch (error) {
+      console.error('Failed to read chat store from IndexedDB', error);
+    }
+
+    const legacy = readLegacyChatStoreFromLocalStorage();
+    if (Object.keys(loaded).length === 0 && Object.keys(legacy).length > 0) {
+      loaded = legacy;
+      hasLegacyMigration = true;
+    }
+
+    if (pendingStoreBeforeHydration) {
+      loaded = {
+        ...loaded,
+        ...pendingStoreBeforeHydration,
+      };
+    }
+
+    const deduped = dedupeConversationStore(loaded);
+    chatStoreCache = deduped.store;
+    chatStoreHydrated = true;
+    const shouldPersist = deduped.changed || hasLegacyMigration || Boolean(pendingStoreBeforeHydration);
+    pendingStoreBeforeHydration = null;
+
+    if (hasLegacyMigration && typeof window !== 'undefined') {
+      try {
+        window.localStorage.removeItem(CHAT_HISTORY_STORAGE_KEY);
+      } catch {
+        // ignore
+      }
+    }
+
+    if (shouldPersist) {
+      await saveStoredChatHistoryStore(chatStoreCache as Record<string, unknown>).catch((error) => {
+        console.error('Failed to save hydrated chat store', error);
+      });
+    }
+  })()
+    .catch((error) => {
+      console.error('Failed to hydrate chat store', error);
+      chatStoreCache = cloneChatStore(readLegacyChatStoreFromLocalStorage());
+      chatStoreHydrated = true;
+      pendingStoreBeforeHydration = null;
+    })
+    .finally(() => {
+      chatStoreHydrationPromise = null;
+    });
+
+  await chatStoreHydrationPromise;
+};
+
 const emitChatStoreUpdated = (detail: ChatStoreUpdatedEventDetail) => {
   if (typeof window === 'undefined') return;
   window.dispatchEvent(new CustomEvent<ChatStoreUpdatedEventDetail>(CHAT_STORE_UPDATED_EVENT, { detail }));
@@ -388,45 +503,25 @@ const emitGenerationStatus = (detail: GenerationStatusEventDetail) => {
 };
 
 export const readChatStore = (): ReaderChatStore => {
-  if (typeof window === 'undefined') return {};
-  try {
-    const raw = window.localStorage.getItem(CHAT_HISTORY_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return {};
-
-    const normalized: ReaderChatStore = {};
-    Object.entries(parsed as Record<string, unknown>).forEach(([key, value]) => {
-      if (!key || !value || typeof value !== 'object') return;
-      normalized[key] = normalizeChatBucket(value);
-    });
-    const deduped = dedupeConversationStore(normalized);
-    if (deduped.changed) {
-      try {
-        window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(deduped.store));
-      } catch {
-        // ignore localStorage failures
-      }
+  if (!chatStoreHydrated) {
+    if (pendingStoreBeforeHydration) {
+      return cloneChatStore(pendingStoreBeforeHydration);
     }
-    return deduped.store;
-  } catch {
-    return {};
+    const legacyStore = readLegacyChatStoreFromLocalStorage();
+    if (Object.keys(legacyStore).length > 0) return cloneChatStore(legacyStore);
   }
+  return cloneChatStore(chatStoreCache);
 };
 
 export const saveChatStore = (store: ReaderChatStore, preferredConversationKey?: string) => {
-  if (typeof window === 'undefined') return;
-  try {
-    const normalized: ReaderChatStore = {};
-    Object.entries(store || {}).forEach(([key, value]) => {
-      if (!key || !value || typeof value !== 'object') return;
-      normalized[key] = normalizeChatBucket(value);
-    });
-    const deduped = dedupeConversationStore(normalized, preferredConversationKey);
-    window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(deduped.store));
-  } catch {
-    // ignore localStorage failures (private mode / quota limits)
+  const deduped = dedupeConversationStore(normalizeChatStore(store), preferredConversationKey);
+  const nextStore = cloneChatStore(deduped.store);
+  chatStoreCache = nextStore;
+  if (!chatStoreHydrated) {
+    pendingStoreBeforeHydration = nextStore;
+    return;
   }
+  queuePersistChatStore(nextStore);
 };
 
 export const readConversationBucket = (conversationKey: string): ReaderChatBucket => {

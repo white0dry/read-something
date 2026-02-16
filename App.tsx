@@ -10,7 +10,12 @@ import { deleteImageByRef, migrateDataUrlToImageRef } from './utils/imageStorage
 import { compactBookForState, deleteBookContent, getBookContent, migrateInlineBookContent, saveBookContent } from './utils/bookContentStorage';
 import { buildConversationKey, readConversationBucket, persistConversationBucket } from './utils/readerChatRuntime';
 import { buildCharacterWorldBookSections, buildReadingContextSnapshot, runConversationGeneration } from './utils/readerAiEngine';
-import { DEFAULT_READER_BUBBLE_CSS_PRESETS, normalizeReaderBubbleCssPresets } from './utils/readerBubbleCssPresets';
+import {
+  DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID,
+  DEFAULT_NEUMORPHISM_BUBBLE_CSS,
+  DEFAULT_READER_BUBBLE_CSS_PRESETS,
+  normalizeReaderBubbleCssPresets,
+} from './utils/readerBubbleCssPresets';
 
 interface Notification {
   show: boolean;
@@ -44,10 +49,10 @@ const DEFAULT_READER_MORE_SETTINGS = {
     chatBackgroundImage: '',
     showMessageTime: false,
     timeGapMinutes: FIXED_MESSAGE_TIME_GAP_MINUTES,
-    bubbleCssDraft: '',
+    bubbleCssDraft: DEFAULT_NEUMORPHISM_BUBBLE_CSS,
     bubbleCssApplied: '',
     bubbleCssPresets: DEFAULT_READER_BUBBLE_CSS_PRESETS.map((item) => ({ ...item })),
-    selectedBubbleCssPresetId: null as string | null,
+    selectedBubbleCssPresetId: DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID as string | null,
   },
   feature: {
     memoryBubbleCount: 100,
@@ -154,12 +159,19 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
   const normalizedBubbleCssPresets = normalizeReaderBubbleCssPresets(appearanceSource.bubbleCssPresets);
   const selectedBubbleCssPresetIdRaw =
     typeof appearanceSource.selectedBubbleCssPresetId === 'string'
-      ? appearanceSource.selectedBubbleCssPresetId
+      ? appearanceSource.selectedBubbleCssPresetId.trim()
       : null;
   const selectedBubbleCssPresetId =
     selectedBubbleCssPresetIdRaw && normalizedBubbleCssPresets.some((item) => item.id === selectedBubbleCssPresetIdRaw)
       ? selectedBubbleCssPresetIdRaw
-      : null;
+      : DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID;
+  const bubbleCssDraftRaw =
+    typeof appearanceSource.bubbleCssDraft === 'string'
+      ? appearanceSource.bubbleCssDraft
+      : DEFAULT_READER_MORE_SETTINGS.appearance.bubbleCssDraft;
+  const bubbleCssDraft = bubbleCssDraftRaw.length > 0
+    ? bubbleCssDraftRaw
+    : DEFAULT_NEUMORPHISM_BUBBLE_CSS;
   const readerMore = {
     appearance: {
       bubbleFontSizeScale:
@@ -175,10 +187,7 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
           ? appearanceSource.showMessageTime
           : DEFAULT_READER_MORE_SETTINGS.appearance.showMessageTime,
       timeGapMinutes: FIXED_MESSAGE_TIME_GAP_MINUTES,
-      bubbleCssDraft:
-        typeof appearanceSource.bubbleCssDraft === 'string'
-          ? appearanceSource.bubbleCssDraft
-          : DEFAULT_READER_MORE_SETTINGS.appearance.bubbleCssDraft,
+      bubbleCssDraft,
       bubbleCssApplied:
         typeof appearanceSource.bubbleCssApplied === 'string'
           ? appearanceSource.bubbleCssApplied
