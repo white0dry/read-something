@@ -360,6 +360,13 @@ export const restoreAppArchivePayload = async (raw: unknown): Promise<AppArchive
     })
   );
 
+  await replaceAllBookContents(archive.indexedDb.bookContents);
+  await restoreChatHistoryFromArchive(archive.indexedDb.chatStore);
+  await clearAllImages();
+  for (const [imageRef, blob] of imageBlobEntries) {
+    await saveImageBlobByRef(imageRef, blob);
+  }
+
   const removableKeys: string[] = [];
   for (let index = 0; index < localStorage.length; index += 1) {
     const key = localStorage.key(index);
@@ -370,13 +377,6 @@ export const restoreAppArchivePayload = async (raw: unknown): Promise<AppArchive
   Object.entries(archive.localStorage).forEach(([key, value]) => {
     localStorage.setItem(key, value);
   });
-
-  await replaceAllBookContents(archive.indexedDb.bookContents);
-  await restoreChatHistoryFromArchive(archive.indexedDb.chatStore);
-  await clearAllImages();
-  for (const [imageRef, blob] of imageBlobEntries) {
-    await saveImageBlobByRef(imageRef, blob);
-  }
 
   return archive;
 };

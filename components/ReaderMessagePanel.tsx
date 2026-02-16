@@ -41,10 +41,12 @@ import {
 import {
   buildCharacterWorldBookSections,
   buildReadingContextSnapshot,
+  estimateConversationPromptTokens,
   ReadingContextSnapshot,
   runConversationGeneration,
   sanitizeTextForAiPrompt,
 } from '../utils/readerAiEngine';
+import type { PromptTokenEstimate } from '../utils/readerAiEngine';
 import {
   DEFAULT_NEUMORPHISM_BUBBLE_CSS,
   LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS,
@@ -130,6 +132,7 @@ const DEFAULT_READER_MORE_APPEARANCE: AppSettings['readerMore']['appearance'] = 
   selectedBubbleCssPresetId: DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID,
 };
 const DEFAULT_READER_MORE_FEATURE: AppSettings['readerMore']['feature'] = {
+  readingExcerptCharCount: 800,
   memoryBubbleCount: 100,
   replyBubbleMin: 3,
   replyBubbleMax: 8,
@@ -201,6 +204,16 @@ const formatBubbleClock = (timestamp: number) =>
       hour12: true,
     })
     .replace(' ', '');
+const formatSummaryPromptTime = (timestamp: number) => {
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return '1970/01/01 00:00';
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  const hour = `${date.getHours()}`.padStart(2, '0');
+  const minute = `${date.getMinutes()}`.padStart(2, '0');
+  return `${year}/${month}/${day} ${hour}:${minute}`;
+};
 
 const aggregateSummaryCardsText = (cards: ReaderSummaryCard[]) =>
   cards
@@ -558,9 +571,12 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
   const userRealName = activePersona?.name?.trim() || DEFAULT_USER_NAME;
   const userNickname = activePersona?.userNickname?.trim() || userRealName;
+  const userDescription = activePersona?.description?.trim() || '（暂无用户人设）';
   const characterRealName = activeCharacter?.name?.trim() || DEFAULT_CHAR_NAME;
   const characterNickname = activeCharacter?.nickname?.trim() || characterRealName;
   const characterDescription = activeCharacter?.description?.trim() || '（暂无角色人设）';
+  const activeBookTitle = activeBook?.title || '未选择书籍';
+  const activeBookSummary = activeBook?.id ? readingPrefixSummaryByBookId[activeBook.id] || '' : '';
 
   const conversationKey = useMemo(
     () => buildConversationKey(activeBook?.id || null, activePersonaId, activeCharacterId),
@@ -1178,13 +1194,24 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           if (nextTask.kind === 'chat') {
             const messageSlice = messagesRef.current
               .slice(sliceStart, sliceEnd)
-              .map((item) => `[${item.sender === 'user' ? '用户' : 'AI'}] ${sanitizeTextForAiPrompt(item.content || '')}`)
+              .map((item) => {
+                const roleLabel = item.sender === 'user' ? userNickname : characterRealName;
+                return `[${formatSummaryPromptTime(item.timestamp)}][${roleLabel}] ${sanitizeTextForAiPrompt(item.content || '')}`;
+              })
               .join('\n');
             return [
-              `请将以下聊天记录总结为 100-200 字，第三人称、凝练、可读性强。`,
-              `消息区间：${taskStart}-${taskEnd}`,
-              `不要使用列表，不要加入未出现的信息。`,
+              `你是${characterRealName}，正在回顾和${userNickname}的聊天。`,
               '',
+              '【任务】用你自己的视角，把下面这段聊天记录浓缩成一小段回忆。',
+              '',
+              '【格式要求】',
+              '- 开头固定写：[YYYY/MM/DD HH:mm - YYYY/MM/DD HH:mm],',
+              '- 紧接一段 100-150 字的中文总结。',
+              `- 用「我」指代自己，用「${userNickname}」指代对方。`,
+              '- 写成一段连贯的话，不要用列表、编号或分点。',
+              '- 只写聊天里真实出现过的内容，禁止编造事实妄加揣测。',
+              '',
+              '【以下为聊天记录】',
               messageSlice || '（空）',
             ].join('\n');
           }
@@ -1193,10 +1220,28 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           );
           const excerpt = fullBookText.slice(sliceStart, sliceEnd);
           return [
-            `请将以下书籍片段总结为 100-200 字，语言凝练，不剧透范围外内容。`,
-            `字符区间：${taskStart}-${taskEnd}`,
-            `总结应基于文本事实，不要虚构。`,
+            '【任务】将以下书籍片段按内容分段总结。',
             '',
+            '【格式要求】',
+            '- 每段总结前用【】包裹简短的段落标题（2-8个字）。',
+            '- 每段总结100-150字中文，语言凝练。',
+            '- 严格基于原文，禁止虚构或补充原文没有的内容，禁止涉及本片段之外的后续情节。',
+            '',
+            '【总结要素指引】',
+            '根据内容类型灵活侧重，不需要每项都写，挑最能概括这段内容的要素：',
+            '- 叙事类（小说、传记、历史）：涉及谁、什么时候、发生了什么、为什么、结果如何。',
+            '- 观点类（议论文、评论、随笔）：作者提出了什么看法、依据是什么、得出了什么结论。',
+            '- 知识类（科普、论文、教材）：讲了什么概念或现象、核心原理是什么、有什么关键数据或例子。',
+            '- 实用类（方法论、指南、工具书）：教了什么方法、适用于什么场景、关键步骤或要点是什么。',
+            '',
+            '【输出示例】',
+            '【初到小镇】',
+            '主角李明在九月初独自搬到海边小镇，起因是公司裁员后想换个环境。他在码头附近租了间旧屋，遇到房东老陈，对方提到这里冬天几乎没人住。李明嘴上说只是过渡，但内心已经有了长住的念头。',
+            '',
+            '【记忆的可塑性】',
+            '作者引用Loftus的经典实验，说明人的记忆并非像录像带一样忠实回放，而是每次回忆都在无意识中重新建构。实验中通过引导性提问，约30%的被试"记住"了从未发生的细节。作者据此论证，目击证词的可靠性被严重高估。',
+            '',
+            '【以下是需要总结的书籍片段】',
             excerpt || '（空）',
           ].join('\n');
         };
@@ -2286,8 +2331,55 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       highlightRangesByChapter,
       readingPosition,
       visibleRatio,
+      excerptCharCount: appSettings.readerMore.feature.readingExcerptCharCount,
     });
   };
+  const sessionPromptTokenEstimate: PromptTokenEstimate = useMemo(() => {
+    const readingContext = buildReadingContext();
+    return estimateConversationPromptTokens({
+      mode: 'manual',
+      sourceMessages: messages,
+      readingContext,
+      allowAiUnderlineInThisReply:
+        aiProactiveUnderlineEnabled && Math.max(0, normalizeLooseInt(aiProactiveUnderlineProbability)) > 0,
+      characterWorldBookEntries,
+      userRealName,
+      userNickname,
+      userDescription,
+      characterRealName,
+      characterNickname,
+      characterDescription,
+      activeBookTitle,
+      activeBookSummary,
+      chatHistorySummary,
+      memoryBubbleCount: readerMoreFeature.memoryBubbleCount,
+      replyBubbleMin: readerMoreFeature.replyBubbleMin,
+      replyBubbleMax: readerMoreFeature.replyBubbleMax,
+    });
+  }, [
+    messages,
+    aiProactiveUnderlineEnabled,
+    aiProactiveUnderlineProbability,
+    characterWorldBookEntries,
+    userRealName,
+    userNickname,
+    userDescription,
+    characterRealName,
+    characterNickname,
+    characterDescription,
+    activeBookTitle,
+    activeBookSummary,
+    chatHistorySummary,
+    readerMoreFeature.memoryBubbleCount,
+    readerMoreFeature.replyBubbleMin,
+    readerMoreFeature.replyBubbleMax,
+    chapters,
+    bookText,
+    highlightRangesByChapter,
+    appSettings.readerMore.feature.readingExcerptCharCount,
+    getLatestReadingPosition,
+    readerContentRef,
+  ]);
 
   const requestAiReply = async (sourceMessages: ChatBubble[]) => {
     if (isManualLoading) return;
@@ -2307,12 +2399,13 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         apiConfig,
         userRealName,
         userNickname,
+        userDescription,
         characterRealName,
         characterNickname,
         characterDescription,
         characterWorldBookEntries,
         activeBookId: activeBook?.id || null,
-        activeBookTitle: activeBook?.title || '未选择书籍',
+        activeBookTitle,
         chatHistorySummary,
         readingPrefixSummaryByBookId,
         readingContext,
@@ -2994,6 +3087,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         totalBookChars={bookText.length}
         totalMessages={messages.length}
         summaryTaskRunning={summaryTaskRunning}
+        sessionPromptTokenEstimate={sessionPromptTokenEstimate}
       />
 
       {contextMenu && !isDeleteMode && (

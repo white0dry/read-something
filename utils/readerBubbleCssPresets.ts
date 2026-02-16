@@ -9,7 +9,7 @@ const REMOVED_PRESET_IDS = new Set<string>([
 
 const REMOVED_PRESET_NAMES = new Set<string>([
   '雪笺旧梦',
-  '闆鏃фⅵ',
+  '雪笺旧梦（旧版）',
 ]);
 
 export const LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS = [

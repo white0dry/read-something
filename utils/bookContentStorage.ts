@@ -84,7 +84,7 @@ const normalizeChapter = (value: unknown): Chapter | null => {
   if (!title && !content) return null;
   const blocks = normalizeChapterBlocks((source as { blocks?: unknown }).blocks);
   return {
-    title: title || 'Untitled Chapter',
+    title: title || '未命名章节',
     content,
     ...(blocks ? { blocks } : {}),
   };
@@ -132,7 +132,7 @@ const openBookContentDb = (): Promise<IDBDatabase> => {
     };
 
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error('Failed to open book content IndexedDB'));
+    request.onerror = () => reject(request.error || new Error('打开书籍内容数据库失败'));
   });
 
   return dbPromise;
@@ -157,11 +157,11 @@ export const saveBookContent = async (bookId: string, fullText: string, chapters
       };
       store.put(payload, bookId);
     };
-    getRequest.onerror = () => reject(getRequest.error || new Error('Failed to read existing book content'));
+    getRequest.onerror = () => reject(getRequest.error || new Error('读取已有书籍内容失败'));
 
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error || new Error('Failed to save book content'));
-    tx.onabort = () => reject(tx.error || new Error('Failed to save book content'));
+    tx.onerror = () => reject(tx.error || new Error('保存书籍内容失败'));
+    tx.onabort = () => reject(tx.error || new Error('保存书籍内容失败'));
   });
 };
 
@@ -184,11 +184,11 @@ export const saveBookReaderState = async (bookId: string, readerState: ReaderBoo
       };
       store.put(payload, bookId);
     };
-    getRequest.onerror = () => reject(getRequest.error || new Error('Failed to read existing reader state'));
+    getRequest.onerror = () => reject(getRequest.error || new Error('读取已有阅读状态失败'));
 
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error || new Error('Failed to save reader state'));
-    tx.onabort = () => reject(tx.error || new Error('Failed to save reader state'));
+    tx.onerror = () => reject(tx.error || new Error('保存阅读状态失败'));
+    tx.onabort = () => reject(tx.error || new Error('保存阅读状态失败'));
   });
 };
 
@@ -220,11 +220,11 @@ export const saveBookSummaryState = async (
       };
       store.put(payload, bookId);
     };
-    getRequest.onerror = () => reject(getRequest.error || new Error('Failed to read existing summary state'));
+    getRequest.onerror = () => reject(getRequest.error || new Error('读取已有摘要状态失败'));
 
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error || new Error('Failed to save summary state'));
-    tx.onabort = () => reject(tx.error || new Error('Failed to save summary state'));
+    tx.onerror = () => reject(tx.error || new Error('保存摘要状态失败'));
+    tx.onabort = () => reject(tx.error || new Error('保存摘要状态失败'));
   });
 };
 
@@ -240,7 +240,7 @@ export const getBookContent = async (bookId: string): Promise<StoredBookContent 
       const result = normalizeStoredBookContent(request.result);
       resolve(result || null);
     };
-    request.onerror = () => reject(request.error || new Error('Failed to read book content'));
+    request.onerror = () => reject(request.error || new Error('读取书籍内容失败'));
   });
 };
 
@@ -253,8 +253,8 @@ export const deleteBookContent = async (bookId: string): Promise<void> => {
     store.delete(bookId);
 
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error || new Error('Failed to delete book content'));
-    tx.onabort = () => reject(tx.error || new Error('Failed to delete book content'));
+    tx.onerror = () => reject(tx.error || new Error('删除书籍内容失败'));
+    tx.onabort = () => reject(tx.error || new Error('删除书籍内容失败'));
   });
 };
 
@@ -352,7 +352,7 @@ export const getAllBookContents = async (): Promise<Record<string, StoredBookCon
       }
       cursor.continue();
     };
-    request.onerror = () => reject(request.error || new Error('Failed to read all book contents'));
+    request.onerror = () => reject(request.error || new Error('读取全部书籍内容失败'));
   });
 };
 
@@ -365,8 +365,8 @@ export const clearAllBookContents = async (): Promise<void> => {
     store.clear();
 
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error || new Error('Failed to clear book contents'));
-    tx.onabort = () => reject(tx.error || new Error('Failed to clear book contents'));
+    tx.onerror = () => reject(tx.error || new Error('清空书籍内容失败'));
+    tx.onabort = () => reject(tx.error || new Error('清空书籍内容失败'));
   });
 };
 
@@ -387,8 +387,8 @@ export const replaceAllBookContents = async (nextEntries: Record<string, StoredB
     });
 
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error || new Error('Failed to replace book contents'));
-    tx.onabort = () => reject(tx.error || new Error('Failed to replace book contents'));
+    tx.onerror = () => reject(tx.error || new Error('替换书籍内容失败'));
+    tx.onabort = () => reject(tx.error || new Error('替换书籍内容失败'));
   });
 };
 

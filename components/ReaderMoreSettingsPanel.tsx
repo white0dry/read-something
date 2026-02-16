@@ -1,8 +1,9 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Check, ChevronDown, Trash2, AlertTriangle, Image as ImageIcon, Link as LinkIcon, Loader2, X, RefreshCw, Save, Edit2, Palette, Settings, Archive } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, Trash2, AlertTriangle, Image as ImageIcon, Link as LinkIcon, Loader2, X, RefreshCw, Save, Edit2, Paintbrush, Wrench, MessageSquareText } from 'lucide-react';
 import { ApiPreset, AppSettings, ReaderSummaryCard } from '../types';
 import ResolvedImage from './ResolvedImage';
 import { DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID } from '../utils/readerBubbleCssPresets';
+import type { PromptTokenEstimate } from '../utils/readerAiEngine';
 
 export interface ReaderArchiveOption {
   conversationKey: string;
@@ -59,12 +60,13 @@ interface Props {
   totalBookChars: number;
   totalMessages: number;
   summaryTaskRunning: boolean;
+  sessionPromptTokenEstimate: PromptTokenEstimate;
 }
 
 const TAB_ITEMS: Array<{ key: TabKey; label: string; icon: React.ComponentType<{ size?: number }> }> = [
-  { key: 'appearance', label: '美化', icon: Palette },
-  { key: 'feature', label: '功能', icon: Settings },
-  { key: 'session', label: '会话', icon: Archive },
+  { key: 'appearance', label: '美化', icon: Paintbrush },
+  { key: 'feature', label: '功能', icon: Wrench },
+  { key: 'session', label: '会话', icon: MessageSquareText },
 ];
 const TAB_ORDER: TabKey[] = ['appearance', 'feature', 'session'];
 const BUBBLE_CSS_PLACEHOLDER = [
@@ -311,6 +313,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     totalBookChars,
     totalMessages,
     summaryTaskRunning,
+    sessionPromptTokenEstimate,
   } = props;
 
   const [tab, setTab] = useState<TabKey>('appearance');
@@ -986,6 +989,16 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
 
                 {tab === 'feature' && (
                   <div className="space-y-0">
+                    {/* 阅读原文字数 */}
+                    <div className="py-5">
+                      <div className="flex items-center justify-between">
+                        <span className={`text-sm font-bold ${headingClass}`}>阅读原文字数</span>
+                        {numInput(featureSettings.readingExcerptCharCount, (v) => onUpdateFeatureSettings({ readingExcerptCharCount: v }))}
+                      </div>
+                    </div>
+
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
+
                     {/* 记忆消息条数 */}
                     <div className="py-5">
                       <div className="flex items-center justify-between">
@@ -1099,6 +1112,32 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
 
                 {tab === 'session' && (
                   <div className="space-y-0">
+                    {/* 当前会话token */}
+                    <div className="py-5">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className={`text-sm font-bold ${headingClass}`}>当前会话token</div>
+                        <div className="text-xs text-slate-500">预估总计 {sessionPromptTokenEstimate.totalTokens}</div>
+                      </div>
+                      <div
+                        className={`rounded-2xl p-3 border ${
+                          isDarkMode
+                            ? 'bg-[#1f2937] border-slate-700/70'
+                            : 'bg-white border-slate-200 shadow-sm'
+                        }`}
+                      >
+                        <div className="space-y-2">
+                          {sessionPromptTokenEstimate.sections.map((section) => (
+                            <div key={section.key} className="flex items-center justify-between text-xs">
+                              <span className={`${headingClass} opacity-85`}>{section.label}</span>
+                              <span className="font-mono text-slate-500">{section.tokens}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
+
                     {/* 会话存档选择 */}
                     <div className="py-5">
                       <div className={`text-sm font-bold mb-3 ${headingClass}`}>会话存档选择</div>

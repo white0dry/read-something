@@ -164,6 +164,7 @@ export interface ReaderSummaryApiSettings {
 }
 
 export interface ReaderMoreFeatureSettings {
+  readingExcerptCharCount: number;
   memoryBubbleCount: number;
   replyBubbleMin: number;
   replyBubbleMax: number;

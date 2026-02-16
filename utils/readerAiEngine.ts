@@ -29,6 +29,27 @@ interface CharacterWorldBookSections {
   after: WorldBookEntry[];
 }
 
+export type PromptTokenSectionKey =
+  | 'userPersona'
+  | 'characterPersona'
+  | 'worldBook'
+  | 'bookExcerpt'
+  | 'bookSummary'
+  | 'chatRaw'
+  | 'chatSummary'
+  | 'otherInstructions';
+
+export interface PromptTokenBreakdownItem {
+  key: PromptTokenSectionKey;
+  label: string;
+  tokens: number;
+}
+
+export interface PromptTokenEstimate {
+  totalTokens: number;
+  sections: PromptTokenBreakdownItem[];
+}
+
 interface RunConversationGenerationParams {
   mode: GenerationMode;
   conversationKey: string;
@@ -36,6 +57,7 @@ interface RunConversationGenerationParams {
   apiConfig: ApiConfig;
   userRealName: string;
   userNickname: string;
+  userDescription: string;
   characterRealName: string;
   characterNickname: string;
   characterDescription: string;
@@ -79,15 +101,37 @@ type RunConversationGenerationResult =
     };
 
 const CONTEXT_VIEWPORT_TAIL_WEIGHT = 0.82;
+const DEFAULT_READING_EXCERPT_CHAR_COUNT = 800;
 const DEFAULT_MEMORY_BUBBLE_COUNT = 100;
 const DEFAULT_REPLY_BUBBLE_MIN = 3;
 const DEFAULT_REPLY_BUBBLE_MAX = 8;
+const CJK_CHAR_REGEX = /[\u3400-\u4DBF\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/g;
+const PROMPT_TOKEN_SECTION_ORDER: PromptTokenSectionKey[] = [
+  'userPersona',
+  'characterPersona',
+  'worldBook',
+  'bookExcerpt',
+  'bookSummary',
+  'chatRaw',
+  'chatSummary',
+  'otherInstructions',
+];
+const PROMPT_TOKEN_SECTION_LABELS: Record<PromptTokenSectionKey, string> = {
+  userPersona: '用户人设',
+  characterPersona: '角色人设',
+  worldBook: '世界书',
+  bookExcerpt: '书籍原文',
+  bookSummary: '书籍总结',
+  chatRaw: '聊天原文',
+  chatSummary: '聊天总结',
+  otherInstructions: '其他指令',
+};
 
 const DATA_IMAGE_REGEX = /data:image\/[a-zA-Z0-9.+-]+;base64,[a-zA-Z0-9+/=\s]+/gi;
 const IMAGE_REF_REGEX = /idb:\/\/[a-zA-Z0-9._-]+/gi;
 const IMAGE_TAG_REGEX = /<img\b[^>]*>/gi;
 const MARKDOWN_IMAGE_REGEX = /!\[[^\]]*]\((data:image[^)]+|idb:\/\/[^)]+)\)/gi;
-const IMAGE_PLACEHOLDER_REGEX = /\[(?:image|img|media|鍥剧墖|鍥惧儚)[:锛歖[^\]]*]/gi;
+const IMAGE_PLACEHOLDER_REGEX = /\[(?:image|img|media|图片|图像)[：:][^\]]*]/gi;
 
 export const sanitizeTextForAiPrompt = (raw: string) => {
   if (!raw) return '';
@@ -144,7 +188,7 @@ const ensureBubbleCount = (items: string[], minCount: number, maxCount: number) 
 
   const raw = compactText(lines.join(' '));
   const splitByPunctuation = raw
-    .split(/[銆傦紒锛??锛?\n]+/)
+    .split(/[。！？?!\n]+/)
     .map(compactText)
     .filter(Boolean);
 
@@ -161,7 +205,7 @@ const ensureBubbleCount = (items: string[], minCount: number, maxCount: number) 
     if (chunks.length > 0) lines = chunks;
   }
 
-  const fallback = lines[0] || '鏀跺埌';
+  const fallback = lines[0] || '收到';
   while (lines.length < minCount) {
     lines.push(fallback);
   }
@@ -183,7 +227,7 @@ const normalizeAiBubbleLines = (raw: string, minCount: number, maxCount: number)
 
   const lines = cleaned.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const marked = lines
-    .map((line) => line.match(/^\[姘旀场\]\s*(.+)$/)?.[1] || line.match(/^銆愭皵娉°€慭s*(.+)$/)?.[1] || '')
+    .map((line) => line.match(/^\[气泡\]\s*(.+)$/)?.[1] || line.match(/^【气泡】\s*(.+)$/)?.[1] || '')
     .map(compactText)
     .filter(Boolean);
   if (marked.length > 0) return ensureBubbleCount(marked, minCount, maxCount);
@@ -201,7 +245,7 @@ const parseAiReplyPayload = (raw: string): ParsedAiReply => {
   const bubbleLines: string[] = [];
 
   lines.forEach((line) => {
-    const matched = line.match(/^\s*\[鍒掔嚎\]\s*(.+)\s*$/);
+    const matched = line.match(/^\s*\[划线\]\s*(.+)\s*$/);
     if (matched) {
       if (!firstUnderline) {
         const text = compactText(matched[1] || '');
@@ -373,20 +417,15 @@ const sortWorldBookEntriesByCode = (entries: WorldBookEntry[]) =>
     .map((item) => item.entry);
 
 const formatWorldBookSection = (entries: WorldBookEntry[], title: string) => {
-  if (entries.length === 0) return `${title}:(none)`;
-  return [
-    `${title}:`,
-    ...entries.map((entry, index) => {
-      const code = getWorldBookOrderCode(entry);
-      const codeText = Number.isFinite(code) ? code.toString() : '-';
-      const entryTitle = entry.title?.trim() || `Entry ${index + 1}`;
-      const entryContent = entry.content?.trim() || '(empty)';
-      return `[WorldBook-${index + 1} | code:${codeText} | category:${entry.category}] ${entryTitle}\n${entryContent}`;
-    }),
-  ].join('\n');
+  if (entries.length === 0) return `${title}\n（无）`;
+  const contents = entries
+    .map((entry) => compactText(entry.content || ''))
+    .filter(Boolean);
+  if (contents.length === 0) return `${title}\n（无）`;
+  return [title, ...contents].join('\n');
 };
 
-const buildAiPrompt = (params: {
+interface BuildAiPromptParams {
   mode: GenerationMode;
   sourceMessages: ChatBubble[];
   pendingMessages: ChatBubble[];
@@ -395,6 +434,7 @@ const buildAiPrompt = (params: {
   characterWorldBookEntries: CharacterWorldBookSections;
   userRealName: string;
   userNickname: string;
+  userDescription: string;
   characterRealName: string;
   characterNickname: string;
   characterDescription: string;
@@ -404,7 +444,47 @@ const buildAiPrompt = (params: {
   memoryBubbleCount: number;
   replyBubbleMin: number;
   replyBubbleMax: number;
-}) => {
+}
+
+interface PromptLineItem {
+  section: PromptTokenSectionKey;
+  text: string;
+}
+
+interface EstimateConversationPromptTokensParams {
+  mode: GenerationMode;
+  sourceMessages: ChatBubble[];
+  pendingMessages?: ChatBubble[];
+  readingContext: ReadingContextSnapshot;
+  allowAiUnderlineInThisReply?: boolean;
+  characterWorldBookEntries: CharacterWorldBookSections;
+  userRealName: string;
+  userNickname: string;
+  userDescription: string;
+  characterRealName: string;
+  characterNickname: string;
+  characterDescription: string;
+  activeBookTitle: string;
+  activeBookSummary: string;
+  chatHistorySummary: string;
+  memoryBubbleCount?: number;
+  replyBubbleMin?: number;
+  replyBubbleMax?: number;
+}
+
+const pushPromptLine = (target: PromptLineItem[], section: PromptTokenSectionKey, text: string) => {
+  target.push({ section, text });
+};
+
+const estimateTokensByText = (raw: string) => {
+  const text = raw.trim();
+  if (!text) return 0;
+  const cjkCount = (text.match(CJK_CHAR_REGEX) || []).length;
+  const nonCjkLength = text.replace(CJK_CHAR_REGEX, '').replace(/\s+/g, '').length;
+  return Math.max(1, cjkCount + Math.ceil(nonCjkLength / 4));
+};
+
+const buildAiPromptLineItems = (params: BuildAiPromptParams): PromptLineItem[] => {
   const {
     mode,
     sourceMessages,
@@ -414,8 +494,8 @@ const buildAiPrompt = (params: {
     characterWorldBookEntries,
     userRealName,
     userNickname,
+    userDescription,
     characterRealName,
-    characterNickname,
     characterDescription,
     activeBookTitle,
     activeBookSummary,
@@ -437,7 +517,7 @@ const buildAiPrompt = (params: {
     pendingMessages.length > 0
       ? pendingMessages.map((message) => message.promptRecord).join('\n')
       : mode === 'proactive'
-        ? '（本轮为角色主动发起，无待回复用户消息）'
+        ? `（这次是你主动找${userNickname}聊的）`
         : latestUserRecord;
 
   const safeExcerpt = sanitizeTextForAiPrompt(excerpt);
@@ -447,72 +527,175 @@ const buildAiPrompt = (params: {
   const safeChatHistorySummary = sanitizeTextForAiPrompt(chatHistorySummary);
   const safeRecentHistory = sanitizeTextForAiPrompt(recentHistory);
   const safePendingRecordText = sanitizeTextForAiPrompt(pendingRecordText);
+  const safeUserDescription = sanitizeTextForAiPrompt(userDescription);
 
   const proactiveUnderlineRule = allowAiUnderlineInThisReply
-    ? '【主动划线规则】你可以额外输出 0 或 1 行 `[划线] 文本`，且该文本必须来自当前前文原句。'
-    : '【主动划线规则】本轮不要输出任何 `[划线]` 行。';
+    ? '【划线规则】如果读到触动你的句子，可以额外输出 0 或 1 行 `[划线] 文本`，这句话必须是当前读到的书中原句，禁止编造。'
+    : '【划线规则】这次聊天不需要划线，不要输出任何 `[划线]` 行。';
   const triggerModeRule =
     mode === 'proactive'
-      ? '【触发方式】本轮是角色主动发起消息，不是对用户输入的被动回复。'
-      : '【触发方式】本轮是用户手动请求你的回复。';
+      ? `【怎么聊】这次是你主动找${userNickname}说话——也许是读到了什么有感触的地方，也许只是想聊聊。`
+      : `【怎么聊】这次是${userNickname}先开口找你聊的，好好回应吧。`;
 
-  return [
-    `你是角色 ${characterRealName}。`,
-    `你的聊天显示名是 ${characterNickname}。`,
-    `当前共读用户真实名：${userRealName}。`,
-    `当前共读用户显示名：${userNickname}。`,
-    triggerModeRule,
-    '',
-    formatWorldBookSection(characterWorldBookEntries.before, '【世界书-角色定义前】'),
-    '【角色设定】',
-    characterDescription,
-    formatWorldBookSection(characterWorldBookEntries.after, '【世界书-角色定义后】'),
-    '',
-    `【当前书籍】${activeBookTitle || '未选择书籍'}`,
-    `【书籍前文总结】${safeActiveBookSummary || '（尚未生成）'}`,
-    `【聊天前文总结】${safeChatHistorySummary || '（尚未生成）'}`,
-    '',
-    '【当前阅读进度前文（最多800字符）】',
-    safeHasReadableExcerpt ? safeExcerpt : '（当前无可用前文）',
-    '',
-    '【前文中的高亮重点】',
-    safeHighlightedSnippets.length > 0 ? safeHighlightedSnippets.map((item) => `- ${item}`).join('\n') : '（暂无）',
-    safeHighlightedSnippets.length === 0 ? '【高亮状态】当前没有任何高亮句子，禁止编造高亮内容。' : '',
-    '',
-    '【最近聊天记录】',
-    `【本轮记忆条数】${memoryBubbleCount}`,
-    safeRecentHistory || '（暂无）',
-    '',
-    '【本轮待回复用户消息】',
-    safePendingRecordText || '（暂无）',
-    '',
-    '【场景与语气要求】',
-    '- 当前场景是两人正在共读同一本书。',
-    '- 语气要口语化、短句、像即时聊天。',
-    '- 不能剧透用户尚未阅读到的后文。',
-    '- 如果高亮重点为空，不要提及任何不存在的高亮句子。',
-    proactiveUnderlineRule,
-    '',
-    '【输出格式要求（必须严格遵守）】',
-    `- 只输出 ${replyBubbleMin} 到 ${replyBubbleMax} 行。`,
-    '- 每一行必须以 [气泡] 开头。',
-    '- [气泡] 后面只写一条聊天消息。',
-    '- `[划线]` 行最多 1 行，且可选。',
-    '- 不要输出解释、标题、编号或代码块。',
-    '',
-    '[气泡] 示例',
-    '[气泡] 继续示例',
-    '[气泡] 结束示例',
-  ]
+  const lines: PromptLineItem[] = [];
+  pushPromptLine(lines, 'otherInstructions', '<identity>');
+  pushPromptLine(lines, 'characterPersona', `你现在就是 ${characterRealName}，用Ta的方式去感受、去说话。`);
+  pushPromptLine(lines, 'userPersona', `和你一起读书的人叫${userRealName}，不过你叫Ta「${userNickname}」。`);
+  pushPromptLine(lines, 'otherInstructions', triggerModeRule);
+  pushPromptLine(lines, 'otherInstructions', '</identity>');
+  pushPromptLine(lines, 'otherInstructions', '');
+  pushPromptLine(lines, 'otherInstructions', '<user_profile>');
+  pushPromptLine(lines, 'userPersona', `【${userRealName}的信息】`);
+  pushPromptLine(lines, 'userPersona', safeUserDescription || '（暂无用户信息）');
+  pushPromptLine(lines, 'otherInstructions', '</user_profile>');
+  pushPromptLine(lines, 'otherInstructions', '');
+  pushPromptLine(lines, 'otherInstructions', '<char_profile');
+  pushPromptLine(lines, 'worldBook', formatWorldBookSection(characterWorldBookEntries.before, '【以下是补充信息】'));
+  pushPromptLine(lines, 'characterPersona', '【你是谁】');
+  pushPromptLine(lines, 'characterPersona', characterDescription);
+  pushPromptLine(lines, 'worldBook', formatWorldBookSection(characterWorldBookEntries.after, '【以下是补充信息】'));
+  pushPromptLine(lines, 'otherInstructions', '</char_profile>');
+  pushPromptLine(lines, 'otherInstructions', '');
+  pushPromptLine(lines, 'otherInstructions', '<book_context>');
+  pushPromptLine(lines, 'otherInstructions', `【你们在读的书】${activeBookTitle || '还没选好要读什么'}`);
+  pushPromptLine(lines, 'bookSummary', `【书籍前文梗概】${safeActiveBookSummary || '（还没整理出来）'}`);
+  pushPromptLine(lines, 'otherInstructions', '');
+  pushPromptLine(lines, 'otherInstructions', '【现在读到的书籍内容】');
+  pushPromptLine(lines, 'bookExcerpt', safeHasReadableExcerpt ? safeExcerpt : '（暂时还没加载出来）');
+  pushPromptLine(lines, 'otherInstructions', '');
+  pushPromptLine(lines, 'otherInstructions', `【「${userNickname}」印象深刻的句子】`);
+  pushPromptLine(
+    lines,
+    'bookExcerpt',
+    safeHighlightedSnippets.length > 0
+      ? safeHighlightedSnippets.map((item) => `- ${item}`).join('\n')
+      : '（目前还没有）'
+  );
+  pushPromptLine(
+    lines,
+    'otherInstructions',
+    safeHighlightedSnippets.length === 0
+      ? '【注意】现在没有任何被标记的句子，不要假装有，禁止编造。'
+      : ''
+  );
+  pushPromptLine(lines, 'otherInstructions', '</book_context>');
+  pushPromptLine(lines, 'otherInstructions', '');
+  pushPromptLine(lines, 'otherInstructions', '<chat_history>');
+  pushPromptLine(lines, 'chatSummary', `【之前聊天话题】${safeChatHistorySummary || '（还未整理）'}`);
+  pushPromptLine(lines, 'otherInstructions', '');
+  pushPromptLine(lines, 'otherInstructions', '【最近的聊天记录】');
+  pushPromptLine(lines, 'chatRaw', safeRecentHistory || '（你们还没开始聊）');
+  pushPromptLine(lines, 'otherInstructions', '</chat_history>');
+  pushPromptLine(lines, 'otherInstructions', '');
+  pushPromptLine(lines, 'otherInstructions', '<pending_message>');
+  pushPromptLine(lines, 'otherInstructions', `【${userNickname}刚刚说的】`);
+  pushPromptLine(lines, 'chatRaw', safePendingRecordText || '（没有新消息）');
+  pushPromptLine(lines, 'otherInstructions', '</pending_message>');
+  pushPromptLine(lines, 'otherInstructions', '');
+  pushPromptLine(lines, 'otherInstructions', '<tone_and_style>');
+  pushPromptLine(lines, 'otherInstructions', `- 现在的场景是你和${userNickname}在一起读同一本书，随时可以聊两句。`);
+  pushPromptLine(lines, 'otherInstructions', '- 说话要自然、口语化、短句，可省略标点，像在手机上打字聊天。');
+  pushPromptLine(lines, 'otherInstructions', `- ${userNickname}还没读到后面的内容，绝对不能剧透。`);
+  pushPromptLine(lines, 'otherInstructions', '- 如果没有被标记的句子，不要提任何不存在的标记内容。');
+  pushPromptLine(lines, 'otherInstructions', proactiveUnderlineRule);
+  pushPromptLine(lines, 'otherInstructions', '</tone_and_style>');
+  pushPromptLine(lines, 'otherInstructions', '');
+  pushPromptLine(lines, 'otherInstructions', '<output_format>');
+  pushPromptLine(lines, 'otherInstructions', '【回复格式（务必严格遵守，不能有任何例外）】');
+  pushPromptLine(lines, 'otherInstructions', `- 只分行回复 ${replyBubbleMin} 到 ${replyBubbleMax} 条消息。`);
+  pushPromptLine(lines, 'otherInstructions', '- 每条消息必须以 [气泡] 开头。');
+  pushPromptLine(lines, 'otherInstructions', '- [气泡] 后面写一条自然的聊天消息。');
+  pushPromptLine(
+    lines,
+    'otherInstructions',
+    allowAiUnderlineInThisReply
+      ? '- 每条划线消息必须以 [划线] 开头，最多出现 1 行，可以不写。'
+      : ''
+  );
+  pushPromptLine(lines, 'otherInstructions', '- 不要输出任何解释、标题、编号或代码块。');
+  pushPromptLine(lines, 'otherInstructions', '');
+  pushPromptLine(lines, 'otherInstructions', '[气泡] 示例');
+  pushPromptLine(lines, 'otherInstructions', '[气泡] 继续示例');
+  pushPromptLine(lines, 'otherInstructions', '[气泡] 结束示例');
+  pushPromptLine(lines, 'otherInstructions', '</output_format>');
+  return lines;
+};
+
+const buildAiPrompt = (params: BuildAiPromptParams) =>
+  buildAiPromptLineItems(params)
+    .map((item) => item.text)
     .filter(Boolean)
     .join('\n');
-};
 
 const getManualPendingMessages = (sourceMessages: ChatBubble[]) => {
   const pending = sourceMessages.filter((message) => message.sender === 'user' && !message.sentToAi);
   const lastMessage = sourceMessages[sourceMessages.length - 1] || null;
   const fallbackLatestUserMessage = pending.length === 0 && lastMessage?.sender === 'user' ? lastMessage : null;
   return fallbackLatestUserMessage ? [fallbackLatestUserMessage] : pending;
+};
+
+export const estimateConversationPromptTokens = (
+  params: EstimateConversationPromptTokensParams
+): PromptTokenEstimate => {
+  const memoryCountRaw = Number(params.memoryBubbleCount);
+  const normalizedMemoryBubbleCount = Number.isFinite(memoryCountRaw)
+    ? Math.round(memoryCountRaw)
+    : DEFAULT_MEMORY_BUBBLE_COUNT;
+  const replyMinRaw = Number(params.replyBubbleMin);
+  const normalizedReplyMin = Number.isFinite(replyMinRaw)
+    ? Math.round(replyMinRaw)
+    : DEFAULT_REPLY_BUBBLE_MIN;
+  const replyMaxRaw = Number(params.replyBubbleMax);
+  const normalizedReplyMax = Number.isFinite(replyMaxRaw)
+    ? Math.round(replyMaxRaw)
+    : DEFAULT_REPLY_BUBBLE_MAX;
+  const resolvedReplyBubbleMin = Math.min(normalizedReplyMin, normalizedReplyMax);
+  const resolvedReplyBubbleMax = Math.max(normalizedReplyMin, normalizedReplyMax);
+  const pendingMessages =
+    params.pendingMessages || (params.mode === 'manual' ? getManualPendingMessages(params.sourceMessages) : []);
+  const promptLines = buildAiPromptLineItems({
+    mode: params.mode,
+    sourceMessages: params.sourceMessages,
+    pendingMessages,
+    readingContext: params.readingContext,
+    allowAiUnderlineInThisReply: Boolean(params.allowAiUnderlineInThisReply),
+    characterWorldBookEntries: params.characterWorldBookEntries,
+    userRealName: params.userRealName,
+    userNickname: params.userNickname,
+    userDescription: params.userDescription,
+    characterRealName: params.characterRealName,
+    characterNickname: params.characterNickname,
+    characterDescription: params.characterDescription,
+    activeBookTitle: params.activeBookTitle,
+    activeBookSummary: params.activeBookSummary,
+    chatHistorySummary: params.chatHistorySummary,
+    memoryBubbleCount: normalizedMemoryBubbleCount,
+    replyBubbleMin: resolvedReplyBubbleMin,
+    replyBubbleMax: resolvedReplyBubbleMax,
+  });
+
+  const sectionTexts = PROMPT_TOKEN_SECTION_ORDER.reduce<Record<PromptTokenSectionKey, string>>((acc, key) => {
+    acc[key] = '';
+    return acc;
+  }, {} as Record<PromptTokenSectionKey, string>);
+
+  promptLines.forEach((line) => {
+    if (!line.text) return;
+    sectionTexts[line.section] = sectionTexts[line.section]
+      ? `${sectionTexts[line.section]}\n${line.text}`
+      : line.text;
+  });
+
+  const sections = PROMPT_TOKEN_SECTION_ORDER.map((key) => ({
+    key,
+    label: PROMPT_TOKEN_SECTION_LABELS[key],
+    tokens: estimateTokensByText(sectionTexts[key]),
+  }));
+
+  return {
+    totalTokens: sections.reduce((sum, item) => sum + item.tokens, 0),
+    sections,
+  };
 };
 
 export const buildCharacterWorldBookSections = (
@@ -541,9 +724,15 @@ export const buildReadingContextSnapshot = (params: {
   highlightRangesByChapter: Record<string, ReaderHighlightRange[]>;
   readingPosition: ReaderPositionState | null;
   visibleRatio?: number;
+  excerptCharCount?: number;
 }): ReadingContextSnapshot => {
   const { chapters, bookText, highlightRangesByChapter, readingPosition } = params;
   const visibleRatio = clamp(params.visibleRatio || 0, 0, 1);
+  const excerptCharCountRaw = Number(params.excerptCharCount);
+  const excerptCharCount =
+    Number.isFinite(excerptCharCountRaw)
+      ? Math.max(0, Math.round(excerptCharCountRaw))
+      : DEFAULT_READING_EXCERPT_CHAR_COUNT;
 
   const chapterMeta =
     chapters.length > 0
@@ -616,7 +805,7 @@ export const buildReadingContextSnapshot = (params: {
   }
 
   contextEnd = clamp(contextEnd, 0, totalNormalizedLength);
-  const start = clamp(contextEnd - 800, 0, contextEnd);
+  const start = clamp(contextEnd - excerptCharCount, 0, contextEnd);
   const excerpt = joinedBookText.slice(start, contextEnd);
 
   const highlightedSnippets: string[] = [];
@@ -680,6 +869,7 @@ export const runConversationGeneration = async (
     apiConfig,
     userRealName,
     userNickname,
+    userDescription,
     characterRealName,
     characterNickname,
     characterDescription,
@@ -779,6 +969,7 @@ export const runConversationGeneration = async (
       characterWorldBookEntries,
       userRealName,
       userNickname,
+      userDescription,
       characterRealName,
       characterNickname,
       characterDescription,

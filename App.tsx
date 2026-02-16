@@ -56,6 +56,7 @@ const DEFAULT_READER_MORE_SETTINGS = {
     selectedBubbleCssPresetId: DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID as string | null,
   },
   feature: {
+    readingExcerptCharCount: 800,
     memoryBubbleCount: 100,
     replyBubbleMin: 3,
     replyBubbleMax: 8,
@@ -209,6 +210,10 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
       selectedBubbleCssPresetId,
     },
     feature: {
+      readingExcerptCharCount:
+        typeof featureSource.readingExcerptCharCount === 'number' && Number.isFinite(featureSource.readingExcerptCharCount)
+          ? Math.round(featureSource.readingExcerptCharCount)
+          : DEFAULT_READER_MORE_SETTINGS.feature.readingExcerptCharCount,
       memoryBubbleCount:
         typeof featureSource.memoryBubbleCount === 'number' && Number.isFinite(featureSource.memoryBubbleCount)
           ? Math.round(featureSource.memoryBubbleCount)
@@ -1097,6 +1102,7 @@ const App: React.FC = () => {
           highlightRangesByChapter: readerState?.highlightsByChapter || {},
           readingPosition: readerState?.readingPosition || null,
           visibleRatio: 0,
+          excerptCharCount: appSettings.readerMore.feature.readingExcerptCharCount,
         });
 
         const conversationKey = buildConversationKey(targetBook.id, activePersonaId, activeCharacterId);
@@ -1108,6 +1114,7 @@ const App: React.FC = () => {
           apiConfig,
           userRealName: activePersona.name?.trim() || 'User',
           userNickname: activePersona.userNickname?.trim() || activePersona.name?.trim() || 'User',
+          userDescription: activePersona.description?.trim() || '（暂无用户人设）',
           characterRealName: activeCharacter.name?.trim() || 'Char',
           characterNickname: activeCharacter.nickname?.trim() || activeCharacter.name?.trim() || 'Char',
           characterDescription: activeCharacter.description?.trim() || '（暂无角色人设）',
@@ -1161,6 +1168,7 @@ const App: React.FC = () => {
     appSettings.commentProbability,
     appSettings.aiProactiveUnderlineEnabled,
     appSettings.aiProactiveUnderlineProbability,
+    appSettings.readerMore.feature.readingExcerptCharCount,
     appSettings.readerMore.feature.memoryBubbleCount,
     appSettings.readerMore.feature.replyBubbleMin,
     appSettings.readerMore.feature.replyBubbleMax,
