@@ -515,6 +515,8 @@ const App: React.FC = () => {
   const proactiveNextPlannedAtRef = useRef<number | null>(null);
   const keepAliveAudioRef = useRef<HTMLAudioElement | null>(null);
   const keepAliveUnlockCleanupRef = useRef<(() => void) | null>(null);
+  const activeCommentsEnabledRef = useRef(false);
+  const proactiveLoopTokenRef = useRef(0);
 
   // --- PERSISTENT STATE ---
 
@@ -975,43 +977,33 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
+    activeCommentsEnabledRef.current = appSettings.activeCommentsEnabled;
+  }, [appSettings.activeCommentsEnabled]);
+
+  useEffect(() => {
     const clearUnlockListeners = () => {
       if (!keepAliveUnlockCleanupRef.current) return;
       keepAliveUnlockCleanupRef.current();
       keepAliveUnlockCleanupRef.current = null;
     };
 
-    const stopAudio = () => {
-      const audio = keepAliveAudioRef.current;
-      if (!audio) return;
-      audio.pause();
-      audio.currentTime = 0;
-    };
-
-    if (!appSettings.activeCommentsEnabled) {
-      clearUnlockListeners();
-      stopAudio();
-      return;
-    }
-
-    let audio = keepAliveAudioRef.current;
-    if (!audio) {
-      audio = new Audio(KEEP_ALIVE_SILENT_AUDIO_URL);
-      audio.loop = true;
-      audio.preload = 'auto';
-      audio.playsInline = true;
-      keepAliveAudioRef.current = audio;
-    } else {
+    const ensureAudioReady = () => {
+      let audio = keepAliveAudioRef.current;
+      if (!audio) {
+        audio = new Audio(KEEP_ALIVE_SILENT_AUDIO_URL);
+        keepAliveAudioRef.current = audio;
+      }
       if (!audio.src || !audio.src.includes(KEEP_ALIVE_SILENT_AUDIO_URL)) {
         audio.src = KEEP_ALIVE_SILENT_AUDIO_URL;
       }
       audio.loop = true;
       audio.preload = 'auto';
       audio.playsInline = true;
-    }
+      return audio;
+    };
 
     const tryPlayAudio = () => {
-      const currentAudio = keepAliveAudioRef.current;
+      const currentAudio = ensureAudioReady();
       if (!currentAudio) return;
       const playPromise = currentAudio.play();
       if (!playPromise || typeof playPromise.catch !== 'function') return;
@@ -1036,17 +1028,40 @@ const App: React.FC = () => {
       });
     };
 
+    const handleVisibilityResume = () => {
+      if (document.visibilityState !== 'visible') return;
+      tryPlayAudio();
+    };
+
+    const handleWindowFocus = () => {
+      tryPlayAudio();
+    };
+
     tryPlayAudio();
+    document.addEventListener('visibilitychange', handleVisibilityResume);
+    window.addEventListener('focus', handleWindowFocus);
+    window.addEventListener('pageshow', handleWindowFocus);
 
     return () => {
-      if (!appSettings.activeCommentsEnabled) {
-        clearUnlockListeners();
-        stopAudio();
-      }
+      clearUnlockListeners();
+      document.removeEventListener('visibilitychange', handleVisibilityResume);
+      window.removeEventListener('focus', handleWindowFocus);
+      window.removeEventListener('pageshow', handleWindowFocus);
+      const audio = keepAliveAudioRef.current;
+      if (!audio) return;
+      audio.pause();
+      audio.currentTime = 0;
     };
-  }, [appSettings.activeCommentsEnabled]);
+  }, []);
 
   useEffect(() => {
+    activeCommentsEnabledRef.current = appSettings.activeCommentsEnabled;
+    const loopToken = proactiveLoopTokenRef.current + 1;
+    proactiveLoopTokenRef.current = loopToken;
+
+    const isLoopActive = () =>
+      proactiveLoopTokenRef.current === loopToken && activeCommentsEnabledRef.current;
+
     const clearProactiveTimer = () => {
       if (proactiveTimerRef.current) {
         window.clearTimeout(proactiveTimerRef.current);
@@ -1059,11 +1074,12 @@ const App: React.FC = () => {
     const probability = Math.min(100, Math.max(0, Math.round(appSettings.commentProbability)));
 
     const scheduleNextCheck = () => {
-      if (!appSettings.activeCommentsEnabled) return;
+      if (!isLoopActive()) return;
       clearProactiveTimer();
       const plannedAt = Date.now() + intervalMs;
       proactiveNextPlannedAtRef.current = plannedAt;
       proactiveTimerRef.current = window.setTimeout(() => {
+        if (!isLoopActive()) return;
         void runProactiveCheck(plannedAt);
       }, intervalMs);
     };
@@ -1073,7 +1089,7 @@ const App: React.FC = () => {
       proactiveNextPlannedAtRef.current = null;
 
       try {
-        if (!appSettings.activeCommentsEnabled) return;
+        if (!isLoopActive()) return;
 
         const delayMs = Date.now() - plannedAt;
         const maxAcceptedDelay = Math.max(PROACTIVE_DELAY_TOLERANCE_MS, Math.floor(intervalMs * 0.5));
@@ -1095,6 +1111,7 @@ const App: React.FC = () => {
         if (!activePersona || !activeCharacter) return;
 
         const content = await getBookContent(targetBook.id).catch(() => null);
+        if (!isLoopActive()) return;
         const readerState = content?.readerState;
         const readingContext = buildReadingContextSnapshot({
           chapters: content?.chapters || [],
@@ -1131,6 +1148,7 @@ const App: React.FC = () => {
           replyBubbleMax: appSettings.readerMore.feature.replyBubbleMax,
           allowEmptyPending: true,
         });
+        if (!isLoopActive()) return;
         if (result.status !== 'ok') return;
 
         persistConversationBucket(
@@ -1142,23 +1160,28 @@ const App: React.FC = () => {
           'app-proactive'
         );
       } finally {
-        scheduleNextCheck();
+        if (isLoopActive()) {
+          scheduleNextCheck();
+        }
       }
     };
 
     const handleVisibilityChange = () => {
-      if (!appSettings.activeCommentsEnabled) return;
+      if (!isLoopActive()) return;
       if (document.visibilityState !== 'visible') return;
       scheduleNextCheck();
     };
 
     clearProactiveTimer();
-    if (appSettings.activeCommentsEnabled) {
+    if (isLoopActive()) {
       scheduleNextCheck();
       document.addEventListener('visibilitychange', handleVisibilityChange);
     }
 
     return () => {
+      if (proactiveLoopTokenRef.current === loopToken) {
+        proactiveLoopTokenRef.current += 1;
+      }
       clearProactiveTimer();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };

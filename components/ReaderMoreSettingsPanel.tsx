@@ -329,8 +329,11 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
   const [chatRangeDraft, setChatRangeDraft] = useState({ start: '1', end: '1' });
   const [selectedBookSummaryCardIds, setSelectedBookSummaryCardIds] = useState<string[]>([]);
   const [selectedChatSummaryCardIds, setSelectedChatSummaryCardIds] = useState<string[]>([]);
+  const [pendingArchiveDelete, setPendingArchiveDelete] = useState<ReaderArchiveOption | null>(null);
+  const [archiveDeleteDialogClosing, setArchiveDeleteDialogClosing] = useState(false);
   const closeTimerRef = useRef<number | null>(null);
   const modalCloseTimerRef = useRef<number | null>(null);
+  const archiveDeleteDialogTimerRef = useRef<number | null>(null);
   const prevModalRef = useRef<ModalType>('none');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const contentScrollRef = useRef<HTMLDivElement>(null);
@@ -346,17 +349,36 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     if (!rendered) return;
     setClosing(true);
     closeTimerRef.current = window.setTimeout(() => {
-      if (modalCloseTimerRef.current) window.clearTimeout(modalCloseTimerRef.current);
+      if (modalCloseTimerRef.current) {
+        window.clearTimeout(modalCloseTimerRef.current);
+        modalCloseTimerRef.current = null;
+      }
+      if (archiveDeleteDialogTimerRef.current) {
+        window.clearTimeout(archiveDeleteDialogTimerRef.current);
+        archiveDeleteDialogTimerRef.current = null;
+      }
       setRendered(false);
       setClosing(false);
       setModalClosing(false);
       setModal('none');
+      setArchiveDeleteDialogClosing(false);
+      setPendingArchiveDelete(null);
     }, PANEL_VIEW_TRANSITION_MS);
   }, [isOpen, rendered]);
 
   useEffect(() => () => {
-    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
-    if (modalCloseTimerRef.current) window.clearTimeout(modalCloseTimerRef.current);
+    if (closeTimerRef.current) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    if (modalCloseTimerRef.current) {
+      window.clearTimeout(modalCloseTimerRef.current);
+      modalCloseTimerRef.current = null;
+    }
+    if (archiveDeleteDialogTimerRef.current) {
+      window.clearTimeout(archiveDeleteDialogTimerRef.current);
+      archiveDeleteDialogTimerRef.current = null;
+    }
   }, []);
   useEffect(() => {
     const prevModal = prevModalRef.current;
@@ -488,6 +510,35 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
       setModal('none');
       setModalClosing(false);
     }, MODAL_FADE_TRANSITION_MS);
+  };
+  const requestArchiveDelete = (archive: ReaderArchiveOption) => {
+    if (archiveDeleteDialogTimerRef.current) {
+      window.clearTimeout(archiveDeleteDialogTimerRef.current);
+      archiveDeleteDialogTimerRef.current = null;
+    }
+    setArchiveDeleteDialogClosing(false);
+    setPendingArchiveDelete(archive);
+  };
+  const closeArchiveDeleteDialog = () => {
+    if (!pendingArchiveDelete) return;
+    if (archiveDeleteDialogTimerRef.current) {
+      window.clearTimeout(archiveDeleteDialogTimerRef.current);
+      archiveDeleteDialogTimerRef.current = null;
+    }
+    setArchiveDeleteDialogClosing(true);
+    archiveDeleteDialogTimerRef.current = window.setTimeout(() => {
+      setPendingArchiveDelete(null);
+      setArchiveDeleteDialogClosing(false);
+      archiveDeleteDialogTimerRef.current = null;
+    }, MODAL_FADE_TRANSITION_MS);
+  };
+  const cancelArchiveDelete = () => {
+    closeArchiveDeleteDialog();
+  };
+  const confirmArchiveDelete = () => {
+    if (!pendingArchiveDelete || !onDeleteArchive) return;
+    onDeleteArchive(pendingArchiveDelete.conversationKey);
+    closeArchiveDeleteDialog();
   };
 
   useEffect(() => {
@@ -1173,7 +1224,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                                 {onDeleteArchive && (
                                   <button
                                     type="button"
-                                    onClick={() => onDeleteArchive(a.conversationKey)}
+                                    onClick={() => requestArchiveDelete(a)}
                                     className={`w-5 h-5 rounded-full flex items-center justify-center transition-all ${enabledDangerIconButtonClass}`}
                                     title="删除会话存档"
                                   >
@@ -1231,6 +1282,41 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
       </div>
       {renderSummaryModal()}
       {renderBgUrlModal()}
+      {pendingArchiveDelete && (
+        <div className={`fixed inset-0 z-[96] flex items-center justify-center p-6 ${archiveDeleteDialogClosing ? 'app-fade-exit' : 'app-fade-enter'}`}>
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/45 backdrop-blur-sm"
+            onClick={cancelArchiveDelete}
+          />
+          <div className={`relative w-full max-w-sm rounded-2xl p-6 border shadow-2xl ${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'bg-[#e0e5ec] border-white/50'} ${archiveDeleteDialogClosing ? 'app-fade-exit' : 'app-fade-enter'}`}>
+            <div className={`text-base font-bold mb-2 ${headingClass}`}>确认删除</div>
+            <div className="text-sm text-slate-500 leading-relaxed">
+              是否删除会话存档
+              <span className={isDarkMode ? 'text-slate-200' : 'text-slate-700'}>
+                {` “${pendingArchiveDelete.personaName} × ${pendingArchiveDelete.characterName}”`}
+              </span>
+              ？
+            </div>
+            <div className="mt-5 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={cancelArchiveDelete}
+                className={`flex-1 h-10 rounded-full text-sm font-bold ${btnClass} ${activeBtnClass} transition-all`}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={confirmArchiveDelete}
+                className="flex-1 h-10 rounded-full text-sm font-bold text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 };

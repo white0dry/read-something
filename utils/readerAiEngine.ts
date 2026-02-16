@@ -534,7 +534,7 @@ const buildAiPromptLineItems = (params: BuildAiPromptParams): PromptLineItem[] =
     : '【划线规则】这次聊天不需要划线，不要输出任何 `[划线]` 行。';
   const triggerModeRule =
     mode === 'proactive'
-      ? `【怎么聊】这次是你主动找${userNickname}说话——也许是读到了什么有感触的地方，也许只是想聊聊。`
+      ? `【怎么聊】这次是你主动找${userNickname}说话——也许是读到了什么有感触的地方，也许只是想聊聊，如果有没回应的${userNickname}信息，先好好回应。`
       : `【怎么聊】这次是${userNickname}先开口找你聊的，好好回应吧。`;
 
   const lines: PromptLineItem[] = [];
@@ -586,11 +586,6 @@ const buildAiPromptLineItems = (params: BuildAiPromptParams): PromptLineItem[] =
   pushPromptLine(lines, 'otherInstructions', '【最近的聊天记录】');
   pushPromptLine(lines, 'chatRaw', safeRecentHistory || '（你们还没开始聊）');
   pushPromptLine(lines, 'otherInstructions', '</chat_history>');
-  pushPromptLine(lines, 'otherInstructions', '');
-  pushPromptLine(lines, 'otherInstructions', '<pending_message>');
-  pushPromptLine(lines, 'otherInstructions', `【${userNickname}刚刚说的】`);
-  pushPromptLine(lines, 'chatRaw', safePendingRecordText || '（没有新消息）');
-  pushPromptLine(lines, 'otherInstructions', '</pending_message>');
   pushPromptLine(lines, 'otherInstructions', '');
   pushPromptLine(lines, 'otherInstructions', '<tone_and_style>');
   pushPromptLine(lines, 'otherInstructions', `- 现在的场景是你和${userNickname}在一起读同一本书，随时可以聊两句。`);

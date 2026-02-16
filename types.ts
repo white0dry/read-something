@@ -59,6 +59,13 @@ export interface ReaderPositionState {
   updatedAt: number;
 }
 
+export interface ReaderBookmarkState {
+  id: string;
+  name: string;
+  readingPosition: ReaderPositionState;
+  createdAt: number;
+}
+
 export interface ReaderSessionSnapshot {
   bookId: string;
   progress: number;
@@ -70,6 +77,7 @@ export interface ReaderBookState {
   highlightColor?: string;
   highlightsByChapter?: Record<string, ReaderHighlightRange[]>;
   aiUnderlinesByChapter?: Record<string, ReaderAiUnderlineRange[]>;
+  bookmarks?: ReaderBookmarkState[];
   typographyStyle?: ReaderTypographyState;
   fontOptions?: ReaderFontState[];
   selectedFontId?: string;

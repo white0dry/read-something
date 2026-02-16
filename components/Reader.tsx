@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlignCenter,
   AlignJustify,
@@ -12,6 +12,7 @@ import {
   MoreHorizontal,
   RotateCcw,
   Save,
+  Trash2,
   Type,
 } from 'lucide-react';
 import {
@@ -21,6 +22,7 @@ import {
   Book,
   Chapter,
   ReaderAiUnderlineRange,
+  ReaderBookmarkState,
   ReaderBookState,
   ReaderFontState,
   ReaderHighlightRange,
@@ -55,6 +57,7 @@ interface ReaderProps {
 type ScrollTarget = 'top' | 'bottom';
 type ChapterSwitchDirection = 'next' | 'prev';
 type FloatingPanel = 'none' | 'toc' | 'highlighter' | 'typography';
+type TocPanelTab = 'toc' | 'bookmarks';
 
 interface RgbValue {
   r: number;
@@ -64,6 +67,7 @@ interface RgbValue {
 
 type TextHighlightRange = ReaderHighlightRange;
 type TextAiUnderlineRange = ReaderAiUnderlineRange;
+type ReaderBookmark = ReaderBookmarkState;
 
 interface ParagraphMeta {
   text: string;
@@ -130,6 +134,7 @@ const PRESET_HIGHLIGHT_COLORS = ['#FFE066', '#FFD6A5', '#FFADAD', '#C7F9CC', '#A
 const PRESET_TEXT_COLORS = ['#1E293B', '#334155', '#475569', '#0F172A', '#9F1239', '#164E63'];
 const PRESET_BACKGROUND_COLORS = ['#F0F2F5', '#FFF7E8', '#F2FCEB', '#EAF5FF', '#1A202C', '#0F172A'];
 const DEFAULT_READER_FONT_ID = 'reader-font-serif-default';
+const BOOKMARK_NAME_MAX_LENGTH = 40;
 const READER_TEXT_ALIGN_OPTIONS: Array<{ value: ReaderTextAlign; label: string; icon: React.ComponentType<{ size?: number }> }> = [
   { value: 'left', label: '\u5c45\u5de6', icon: AlignLeft },
   { value: 'center', label: '\u5c45\u4e2d', icon: AlignCenter },
@@ -294,6 +299,49 @@ const normalizeReaderPosition = (value: ReaderBookState['readingPosition']): Rea
     updatedAt:
       typeof value.updatedAt === 'number' && Number.isFinite(value.updatedAt) ? Math.floor(value.updatedAt) : Date.now(),
   };
+};
+
+const createReaderBookmarkId = () => `reader-bookmark-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+const sanitizeBookmarkName = (raw: string, fallback: string) => {
+  const compacted = raw.replace(/\s+/g, ' ').trim();
+  const candidate = compacted || fallback;
+  return candidate.slice(0, BOOKMARK_NAME_MAX_LENGTH);
+};
+
+const sortReaderBookmarks = (source: ReaderBookmark[]) =>
+  [...source].sort((left, right) => {
+    const leftOffset = left.readingPosition.globalCharOffset;
+    const rightOffset = right.readingPosition.globalCharOffset;
+    if (leftOffset !== rightOffset) return leftOffset - rightOffset;
+    return left.createdAt - right.createdAt;
+  });
+
+const normalizeReaderBookmark = (value: unknown): ReaderBookmark | null => {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Partial<ReaderBookmark>;
+  const id = typeof source.id === 'string' ? source.id.trim() : '';
+  const readingPosition = normalizeReaderPosition(source.readingPosition as ReaderBookState['readingPosition']);
+  if (!id || !readingPosition) return null;
+  const createdAtRaw = Number(source.createdAt);
+  const createdAt =
+    Number.isFinite(createdAtRaw) && createdAtRaw > 0 ? Math.floor(createdAtRaw) : Math.max(1, readingPosition.updatedAt || Date.now());
+  const fallbackName = '\u672a\u547d\u540d\u4e66\u7b7e';
+  const name = sanitizeBookmarkName(typeof source.name === 'string' ? source.name : '', fallbackName);
+  return {
+    id,
+    name,
+    readingPosition,
+    createdAt,
+  };
+};
+
+const normalizeReaderBookmarks = (value: ReaderBookState['bookmarks']): ReaderBookmark[] => {
+  if (!Array.isArray(value)) return [];
+  const normalized = value
+    .map((item) => normalizeReaderBookmark(item))
+    .filter((item): item is ReaderBookmark => Boolean(item));
+  return sortReaderBookmarks(normalized);
 };
 
 const getTotalTextLength = (chapters: Chapter[], fallbackText: string) => {
@@ -557,6 +605,13 @@ const Reader: React.FC<ReaderProps> = ({
   const [highlightHexInput, setHighlightHexInput] = useState(DEFAULT_HIGHLIGHT_COLOR);
   const [highlightRangesByChapter, setHighlightRangesByChapter] = useState<Record<string, TextHighlightRange[]>>({});
   const [aiUnderlineRangesByChapter, setAiUnderlineRangesByChapter] = useState<Record<string, TextAiUnderlineRange[]>>({});
+  const [bookmarks, setBookmarks] = useState<ReaderBookmark[]>([]);
+  const [selectedBookmarkId, setSelectedBookmarkId] = useState<string | null>(null);
+  const [tocPanelTab, setTocPanelTab] = useState<TocPanelTab>('toc');
+  const [isBookmarkModalOpen, setIsBookmarkModalOpen] = useState(false);
+  const [isBookmarkModalClosing, setIsBookmarkModalClosing] = useState(false);
+  const [bookmarkNameDraft, setBookmarkNameDraft] = useState('');
+  const [pendingBookmarkPosition, setPendingBookmarkPosition] = useState<ReaderPositionState | null>(null);
   const [pendingHighlightRange, setPendingHighlightRange] = useState<TextHighlightRange | null>(null);
   const [isReaderStateHydrated, setIsReaderStateHydrated] = useState(false);
   const [hydratedBookId, setHydratedBookId] = useState<string | null>(null);
@@ -579,13 +634,19 @@ const Reader: React.FC<ReaderProps> = ({
   const [closingTypographyColorEditor, setClosingTypographyColorEditor] = useState<TypographyColorKind | null>(null);
   const [isReaderAppearanceHydrated, setIsReaderAppearanceHydrated] = useState(false);
   const [isMoreSettingsOpen, setIsMoreSettingsOpen] = useState(false);
+  const [floatingPanelTopPx, setFloatingPanelTopPx] = useState(() => Math.max(0, safeAreaTop) + 72);
 
+  const readerRootRef = useRef<HTMLDivElement>(null);
+  const readerViewportContainerRef = useRef<HTMLDivElement>(null);
   const readerScrollRef = useRef<HTMLDivElement>(null);
   const readerScrollbarTrackRef = useRef<HTMLDivElement>(null);
   const readerArticleRef = useRef<HTMLElement>(null);
   const readerFontDropdownRef = useRef<HTMLDivElement>(null);
-  const tocPanelRef = useRef<HTMLDivElement>(null);
+  const tocListRef = useRef<HTMLDivElement>(null);
   const tocItemRefs = useRef<Record<number, HTMLButtonElement | null>>({});
+  const bookmarkItemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const bookmarkNameInputRef = useRef<HTMLInputElement>(null);
+  const tocSwipeStartRef = useRef<{ x: number; y: number } | null>(null);
   const chapterAutoSwitchLockRef = useRef(false);
   const lastReaderScrollTopRef = useRef(0);
   const touchStartYRef = useRef<number | null>(null);
@@ -598,6 +659,7 @@ const Reader: React.FC<ReaderProps> = ({
   const chapterTransitionTimersRef = useRef<number[]>([]);
   const chapterTransitioningRef = useRef(false);
   const floatingPanelTimerRef = useRef<number | null>(null);
+  const bookmarkModalTimerRef = useRef<number | null>(null);
   const typographyColorEditorTimerRef = useRef<number | null>(null);
   const persistReaderStateTimerRef = useRef<number | null>(null);
   const highlighterClickTimerRef = useRef<number | null>(null);
@@ -625,6 +687,31 @@ const Reader: React.FC<ReaderProps> = ({
     () => buildConversationKey(activeBook?.id || null, activePersonaId, activeCharacterId),
     [activeBook?.id, activePersonaId, activeCharacterId]
   );
+  const sortedBookmarks = useMemo(() => sortReaderBookmarks(bookmarks), [bookmarks]);
+  const syncFloatingPanelTop = useCallback(() => {
+    const root = readerRootRef.current;
+    const viewportContainer = readerViewportContainerRef.current;
+    if (!root || !viewportContainer) return;
+    const nextTop = Math.max(0, viewportContainer.getBoundingClientRect().top - root.getBoundingClientRect().top);
+    setFloatingPanelTopPx((prev) => (Math.abs(prev - nextTop) < 0.5 ? prev : nextTop));
+  }, []);
+
+  const resolveClosestBookmarkIdFromList = (source: ReaderBookmark[], targetOffset: number) => {
+    if (source.length === 0) return null;
+    let best = source[0];
+    let minGap = Math.abs(best.readingPosition.globalCharOffset - targetOffset);
+    for (let i = 1; i < source.length; i += 1) {
+      const item = source[i];
+      const gap = Math.abs(item.readingPosition.globalCharOffset - targetOffset);
+      if (gap < minGap) {
+        minGap = gap;
+        best = item;
+      }
+    }
+    return best.id;
+  };
+
+  const resolveClosestBookmarkId = (targetOffset: number) => resolveClosestBookmarkIdFromList(sortedBookmarks, targetOffset);
 
   const refreshReaderScrollbar = () => {
     const scroller = readerScrollRef.current;
@@ -692,6 +779,77 @@ const Reader: React.FC<ReaderProps> = ({
     if (!snapshot) return null;
     latestReadingPositionRef.current = snapshot;
     return snapshot;
+  };
+
+  const resolveReadingTargetFromPosition = (position: ReaderPositionState) => {
+    const hasChapters = chapters.length > 0;
+    let nextChapterIndex: number | null = hasChapters ? 0 : null;
+    let nextChapterOffset = 0;
+
+    if (hasChapters) {
+      const hasValidChapterIndex =
+        position.chapterIndex !== null &&
+        position.chapterIndex >= 0 &&
+        position.chapterIndex < chapters.length;
+      if (hasValidChapterIndex) {
+        nextChapterIndex = position.chapterIndex;
+        const chapterLength = chapters[nextChapterIndex].content?.length || 0;
+        nextChapterOffset = clamp(position.chapterCharOffset, 0, chapterLength);
+      } else {
+        const resolved = resolveChapterPositionFromGlobalOffset(chapters, position.globalCharOffset);
+        nextChapterIndex = resolved.chapterIndex;
+        nextChapterOffset = resolved.chapterCharOffset;
+      }
+    } else {
+      const fallbackLength = bookText.length;
+      const fallbackOffset = position.chapterCharOffset > 0 ? position.chapterCharOffset : position.globalCharOffset;
+      nextChapterOffset = clamp(fallbackOffset, 0, fallbackLength);
+    }
+
+    const nextBookText =
+      nextChapterIndex !== null
+        ? chapters[nextChapterIndex]?.content || bookText
+        : bookText;
+    const chapterLength = nextBookText.length;
+    const totalLength = getTotalTextLength(chapters, bookText);
+    const chapterStartOffset = nextChapterIndex !== null ? getChapterStartOffset(chapters, nextChapterIndex) : 0;
+    const globalCharOffset = clamp(chapterStartOffset + nextChapterOffset, 0, totalLength);
+    const derivedRatio = chapterLength > 0 ? nextChapterOffset / chapterLength : 0;
+    const normalizedRatio = position.scrollRatio > 0 ? position.scrollRatio : derivedRatio;
+
+    const normalizedPosition: ReaderPositionState = {
+      chapterIndex: nextChapterIndex,
+      chapterCharOffset: nextChapterOffset,
+      globalCharOffset,
+      scrollRatio: clamp(normalizedRatio, 0, 1),
+      totalLength,
+      updatedAt: Date.now(),
+    };
+
+    return {
+      nextChapterIndex,
+      nextBookText,
+      normalizedPosition,
+    };
+  };
+
+  const applyPendingRestorePosition = () => {
+    const pending = pendingRestorePositionRef.current;
+    const scroller = readerScrollRef.current;
+    if (!pending || !scroller || isLoadingBookContent) return false;
+
+    const chapterLength = bookText.length;
+    const ratioFromOffset = chapterLength > 0 ? pending.chapterCharOffset / chapterLength : 0;
+    const targetRatio = clamp(pending.scrollRatio > 0 ? pending.scrollRatio : ratioFromOffset, 0, 1);
+    const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const nextScrollTop = maxScrollTop > 0 ? maxScrollTop * targetRatio : 0;
+
+    scroller.scrollTop = nextScrollTop;
+    lastReaderScrollTopRef.current = nextScrollTop;
+    refreshReaderScrollbar();
+    syncReadingPositionRef(Date.now());
+    pendingRestorePositionRef.current = null;
+    return true;
   };
 
   const scrollReaderTo = (target: ScrollTarget) => {
@@ -818,6 +976,20 @@ const Reader: React.FC<ReaderProps> = ({
     floatingPanelTimerRef.current = null;
   };
 
+  const clearBookmarkModalTimer = () => {
+    if (!bookmarkModalTimerRef.current) return;
+    window.clearTimeout(bookmarkModalTimerRef.current);
+    bookmarkModalTimerRef.current = null;
+  };
+
+  const hideBookmarkModalImmediately = () => {
+    clearBookmarkModalTimer();
+    setIsBookmarkModalOpen(false);
+    setIsBookmarkModalClosing(false);
+    setBookmarkNameDraft('');
+    setPendingBookmarkPosition(null);
+  };
+
   const clearTypographyColorEditorTimer = () => {
     if (!typographyColorEditorTimerRef.current) return;
     window.clearTimeout(typographyColorEditorTimerRef.current);
@@ -887,6 +1059,7 @@ const Reader: React.FC<ReaderProps> = ({
       closeFloatingPanel();
       return;
     }
+    setTocPanelTab('toc');
     openFloatingPanel('toc');
   };
 
@@ -914,6 +1087,10 @@ const Reader: React.FC<ReaderProps> = ({
         setBookText('');
         setHighlightRangesByChapter({});
         setAiUnderlineRangesByChapter({});
+        setBookmarks([]);
+        setSelectedBookmarkId(null);
+        setTocPanelTab('toc');
+        hideBookmarkModalImmediately();
         setHighlightColor(DEFAULT_HIGHLIGHT_COLOR);
         setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
         setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
@@ -942,11 +1119,14 @@ const Reader: React.FC<ReaderProps> = ({
         const persistedColor = readerState?.highlightColor;
         const persistedRanges = readerState?.highlightsByChapter;
         const persistedPosition = normalizeReaderPosition(readerState?.readingPosition);
+        const persistedBookmarks = normalizeReaderBookmarks(readerState?.bookmarks);
 
         if (cancelled) return;
 
         setChapters(resolvedChapters);
         setHighlightRangesByChapter(persistedRanges || {});
+        setBookmarks(persistedBookmarks);
+        hideBookmarkModalImmediately();
         if (persistedColor && isValidHexColor(persistedColor.toUpperCase())) {
           const normalized = persistedColor.toUpperCase();
           setHighlightColor(normalized);
@@ -1016,9 +1196,11 @@ const Reader: React.FC<ReaderProps> = ({
             updatedAt: persistedPosition.updatedAt,
           };
           latestReadingPositionRef.current = pendingRestorePositionRef.current;
+          setSelectedBookmarkId(resolveClosestBookmarkIdFromList(persistedBookmarks, globalCharOffset));
         } else {
           pendingRestorePositionRef.current = null;
           latestReadingPositionRef.current = null;
+          setSelectedBookmarkId(resolveClosestBookmarkIdFromList(persistedBookmarks, 0));
         }
       } catch (error) {
         console.error('Failed to load reader content:', error);
@@ -1027,6 +1209,10 @@ const Reader: React.FC<ReaderProps> = ({
           setSelectedChapterIndex(null);
           setHighlightRangesByChapter({});
           setAiUnderlineRangesByChapter({});
+          setBookmarks([]);
+          setSelectedBookmarkId(null);
+          setTocPanelTab('toc');
+          hideBookmarkModalImmediately();
           setHighlightColor(DEFAULT_HIGHLIGHT_COLOR);
           setHighlightColorDraft(hexToRgb(DEFAULT_HIGHLIGHT_COLOR));
           setHighlightHexInput(DEFAULT_HIGHLIGHT_COLOR);
@@ -1064,28 +1250,18 @@ const Reader: React.FC<ReaderProps> = ({
   }, [conversationKey, activeBook?.id]);
 
   useLayoutEffect(() => {
-    const pending = pendingRestorePositionRef.current;
-    const scroller = readerScrollRef.current;
-    if (!pending || !scroller || isLoadingBookContent) return;
-
-    const chapterLength = bookText.length;
-    const ratioFromOffset = chapterLength > 0 ? pending.chapterCharOffset / chapterLength : 0;
-    const targetRatio = clamp(pending.scrollRatio > 0 ? pending.scrollRatio : ratioFromOffset, 0, 1);
-
-    const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-    const nextScrollTop = maxScrollTop > 0 ? maxScrollTop * targetRatio : 0;
-    scroller.scrollTop = nextScrollTop;
-    lastReaderScrollTopRef.current = nextScrollTop;
-    refreshReaderScrollbar();
-    syncReadingPositionRef(Date.now());
-    pendingRestorePositionRef.current = null;
+    applyPendingRestorePosition();
   }, [activeBook?.id, isLoadingBookContent, bookText]);
 
   useLayoutEffect(() => {
-    if (!isTocOpen) return;
+    syncFloatingPanelTop();
+  }, [safeAreaTop, syncFloatingPanelTop]);
+
+  useLayoutEffect(() => {
+    if (!isTocOpen || tocPanelTab !== 'toc') return;
     if (selectedChapterIndex === null || selectedChapterIndex < 0) return;
 
-    const panel = tocPanelRef.current;
+    const panel = tocListRef.current;
     const activeItem = tocItemRefs.current[selectedChapterIndex];
     if (!panel || !activeItem) return;
 
@@ -1101,7 +1277,46 @@ const Reader: React.FC<ReaderProps> = ({
     return () => {
       window.cancelAnimationFrame(frameId);
     };
-  }, [isTocOpen, selectedChapterIndex, chapters.length]);
+  }, [isTocOpen, tocPanelTab, selectedChapterIndex, chapters.length]);
+
+  useEffect(() => {
+    if (!isTocOpen || tocPanelTab !== 'bookmarks') return;
+    if (sortedBookmarks.length === 0) {
+      if (selectedBookmarkId !== null) {
+        setSelectedBookmarkId(null);
+      }
+      return;
+    }
+
+    const currentPosition = getCurrentReadingPosition(Date.now()) || latestReadingPositionRef.current;
+    const targetOffset = currentPosition?.globalCharOffset || 0;
+    const closest = resolveClosestBookmarkId(targetOffset);
+    if (closest && closest !== selectedBookmarkId) {
+      setSelectedBookmarkId(closest);
+    }
+  }, [isTocOpen, tocPanelTab, sortedBookmarks, selectedBookmarkId]);
+
+  useLayoutEffect(() => {
+    if (!isTocOpen || tocPanelTab !== 'bookmarks') return;
+    if (!selectedBookmarkId) return;
+
+    const panel = tocListRef.current;
+    const activeItem = bookmarkItemRefs.current[selectedBookmarkId];
+    if (!panel || !activeItem) return;
+
+    const frameId = window.requestAnimationFrame(() => {
+      const panelRect = panel.getBoundingClientRect();
+      const itemRect = activeItem.getBoundingClientRect();
+      const delta = itemRect.top - panelRect.top - (panel.clientHeight - itemRect.height) / 2;
+      const maxScrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+      const nextScrollTop = clamp(panel.scrollTop + delta, 0, maxScrollTop);
+      panel.scrollTo({ top: nextScrollTop, behavior: 'auto' });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [isTocOpen, tocPanelTab, selectedBookmarkId, sortedBookmarks.length]);
 
   useEffect(() => {
     refreshReaderScrollbar();
@@ -1117,9 +1332,32 @@ const Reader: React.FC<ReaderProps> = ({
   }, [bookText, isLoadingBookContent, activeFloatingPanel, selectedChapterIndex]);
 
   useEffect(() => {
+    const onResize = () => syncFloatingPanelTop();
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
+    window.visualViewport?.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
+      window.visualViewport?.removeEventListener('resize', onResize);
+    };
+  }, [syncFloatingPanelTop]);
+
+  useEffect(() => {
     if (!activeBook || isLoadingBookContent) return;
     syncReadingPositionRef(Date.now());
   }, [activeBook?.id, isLoadingBookContent, selectedChapterIndex, bookText, chapters]);
+
+  useEffect(() => {
+    if (!isBookmarkModalOpen || isBookmarkModalClosing) return;
+    const timer = window.setTimeout(() => {
+      bookmarkNameInputRef.current?.focus();
+      bookmarkNameInputRef.current?.select();
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [isBookmarkModalOpen, isBookmarkModalClosing]);
 
   useEffect(() => {
     return () => {
@@ -1130,6 +1368,7 @@ const Reader: React.FC<ReaderProps> = ({
   useEffect(() => {
     return () => {
       clearFloatingPanelTimer();
+      clearBookmarkModalTimer();
       clearTypographyColorEditorTimer();
       if (persistReaderStateTimerRef.current) {
         window.clearTimeout(persistReaderStateTimerRef.current);
@@ -1447,6 +1686,7 @@ const Reader: React.FC<ReaderProps> = ({
       const readerState: ReaderBookState = {
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
+        bookmarks: sortedBookmarks,
         readingPosition,
       };
       saveBookReaderState(activeBook.id, readerState).catch((error) => {
@@ -1466,6 +1706,7 @@ const Reader: React.FC<ReaderProps> = ({
     hydratedBookId,
     highlightColor,
     highlightRangesByChapter,
+    sortedBookmarks,
   ]);
 
   useEffect(() => {
@@ -1514,6 +1755,113 @@ const Reader: React.FC<ReaderProps> = ({
       console.error('Failed to persist global reader appearance:', error);
     }
   }, [isReaderAppearanceHydrated, readerTypography, readerFontOptions, selectedReaderFontId]);
+
+  const closeBookmarkModal = () => {
+    if (!isBookmarkModalOpen) return;
+    clearBookmarkModalTimer();
+    setIsBookmarkModalClosing(true);
+    bookmarkModalTimerRef.current = window.setTimeout(() => {
+      hideBookmarkModalImmediately();
+    }, FLOATING_PANEL_TRANSITION_MS);
+  };
+
+  const openBookmarkModal = () => {
+    const fallbackPosition = syncReadingPositionRef(Date.now()) || latestReadingPositionRef.current;
+    if (!fallbackPosition) return;
+    const normalizedPosition = normalizeReaderPosition(fallbackPosition);
+    if (!normalizedPosition) return;
+    const nextDefaultName = `\u4e66\u7b7e ${sortedBookmarks.length + 1}`;
+    clearBookmarkModalTimer();
+    setIsBookmarkModalClosing(false);
+    setPendingBookmarkPosition({ ...normalizedPosition, updatedAt: Date.now() });
+    setBookmarkNameDraft(nextDefaultName);
+    setIsBookmarkModalOpen(true);
+  };
+
+  const handleConfirmAddBookmark = () => {
+    if (!pendingBookmarkPosition) return;
+    const timestamp = Date.now();
+    const fallbackName = `\u4e66\u7b7e ${sortedBookmarks.length + 1}`;
+    const bookmark: ReaderBookmark = {
+      id: createReaderBookmarkId(),
+      name: sanitizeBookmarkName(bookmarkNameDraft, fallbackName),
+      readingPosition: {
+        ...pendingBookmarkPosition,
+        updatedAt: timestamp,
+      },
+      createdAt: timestamp,
+    };
+
+    setBookmarks((prev) => sortReaderBookmarks([...prev, bookmark]));
+    setSelectedBookmarkId(bookmark.id);
+    setTocPanelTab('bookmarks');
+    closeBookmarkModal();
+  };
+
+  const jumpToReadingPosition = (position: ReaderPositionState) => {
+    const resolved = resolveReadingTargetFromPosition(position);
+    pendingRestorePositionRef.current = resolved.normalizedPosition;
+    latestReadingPositionRef.current = resolved.normalizedPosition;
+
+    const shouldUpdateChapter = resolved.nextChapterIndex !== selectedChapterIndex;
+    const shouldUpdateText = resolved.nextBookText !== bookText;
+    if (shouldUpdateChapter) {
+      setSelectedChapterIndex(resolved.nextChapterIndex);
+    }
+    if (shouldUpdateText) {
+      setBookText(resolved.nextBookText);
+    }
+    closeFloatingPanel();
+    if (!shouldUpdateChapter && !shouldUpdateText) {
+      window.requestAnimationFrame(() => {
+        applyPendingRestorePosition();
+      });
+    }
+  };
+
+  const handleJumpToBookmark = (bookmark: ReaderBookmark) => {
+    setSelectedBookmarkId(bookmark.id);
+    jumpToReadingPosition(bookmark.readingPosition);
+  };
+
+  const handleDeleteBookmark = (bookmarkId: string) => {
+    setBookmarks((prev) => sortReaderBookmarks(prev.filter((item) => item.id !== bookmarkId)));
+    setSelectedBookmarkId((prev) => (prev === bookmarkId ? null : prev));
+  };
+
+  const handleBookmarkButtonClick = () => {
+    if (!activeBook || isLoadingBookContent) return;
+    openBookmarkModal();
+  };
+
+  const switchTocTab = (tab: TocPanelTab) => {
+    setTocPanelTab(tab);
+  };
+
+  const handleTocPanelTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    const touch = e.touches[0];
+    if (!touch) return;
+    tocSwipeStartRef.current = { x: touch.clientX, y: touch.clientY };
+  };
+
+  const handleTocPanelTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+    const start = tocSwipeStartRef.current;
+    tocSwipeStartRef.current = null;
+    if (!start) return;
+
+    const touch = e.changedTouches[0];
+    if (!touch) return;
+    const deltaX = touch.clientX - start.x;
+    const deltaY = touch.clientY - start.y;
+    if (Math.abs(deltaX) < 36) return;
+    if (Math.abs(deltaX) <= Math.abs(deltaY) + 8) return;
+
+    if (deltaX < 0) {
+      switchTocTab('bookmarks');
+      return;
+    }
+    switchTocTab('toc');
+  };
 
   const handleJumpToChapter = (index: number) => {
     if (selectedChapterIndex === null) {
@@ -2313,6 +2661,7 @@ const Reader: React.FC<ReaderProps> = ({
       const readerState: ReaderBookState = {
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
+        bookmarks: sortedBookmarks,
         readingPosition: sessionSnapshot.readingPosition,
       };
       saveBookReaderState(sessionSnapshot.bookId, readerState).catch((error) => {
@@ -2326,6 +2675,7 @@ const Reader: React.FC<ReaderProps> = ({
   const highlighterToggleColor = isHighlightMode ? highlightColor : '#64748B';
   const highlighterToggleStyle = { color: highlighterToggleColor } as React.CSSProperties;
   const typographyToggleStyle = { color: '#64748B' } as React.CSSProperties;
+  const floatingPanelAnchorStyle = { top: `${floatingPanelTopPx}px` } as React.CSSProperties;
   const typographyInputClass = `h-8 rounded-md px-2 text-[11px] outline-none ${isDarkMode ? 'bg-[#111827] text-slate-200 placeholder-slate-500' : 'bg-white/70 text-slate-700 placeholder-slate-400'}`;
   const typographySelectTriggerClass = `w-full h-8 rounded-md px-2 flex items-center justify-between cursor-pointer transition-all active:scale-[0.99] ${isDarkMode ? 'bg-[#111827] text-slate-200' : 'bg-white/70 text-slate-700'}`;
   const typographyIconButtonClass = `w-8 h-8 rounded-full flex items-center justify-center transition-all ${isDarkMode ? 'bg-[#111827] text-slate-300 hover:text-white' : 'neu-btn text-slate-500 hover:text-slate-700'}`;
@@ -2455,6 +2805,7 @@ const Reader: React.FC<ReaderProps> = ({
 
   return (
     <div
+      ref={readerRootRef}
       className={`flex flex-col h-full min-h-0 relative overflow-hidden transition-colors duration-300 ${
         isDarkMode ? 'dark-mode bg-[#2d3748] text-slate-300' : 'bg-[#e0e5ec] text-slate-700'
       }`}
@@ -2474,6 +2825,14 @@ const Reader: React.FC<ReaderProps> = ({
             title="\u76ee\u5f55"
           >
             <ListIcon size={18} />
+          </button>
+          <button
+            onClick={handleBookmarkButtonClick}
+            className={`w-10 h-10 neu-btn reader-tool-toggle rounded-full ${isBookmarkModalOpen ? 'reader-tool-active' : ''}`}
+            style={typographyToggleStyle}
+            title={'\u6dfb\u52a0\u4e66\u7b7e'}
+          >
+            <Bookmark size={18} />
           </button>
           <button
             onClick={handleHighlighterButtonClick}
@@ -2506,45 +2865,129 @@ const Reader: React.FC<ReaderProps> = ({
         <>
           <button
             aria-label="close-floating-panel"
-            className={`absolute inset-0 z-20 bg-black/35 backdrop-blur-sm ${closingFloatingPanel ? 'app-fade-exit' : 'app-fade-enter'}`}
+            className={`absolute inset-0 z-40 bg-black/35 backdrop-blur-sm ${closingFloatingPanel ? 'app-fade-exit' : 'app-fade-enter'}`}
             onClick={closeFloatingPanel}
           />
           {isTocOpen && (
             <div
-              ref={tocPanelRef}
-              className={`absolute z-30 top-16 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[32vh] overflow-y-auto no-scrollbar rounded-2xl p-3 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${closingFloatingPanel === 'toc' ? 'reader-flyout-exit' : 'reader-flyout-enter'}`}
+              onTouchStart={handleTocPanelTouchStart}
+              onTouchEnd={handleTocPanelTouchEnd}
+              className={`absolute z-50 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[32vh] overflow-hidden rounded-2xl p-2 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${closingFloatingPanel === 'toc' ? 'reader-flyout-exit' : 'reader-flyout-enter'} flex flex-col`}
+              style={floatingPanelAnchorStyle}
             >
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 py-2">
-                {`\u76ee\u5f55 ${chapters.length > 0 ? `(${chapters.length})` : ''}`}
+              <div className="px-1 pb-2">
+                <div className={`rounded-xl p-1 ${isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'}`}>
+                  <div className="grid grid-cols-2 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => switchTocTab('toc')}
+                      className={`h-8 rounded-lg text-xs font-bold transition-all ${
+                        tocPanelTab === 'toc'
+                          ? 'text-rose-400 bg-rose-400/10'
+                          : isDarkMode
+                          ? 'text-slate-300 hover:text-white'
+                          : 'text-slate-500 hover:text-slate-700'
+                      }`}
+                    >
+                      {`\u76ee\u5f55 ${chapters.length > 0 ? `(${chapters.length})` : ''}`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => switchTocTab('bookmarks')}
+                      className={`h-8 rounded-lg text-xs font-bold transition-all ${
+                        tocPanelTab === 'bookmarks'
+                          ? 'text-rose-400 bg-rose-400/10'
+                          : isDarkMode
+                          ? 'text-slate-300 hover:text-white'
+                          : 'text-slate-500 hover:text-slate-700'
+                      }`}
+                    >
+                      {`\u4e66\u7b7e ${sortedBookmarks.length > 0 ? `(${sortedBookmarks.length})` : ''}`}
+                    </button>
+                  </div>
+                </div>
               </div>
-              {chapters.length === 0 && (
-                <div className="text-xs text-slate-400 px-2 py-3">{'\u5f53\u524d\u56fe\u4e66\u6ca1\u6709\u7ae0\u8282\u6570\u636e\uff0c\u5df2\u6309\u5168\u6587\u9605\u8bfb\u3002'}</div>
-              )}
-              {chapters.map((chapter, index) => {
-                const isActive = selectedChapterIndex === index;
-                const title = chapter.title?.trim() || `Chapter ${index + 1}`;
-                return (
-                  <button
-                    key={`${title}-${index}`}
-                    ref={(node) => {
-                      if (node) {
-                        tocItemRefs.current[index] = node;
-                        return;
-                      }
-                      delete tocItemRefs.current[index];
-                    }}
-                    onClick={() => handleJumpToChapter(index)}
-                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${isActive ? 'text-rose-400 bg-rose-400/10' : 'text-slate-500 hover:bg-black/5 dark:hover:bg-white/5'}`}
-                  >
-                    <span className="text-xs mr-2 opacity-70">{index + 1}.</span>
-                    <span>{title}</span>
-                  </button>
-                );
-              })}
+              <div ref={tocListRef} className="flex-1 overflow-y-auto no-scrollbar px-1 pb-1">
+                {tocPanelTab === 'toc' && (
+                  <>
+                    {chapters.length === 0 && (
+                      <div className="text-xs text-slate-400 px-2 py-3">{'\u5f53\u524d\u56fe\u4e66\u6ca1\u6709\u7ae0\u8282\u6570\u636e\uff0c\u5df2\u6309\u5168\u6587\u9605\u8bfb\u3002'}</div>
+                    )}
+                    {chapters.map((chapter, index) => {
+                      const isActive = selectedChapterIndex === index;
+                      const title = chapter.title?.trim() || `Chapter ${index + 1}`;
+                      return (
+                        <button
+                          key={`${title}-${index}`}
+                          ref={(node) => {
+                            if (node) {
+                              tocItemRefs.current[index] = node;
+                              return;
+                            }
+                            delete tocItemRefs.current[index];
+                          }}
+                          onClick={() => handleJumpToChapter(index)}
+                          className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${isActive ? 'text-rose-400 bg-rose-400/10' : 'text-slate-500 hover:bg-black/5 dark:hover:bg-white/5'}`}
+                        >
+                          <span className="text-xs mr-2 opacity-70">{index + 1}.</span>
+                          <span>{title}</span>
+                        </button>
+                      );
+                    })}
+                  </>
+                )}
+                {tocPanelTab === 'bookmarks' && (
+                  <>
+                    {sortedBookmarks.length === 0 && (
+                      <div className="text-xs text-slate-400 px-2 py-3">{'\u8fd8\u6ca1\u6709\u4e66\u7b7e\uff0c\u70b9\u51fb\u9876\u90e8\u4e66\u7b7e\u6309\u94ae\u5373\u53ef\u65b0\u589e\u3002'}</div>
+                    )}
+                    {sortedBookmarks.map((bookmark, index) => {
+                      const isActive = bookmark.id === selectedBookmarkId;
+                      return (
+                        <div key={bookmark.id} className="flex items-center gap-1">
+                          <button
+                            ref={(node) => {
+                              if (node) {
+                                bookmarkItemRefs.current[bookmark.id] = node;
+                                return;
+                              }
+                              delete bookmarkItemRefs.current[bookmark.id];
+                            }}
+                            onClick={() => handleJumpToBookmark(bookmark)}
+                            className={`flex-1 text-left px-3 py-2 rounded-lg text-sm transition-colors ${isActive ? 'text-rose-400 bg-rose-400/10' : 'text-slate-500 hover:bg-black/5 dark:hover:bg-white/5'}`}
+                          >
+                            <span className="text-xs mr-2 opacity-70">{index + 1}.</span>
+                            <span>{bookmark.name}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteBookmark(bookmark.id);
+                            }}
+                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
+                              isDarkMode
+                                ? 'text-slate-400 hover:text-rose-300 hover:bg-[#1a202c]'
+                                : 'text-slate-500 hover:text-rose-400 hover:bg-black/5'
+                            }`}
+                            title={'\u5220\u9664\u4e66\u7b7e'}
+                            aria-label={`delete-bookmark-${bookmark.id}`}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+              </div>
             </div>
           )}
           {isHighlighterPanelOpen && (
-            <div className={`absolute z-30 top-16 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[32vh] overflow-hidden rounded-2xl p-2 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${closingFloatingPanel === 'highlighter' ? 'reader-flyout-exit' : 'reader-flyout-enter'} flex flex-col`}>
+            <div
+              className={`absolute z-50 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[32vh] overflow-hidden rounded-2xl p-2 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${closingFloatingPanel === 'highlighter' ? 'reader-flyout-exit' : 'reader-flyout-enter'} flex flex-col`}
+              style={floatingPanelAnchorStyle}
+            >
               <div className="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 py-1">
                 {'\u8367\u5149\u7b14\u989c\u8272'}
               </div>
@@ -2631,7 +3074,10 @@ const Reader: React.FC<ReaderProps> = ({
             </div>
           )}
           {isTypographyPanelOpen && (
-            <div className={`absolute z-30 top-16 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[32vh] overflow-hidden rounded-2xl p-2 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${closingFloatingPanel === 'typography' ? 'reader-flyout-exit' : 'reader-flyout-enter'} flex flex-col`}>
+            <div
+              className={`absolute z-50 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[32vh] overflow-hidden rounded-2xl p-2 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${closingFloatingPanel === 'typography' ? 'reader-flyout-exit' : 'reader-flyout-enter'} flex flex-col`}
+              style={floatingPanelAnchorStyle}
+            >
               <div className="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 py-1">
                 {'\u6587\u5b57\u6837\u5f0f'}
               </div>
@@ -2832,7 +3278,60 @@ const Reader: React.FC<ReaderProps> = ({
         </>
       )}
 
-      <div className="relative flex-1 min-h-0 m-4 mt-0">
+      {isBookmarkModalOpen && (
+        <>
+          <button
+            type="button"
+            aria-label="close-bookmark-modal"
+            className={`absolute inset-0 z-40 bg-black/35 backdrop-blur-sm ${isBookmarkModalClosing ? 'app-fade-exit' : 'app-fade-enter'}`}
+            onClick={closeBookmarkModal}
+          />
+          <div
+            className={`absolute z-50 right-4 w-[min(22rem,calc(100vw-2rem))] rounded-2xl p-4 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${isBookmarkModalClosing ? 'reader-flyout-exit' : 'reader-flyout-enter'}`}
+            style={floatingPanelAnchorStyle}
+          >
+            <div className={`text-sm font-bold mb-2 ${isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>{'\u65b0\u5efa\u4e66\u7b7e'}</div>
+            <input
+              ref={bookmarkNameInputRef}
+              type="text"
+              value={bookmarkNameDraft}
+              onChange={(e) => setBookmarkNameDraft(e.target.value.slice(0, BOOKMARK_NAME_MAX_LENGTH))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleConfirmAddBookmark();
+                  return;
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  closeBookmarkModal();
+                }
+              }}
+              maxLength={BOOKMARK_NAME_MAX_LENGTH}
+              placeholder={'\u8bf7\u8f93\u5165\u4e66\u7b7e\u540d\u79f0'}
+              className={`w-full h-10 rounded-xl px-3 text-sm outline-none ${isDarkMode ? 'bg-[#1a202c] text-slate-200 placeholder-slate-500' : 'neu-pressed text-slate-700 placeholder-slate-400'}`}
+            />
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={closeBookmarkModal}
+                className={`flex-1 h-8 rounded-full text-xs font-bold ${isDarkMode ? 'bg-[#1a202c] text-slate-300 hover:text-slate-100' : 'neu-btn text-slate-500 hover:text-slate-700'}`}
+              >
+                {'\u53d6\u6d88'}
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmAddBookmark}
+                className="flex-1 h-8 rounded-full text-xs font-bold text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all"
+              >
+                {'\u4fdd\u5b58'}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      <div ref={readerViewportContainerRef} className="relative flex-1 min-h-0 m-4 mt-0">
         <div
           ref={readerScrollRef}
           className={`reader-scroll-panel reader-content-scroll h-full min-h-0 overflow-y-auto rounded-2xl shadow-inner transition-colors px-6 py-6 pb-24 ${

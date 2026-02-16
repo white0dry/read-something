@@ -1,11 +1,11 @@
 ﻿import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
+  MessagesSquare,
   Pencil,
   Quote,
   RotateCcw,
   Send,
-  Sparkles,
   Square,
   Trash2,
   X,
@@ -1224,7 +1224,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
             '',
             '【格式要求】',
             '- 每段总结前用【】包裹简短的段落标题（2-8个字）。',
-            '- 每段总结100-150字中文，语言凝练。',
+            '- 每段总结100-150字中文，语言凝练，省略不必要的细节修饰。',
             '- 严格基于原文，禁止虚构或补充原文没有的内容，禁止涉及本片段之外的后续情节。',
             '',
             '【总结要素指引】',
@@ -2733,7 +2733,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           }`}
           style={{ bottom: `${fabBottomPx}px` }}
         >
-          <Sparkles size={20} />
+          <MessagesSquare size={20} />
           <span
             className={`reader-ai-fab-badge absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full text-[10px] leading-none font-bold flex items-center justify-center ${
               unreadMessageCount > 0 ? 'opacity-100 scale-100' : 'opacity-0 scale-50'
