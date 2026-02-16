@@ -10,7 +10,10 @@
   },
   "dependencies": {
     "@google/genai": "^1.40.0",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.563.0",
+    "mammoth": "^1.11.0",
+    "pdfjs-dist": "^5.4.624",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "recharts": "^3.7.0"

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+﻿import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Book as BookIcon, Plus, Clock, Edit2, Check, UserCircle, LogOut, Link2, Search, Filter, MoreVertical, X, Image, Trash2, Link, FileText, FileUp, List, Sparkles, AlertTriangle, ArrowUpDown, ArrowUp, ArrowDown, LayoutGrid, AlignJustify } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import { Book, Chapter, ApiConfig } from '../types';
@@ -7,6 +7,7 @@ import ModalPortal from './ModalPortal';
 import ResolvedImage from './ResolvedImage';
 import { deleteImageByRef, saveImageFile } from '../utils/imageStorage';
 import { getBookContent, getBookTextLength } from '../utils/bookContentStorage';
+import { BOOK_IMPORT_ACCEPT, parseImportedBookFile, SUPPORTED_BOOK_IMPORT_SUFFIXES } from '../utils/bookImportParser';
 
 interface LibraryProps {
   books: Book[];
@@ -43,6 +44,62 @@ const DefaultBookCover = () => (
 type SortField = 'title' | 'author' | 'progress' | 'id' | 'length';
 type SortDirection = 'asc' | 'desc';
 type ViewMode = 'grid' | 'list';
+const SUPPORTED_IMPORT_SUFFIX_SET = new Set(SUPPORTED_BOOK_IMPORT_SUFFIXES.map((suffix) => suffix.toLowerCase()));
+
+const getSupportedSuffixFromName = (name: string) => {
+  const match = name.toLowerCase().match(/\.([a-z0-9]+)$/);
+  const suffix = match?.[1] || '';
+  if (!suffix) return '';
+  return SUPPORTED_IMPORT_SUFFIX_SET.has(suffix) ? suffix : '';
+};
+
+const getUrlFileName = (url: string) => {
+  try {
+    const parsed = new URL(url);
+    const segment = parsed.pathname.split('/').filter(Boolean).pop() || '';
+    return segment ? decodeURIComponent(segment) : '';
+  } catch {
+    const sanitized = url.split('?')[0].split('#')[0];
+    const segment = sanitized.split('/').filter(Boolean).pop() || '';
+    return segment ? decodeURIComponent(segment) : '';
+  }
+};
+
+const getFileNameFromContentDisposition = (headerValue: string | null) => {
+  if (!headerValue) return '';
+  const filenameStarMatch = headerValue.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+  if (filenameStarMatch?.[1]) {
+    try {
+      return decodeURIComponent(filenameStarMatch[1].trim()).split(/[\\/]/).pop() || '';
+    } catch {
+      return filenameStarMatch[1].trim().split(/[\\/]/).pop() || '';
+    }
+  }
+
+  const filenameMatch = headerValue.match(/filename\s*=\s*"?([^";]+)"?/i);
+  if (filenameMatch?.[1]) {
+    return filenameMatch[1].trim().split(/[\\/]/).pop() || '';
+  }
+  return '';
+};
+
+const inferSuffixFromContentType = (contentType: string) => {
+  const normalizedType = contentType.toLowerCase();
+  if (normalizedType.includes('application/epub+zip')) return 'epub';
+  if (normalizedType.includes('application/pdf')) return 'pdf';
+  if (normalizedType.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.document')) return 'docx';
+  if (normalizedType.includes('application/vnd.ms-word.document.macroenabled.12')) return 'docm';
+  if (normalizedType.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.template')) return 'dotx';
+  if (normalizedType.includes('application/vnd.ms-word.template.macroenabled.12')) return 'dotm';
+  if (normalizedType.includes('text/plain')) return 'txt';
+  return '';
+};
+
+const ensureFileNameWithSuffix = (sourceName: string, suffix: string) => {
+  const cleaned = sourceName.trim().replace(/[\\/:*?"<>|]/g, '_');
+  const baseName = cleaned || 'imported-book';
+  return getSupportedSuffixFromName(baseName) ? baseName : `${baseName}.${suffix}`;
+};
 
 const Library: React.FC<LibraryProps> = ({ 
   books,
@@ -128,6 +185,9 @@ const Library: React.FC<LibraryProps> = ({
   const [txtFileUrlMode, setTxtFileUrlMode] = useState(false);
   const [tempTxtUrl, setTempTxtUrl] = useState('');
   const [detectedChapters, setDetectedChapters] = useState<number>(0);
+  const [isImportStructuredChapterMode, setIsImportStructuredChapterMode] = useState(false);
+  const [isEditStructuredChapterMode, setIsEditStructuredChapterMode] = useState(false);
+  const [sessionGeneratedImageRefs, setSessionGeneratedImageRefs] = useState<string[]>([]);
   
   // State for Deletion Confirmation
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -202,13 +262,13 @@ const Library: React.FC<LibraryProps> = ({
     try {
         const regex = new RegExp(`(${regexStr}.*)`, 'gm');
         const matches = [...text.matchAll(regex)];
-        
+
         if (matches.length === 0) {
             return [{ title: '全文', content: text }];
         }
 
         const chapters: Chapter[] = [];
-        
+
         if (matches[0].index && matches[0].index > 0) {
             chapters.push({
                 title: '序章 / 前言',
@@ -227,21 +287,78 @@ const Library: React.FC<LibraryProps> = ({
         return chapters;
 
     } catch (e) {
-        console.error("Regex error:", e);
+        console.error('Regex error:', e);
         return [{ title: 'Regex Error', content: text }];
     }
+  };
+
+  const hasStructuredChapterBlocks = (chapters: Chapter[] | undefined) => {
+    if (!Array.isArray(chapters) || chapters.length === 0) return false;
+    const hasAnyBlocks = chapters.some((chapter) => Array.isArray(chapter.blocks) && chapter.blocks.length > 0);
+    if (!hasAnyBlocks) return false;
+    if (chapters.length > 1) return true;
+    return chapters.some((chapter) => Array.isArray(chapter.blocks) && chapter.blocks.some((block) => block.type === 'image'));
+  };
+
+  const cleanupImageRefs = (imageRefs: string[]) => {
+    imageRefs.forEach((imageRef) => {
+      if (!imageRef) return;
+      deleteImageByRef(imageRef).catch((error) => {
+        console.error('Failed to cleanup temporary import image:', error);
+      });
+    });
+  };
+
+  const replaceSessionGeneratedImageRefs = (nextRefs: string[]) => {
+    setSessionGeneratedImageRefs((prev) => {
+      const staleRefs = prev.filter((ref) => !nextRefs.includes(ref));
+      if (staleRefs.length > 0) cleanupImageRefs(staleRefs);
+      return nextRefs;
+    });
+  };
+
+  const clearSessionGeneratedImageRefs = (cleanup: boolean) => {
+    setSessionGeneratedImageRefs((prev) => {
+      if (cleanup && prev.length > 0) cleanupImageRefs(prev);
+      return [];
+    });
+  };
+
+  const getStructuredChapterMode = (isEdit: boolean) => {
+    return isEdit ? isEditStructuredChapterMode : isImportStructuredChapterMode;
+  };
+
+  const resolveChaptersForSave = (book: Partial<Book>, isEdit: boolean) => {
+    const structuredEnabled = getStructuredChapterMode(isEdit);
+    const structuredChapters = Array.isArray(book.chapters) ? book.chapters : [];
+    if (structuredEnabled && structuredChapters.length > 0) {
+      return structuredChapters;
+    }
+    return parseChapters(book.fullText || '', book.chapterRegex || '');
   };
 
   useEffect(() => {
     let text = '';
     let regex = '';
+    let structuredChapterCount = 0;
     
     if (isImportModalOpen) {
         text = importingBook.fullText || '';
         regex = importingBook.chapterRegex || '';
+        if (isImportStructuredChapterMode && Array.isArray(importingBook.chapters)) {
+          structuredChapterCount = importingBook.chapters.length;
+        }
     } else if (isEditModalOpen && editingBook) {
         text = editingBook.fullText || '';
         regex = editingBook.chapterRegex || '';
+        if (isEditStructuredChapterMode && Array.isArray(editingBook.chapters)) {
+          structuredChapterCount = editingBook.chapters.length;
+        }
+    }
+
+    if (structuredChapterCount > 0) {
+        setDetectedChapters(structuredChapterCount);
+        return;
     }
 
     if (text) {
@@ -250,7 +367,18 @@ const Library: React.FC<LibraryProps> = ({
     } else {
         setDetectedChapters(0);
     }
-  }, [importingBook.fullText, importingBook.chapterRegex, editingBook?.fullText, editingBook?.chapterRegex, isImportModalOpen, isEditModalOpen]);
+  }, [
+    importingBook.fullText,
+    importingBook.chapterRegex,
+    importingBook.chapters,
+    editingBook?.fullText,
+    editingBook?.chapterRegex,
+    editingBook?.chapters,
+    isImportStructuredChapterMode,
+    isEditStructuredChapterMode,
+    isImportModalOpen,
+    isEditModalOpen,
+  ]);
 
 
   const handleSaveSig = () => {
@@ -342,16 +470,20 @@ const Library: React.FC<LibraryProps> = ({
      setTxtFileUrlMode(false);
      setDetectedChapters(0);
      setIsGeneratingRegex(false);
+     setIsImportStructuredChapterMode(false);
+     setIsEditStructuredChapterMode(false);
   };
 
   // Open Edit
   const openEditModal = (e: React.MouseEvent, book: Book) => {
     e.stopPropagation();
+    clearSessionGeneratedImageRefs(true);
     if (editModalCloseTimerRef.current) {
       window.clearTimeout(editModalCloseTimerRef.current);
       editModalCloseTimerRef.current = null;
     }
     setEditingBook({ ...book, tags: book.tags || [], fullText: '', chapters: [] });
+    setIsEditStructuredChapterMode(false);
     setIsLoadingBookContent(true);
     setClosingModal(prev => prev === 'edit' ? null : prev);
     setIsEditModalOpen(true);
@@ -367,9 +499,11 @@ const Library: React.FC<LibraryProps> = ({
             chapters: content?.chapters || [],
           };
         });
+        setIsEditStructuredChapterMode(hasStructuredChapterBlocks(content?.chapters || []));
       })
       .catch((error) => {
         console.error('Failed to load book content for edit modal:', error);
+        setIsEditStructuredChapterMode(false);
         openErrorModal('读取书籍正文失败，请稍后重试。');
       })
       .finally(() => {
@@ -379,6 +513,7 @@ const Library: React.FC<LibraryProps> = ({
 
   // Open Import
   const openImportModal = () => {
+     clearSessionGeneratedImageRefs(true);
      if (importModalCloseTimerRef.current) {
        window.clearTimeout(importModalCloseTimerRef.current);
        importModalCloseTimerRef.current = null;
@@ -386,30 +521,39 @@ const Library: React.FC<LibraryProps> = ({
      setImportingBook({
          title: '', author: '', coverUrl: '', tags: [], fullText: '', chapterRegex: '', progress: 0, lastRead: '从未阅读'
      });
+     setIsImportStructuredChapterMode(false);
      setClosingModal(prev => prev === 'import' ? null : prev);
      setIsImportModalOpen(true);
      resetModalState();
   };
 
-  const closeEditModal = () => {
+  const closeEditModal = (options?: { preserveGeneratedImages?: boolean }) => {
     if (!isEditModalOpen) return;
+    if (!options?.preserveGeneratedImages) {
+      clearSessionGeneratedImageRefs(true);
+    }
     setIsLoadingBookContent(false);
     setClosingModal('edit');
     if (editModalCloseTimerRef.current) window.clearTimeout(editModalCloseTimerRef.current);
     editModalCloseTimerRef.current = window.setTimeout(() => {
       setIsEditModalOpen(false);
       setEditingBook(null);
+      setIsEditStructuredChapterMode(false);
       setClosingModal(prev => prev === 'edit' ? null : prev);
     }, MODAL_TRANSITION_MS);
   };
 
-  const closeImportModal = () => {
+  const closeImportModal = (options?: { preserveGeneratedImages?: boolean }) => {
     if (!isImportModalOpen) return;
+    if (!options?.preserveGeneratedImages) {
+      clearSessionGeneratedImageRefs(true);
+    }
     setClosingModal('import');
     if (importModalCloseTimerRef.current) window.clearTimeout(importModalCloseTimerRef.current);
     importModalCloseTimerRef.current = window.setTimeout(() => {
       setIsImportModalOpen(false);
       setImportingBook({});
+      setIsImportStructuredChapterMode(false);
       setClosingModal(prev => prev === 'import' ? null : prev);
     }, MODAL_TRANSITION_MS);
   };
@@ -436,11 +580,15 @@ const Library: React.FC<LibraryProps> = ({
   // Save Edit
   const saveBookChanges = () => {
     if (editingBook) {
-      // Re-parse chapters if regex exists
-      const chapters = parseChapters(editingBook.fullText || '', editingBook.chapterRegex || '');
-      const updatedBook = { ...editingBook, chapters };
+      const chapters = resolveChaptersForSave(editingBook, true);
+      const updatedBook = {
+        ...editingBook,
+        chapterRegex: isEditStructuredChapterMode ? '' : (editingBook.chapterRegex || ''),
+        chapters,
+      };
       onUpdateBook(updatedBook);
-      closeEditModal();
+      clearSessionGeneratedImageRefs(false);
+      closeEditModal({ preserveGeneratedImages: true });
     }
   };
 
@@ -448,8 +596,8 @@ const Library: React.FC<LibraryProps> = ({
   const saveImportBook = () => {
      if (importingBook.title) {
         const text = importingBook.fullText || '';
-        const regex = importingBook.chapterRegex || '';
-        const chapters = parseChapters(text, regex);
+        const regex = isImportStructuredChapterMode ? '' : (importingBook.chapterRegex || '');
+        const chapters = resolveChaptersForSave(importingBook, false);
 
         const newBook: Book = {
             id: Date.now().toString(),
@@ -464,7 +612,8 @@ const Library: React.FC<LibraryProps> = ({
             chapters: chapters
         };
         onAddBook(newBook);
-        closeImportModal();
+        clearSessionGeneratedImageRefs(false);
+        closeImportModal({ preserveGeneratedImages: true });
      }
   };
 
@@ -508,38 +657,94 @@ const Library: React.FC<LibraryProps> = ({
     }
   };
 
-  const handleTxtFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      const targetBook = isEditModalOpen ? editingBook : importingBook;
-      const setTarget = isEditModalOpen ? setEditingBook : setImportingBook;
+  const applyParsedBookImportResult = (
+    parsed: Awaited<ReturnType<typeof parseImportedBookFile>>,
+    setTarget: typeof setEditingBook | typeof setImportingBook,
+    isEdit: boolean
+  ) => {
+    const structuredMode =
+      parsed.format === 'epub' || parsed.format === 'pdf' || hasStructuredChapterBlocks(parsed.chapters);
 
-      if (file && targetBook) {
-          const reader = new FileReader();
-          reader.onload = (e) => {
-              const text = (e.target?.result || '') as string;
-              // @ts-ignore
-              setTarget(prev => ({ ...prev, fullText: text, title: prev.title || file.name.replace('.txt', '') }));
-          };
-          reader.readAsText(file); // Default encoding UTF-8
-      }
+    if (isEdit) {
+      setIsEditStructuredChapterMode(structuredMode);
+    } else {
+      setIsImportStructuredChapterMode(structuredMode);
+    }
+
+    replaceSessionGeneratedImageRefs(parsed.generatedImageRefs || []);
+    // @ts-ignore
+    setTarget(prev => ({
+      ...prev,
+      title: parsed.title,
+      author: parsed.author,
+      coverUrl: parsed.coverUrl || '',
+      fullText: parsed.fullText || '',
+      chapters: parsed.chapters || [],
+      chapterRegex: structuredMode ? '' : (prev?.chapterRegex || ''),
+    }));
+  };
+
+  const handleBookFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const setTarget = isEditModalOpen ? setEditingBook : setImportingBook;
+
+    if (!file) {
+      e.target.value = '';
+      return;
+    }
+
+    try {
+      const parsed = await parseImportedBookFile(file);
+      applyParsedBookImportResult(parsed, setTarget, isEditModalOpen);
+    } catch (error) {
+      console.error('Failed to parse imported file:', error);
+      const message = error instanceof Error ? error.message : 'Unable to parse the selected file.';
+      openErrorModal(`导入失败：${message}`);
+    } finally {
+      e.target.value = '';
+    }
   };
 
   const handleTxtUrlSubmit = async () => {
-      const targetBook = isEditModalOpen ? editingBook : importingBook;
-      const setTarget = isEditModalOpen ? setEditingBook : setImportingBook;
+    const targetBook = isEditModalOpen ? editingBook : importingBook;
+    const setTarget = isEditModalOpen ? setEditingBook : setImportingBook;
+    const sourceUrl = tempTxtUrl.trim();
+    if (!targetBook || !sourceUrl) return;
 
-      if (targetBook && tempTxtUrl.trim()) {
-          try {
-              const res = await fetch(tempTxtUrl);
-              const text = await res.text();
-              // @ts-ignore
-              setTarget(prev => ({ ...prev, fullText: text }));
-              setTxtFileUrlMode(false);
-              setTempTxtUrl('');
-          } catch (e: any) {
-              alert("无法读取链接内容");
-          }
+    try {
+      const response = await fetch(sourceUrl);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
       }
+
+      const blob = await response.blob();
+      const contentType = (response.headers.get('content-type') || blob.type || '').toLowerCase();
+      const nameFromHeader = getFileNameFromContentDisposition(response.headers.get('content-disposition'));
+      const nameFromUrl = getUrlFileName(sourceUrl);
+      const sourceName = nameFromHeader || nameFromUrl || 'imported-book';
+
+      let suffix = getSupportedSuffixFromName(sourceName);
+      if (!suffix) {
+        suffix = inferSuffixFromContentType(contentType);
+      }
+      if (!suffix) {
+        throw new Error('无法识别文件格式。请使用带有 .txt / .docx / .epub / .pdf 后缀的链接，或提供正确的文件 Content-Type。');
+      }
+
+      const fileName = ensureFileNameWithSuffix(sourceName, suffix);
+      const remoteFile = new File([blob], fileName, {
+        type: blob.type || contentType || 'application/octet-stream',
+      });
+
+      const parsed = await parseImportedBookFile(remoteFile);
+      applyParsedBookImportResult(parsed, setTarget, isEditModalOpen);
+      setTxtFileUrlMode(false);
+      setTempTxtUrl('');
+    } catch (error) {
+      console.error('Failed to parse imported file from URL:', error);
+      const message = error instanceof Error ? error.message : '无法读取链接内容';
+      openErrorModal(`导入失败：${message}`);
+    }
   };
 
   const addTag = () => {
@@ -568,7 +773,7 @@ const Library: React.FC<LibraryProps> = ({
   // AI Regex Auto Generate with Real API
   const handleAutoGenerateRegex = async () => {
       if (!apiConfig.apiKey) {
-        openErrorModal("请先在设置中配置 API Key");
+        openErrorModal('请先在设置中配置 API Key');
         return;
       }
 
@@ -577,16 +782,16 @@ const Library: React.FC<LibraryProps> = ({
       const currentInput = targetBook?.chapterRegex || '';
 
       if (!currentInput.trim()) {
-          openErrorModal("请先在输入框中填入一个章节标题示例，例如：'第一章 起点' 或 'Chapter 1'");
+          openErrorModal('请先在输入框中填入一个章节标题示例，例如："第一章 起点" 或 "Chapter 1"');
           return;
       }
 
       setIsGeneratingRegex(true);
 
       const systemPrompt = `你是一个正则表达式专家。用户提供了一个小说章节标题示例。
-请生成一个JavaScript正则表达式来匹配此类章节标题。
+请生成一个 JavaScript 正则表达式来匹配此类章节标题。
 重要规则：
-1. 必须匹配行首 (^)，因为我们要按行匹配章节。
+1. 必须匹配行首 (^) ，因为我们要按行匹配章节。
 2. 兼容数字变化（阿拉伯数字、中文数字）。
 3. 只返回正则表达式字符串本身，不要包含斜杠 /.../，不要 markdown，不要解释代码。
 4. 如果示例包含多余空格，正则应兼容空格 (\\s*)。
@@ -599,18 +804,17 @@ const Library: React.FC<LibraryProps> = ({
 输出: ^Chapter\\s*\\d+`;
 
       try {
-        let regexResult = "";
+        let regexResult = '';
         const endpoint = apiConfig.endpoint.replace(/\/+$/, '');
 
         if (apiConfig.provider === 'GEMINI') {
-           // Use @google/genai SDK
            const ai = new GoogleGenAI({ apiKey: apiConfig.apiKey });
            const response = await ai.models.generateContent({
              model: apiConfig.model || 'gemini-3-pro-preview',
              contents: `${systemPrompt}\n\n用户输入示例: "${currentInput}"`,
            });
-           
-           regexResult = response.text || "";
+
+           regexResult = response.text || '';
 
         } else if (apiConfig.provider === 'CLAUDE') {
             const response = await fetch(`${endpoint}/v1/messages`, {
@@ -630,10 +834,9 @@ const Library: React.FC<LibraryProps> = ({
             });
             if (!response.ok) throw new Error(`Claude API Error: ${response.status}`);
             const data = await response.json();
-            regexResult = data.content?.[0]?.text || "";
+            regexResult = data.content?.[0]?.text || '';
 
         } else {
-            // OpenAI / DeepSeek
             const response = await fetch(`${endpoint}/chat/completions`, {
               method: 'POST',
               headers: {
@@ -650,10 +853,9 @@ const Library: React.FC<LibraryProps> = ({
             });
             if (!response.ok) throw new Error(`API Error: ${response.status}`);
             const data = await response.json();
-            regexResult = data.choices?.[0]?.message?.content || "";
+            regexResult = data.choices?.[0]?.message?.content || '';
         }
 
-        // --- Robust Cleaning Logic for Input Box Tolerance ---
         let cleaned = regexResult;
         cleaned = cleaned.replace(/```(?:regex|javascript|js)?\n?([\s\S]*?)```/gi, '$1');
         const lines = cleaned.split('\n').map(l => l.trim()).filter(l => l);
@@ -667,17 +869,17 @@ const Library: React.FC<LibraryProps> = ({
             }
         }
         cleaned = cleaned.trim();
-        
+
         if (cleaned) {
            // @ts-ignore
            setTarget({ ...targetBook, chapterRegex: cleaned });
         } else {
-           throw new Error("API 返回内容无法解析为正则");
+           throw new Error('API 返回内容无法解析为正则');
         }
 
       } catch (e: any) {
          const errorMessage = e instanceof Error ? e.message : String(e);
-         openErrorModal("自动生成失败: " + errorMessage);
+         openErrorModal('自动生成失败: ' + errorMessage);
       } finally {
          setIsGeneratingRegex(false);
       }
@@ -742,202 +944,221 @@ const Library: React.FC<LibraryProps> = ({
   }, [books]);
 
   // Reusable Modal Content Render
-  const renderBookForm = (book: Partial<Book>, isEdit: boolean) => (
-     <div className="overflow-y-auto no-scrollbar flex-1 -mx-2 px-2 space-y-5 pb-4">
-        {/* File Import Section (Import Only) */}
+  const renderBookForm = (book: Partial<Book>, isEdit: boolean) => {
+    const structuredChapterMode = getStructuredChapterMode(isEdit);
+    return (
+      <div className="overflow-y-auto no-scrollbar flex-1 -mx-2 px-2 space-y-5 pb-4">
         {!isEdit && (
-            <div className={`p-4 rounded-xl space-y-3 ${isDarkMode ? 'bg-black/20' : 'bg-slate-100/50'}`}>
-                <div className="flex items-center justify-between">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                        <FileUp size={14} /> 导入文本 (TXT)
-                    </label>
-                    <span className="text-[10px] text-slate-400">{book.fullText ? '已加载内容' : '未选择'}</span>
-                </div>
-                {!txtFileUrlMode ? (
-                    <div className="flex gap-2">
-                         <button 
-                            onClick={() => txtFileInputRef.current?.click()}
-                            className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1 ${btnClass} text-slate-500 hover:text-rose-400`}
-                         >
-                            <FileText size={12} /> 本地文件
-                         </button>
-                         <input type="file" ref={txtFileInputRef} className="hidden" accept=".txt" onChange={handleTxtFileSelect} />
-                         
-                         <button 
-                            onClick={() => setTxtFileUrlMode(true)}
-                            className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1 ${btnClass} text-slate-500 hover:text-rose-400`}
-                         >
-                            <Link size={12} /> 网络链接
-                         </button>
-                    </div>
-                ) : (
-                    <div className="w-full flex gap-2 app-view-enter-left">
-                         <input 
-                            type="text" 
-                            value={tempTxtUrl}
-                            onChange={(e) => setTempTxtUrl(e.target.value)}
-                            placeholder="输入TXT链接..."
-                            className={`flex-1 px-3 py-1.5 text-xs rounded-lg outline-none ${inputClass}`}
-                         />
-                         <button onClick={handleTxtUrlSubmit} className="text-rose-400"><Check size={16} /></button>
-                         <button onClick={() => setTxtFileUrlMode(false)} className="text-slate-400"><X size={16} /></button>
-                    </div>
-                )}
-                {book.fullText && (
-                    <div className="text-[10px] text-emerald-500 flex items-center gap-1">
-                        <Check size={10} /> 内容已加载 ({book.fullText.length} 字符)
-                    </div>
-                )}
+          <div className={`p-4 rounded-xl space-y-3 ${isDarkMode ? 'bg-black/20' : 'bg-slate-100/50'}`}>
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                <FileUp size={14} /> 导入文本 (TXT / WORD / PDF / EPUB)
+              </label>
+              <span className="text-[10px] text-slate-400">{book.fullText ? '已加载内容' : '未选择'}</span>
             </div>
+            {!txtFileUrlMode ? (
+              <div className="flex gap-2">
+                <button
+                  onClick={() => txtFileInputRef.current?.click()}
+                  className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1 ${btnClass} text-slate-500 hover:text-rose-400`}
+                >
+                  <FileText size={12} /> 本地文件
+                </button>
+                <input
+                  type="file"
+                  ref={txtFileInputRef}
+                  className="hidden"
+                  accept={BOOK_IMPORT_ACCEPT}
+                  onChange={handleBookFileSelect}
+                />
+
+                <button
+                  onClick={() => setTxtFileUrlMode(true)}
+                  className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1 ${btnClass} text-slate-500 hover:text-rose-400`}
+                >
+                  <Link size={12} /> 网络链接
+                </button>
+              </div>
+            ) : (
+              <div className="w-full flex gap-2 app-view-enter-left">
+                <input
+                  type="text"
+                  value={tempTxtUrl}
+                  onChange={(e) => setTempTxtUrl(e.target.value)}
+                  placeholder="输入文件链接..."
+                  className={`flex-1 px-3 py-1.5 text-xs rounded-lg outline-none ${inputClass}`}
+                />
+                <button onClick={handleTxtUrlSubmit} className="text-rose-400"><Check size={16} /></button>
+                <button onClick={() => setTxtFileUrlMode(false)} className="text-slate-400"><X size={16} /></button>
+              </div>
+            )}
+            {book.fullText && (
+              <div className="text-[10px] text-emerald-500 flex items-center gap-1">
+                <Check size={10} /> 内容已加载 ({book.fullText.length} 字符)
+              </div>
+            )}
+          </div>
         )}
 
-        {/* Content Preview/Edit Area */}
         <div className="space-y-1">
-           <div className="flex justify-between items-center mb-1">
-             <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">正文内容</label>
-             <span className="text-[10px] text-slate-400">{book.fullText ? `${book.fullText.length} 字` : '0 字'}</span>
-           </div>
-           <textarea
-              value={book.fullText || ''}
-              onChange={(e) => isEdit ? setEditingBook({...editingBook!, fullText: e.target.value}) : setImportingBook({...importingBook, fullText: e.target.value})}
-              placeholder="可在此处粘贴或编辑书籍正文..."
-              className={`w-full p-3 text-xs rounded-xl outline-none resize-none h-32 leading-relaxed ${inputClass}`}
-           />
+          <div className="flex justify-between items-center mb-1">
+            <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">正文内容</label>
+            <span className="text-[10px] text-slate-400">{book.fullText ? `${book.fullText.length} 字` : '0 字'}</span>
+          </div>
+          <textarea
+            value={book.fullText || ''}
+            onChange={(e) => {
+              if (isEdit) {
+                setIsEditStructuredChapterMode(false);
+                setEditingBook({ ...editingBook!, fullText: e.target.value });
+                return;
+              }
+              setIsImportStructuredChapterMode(false);
+              setImportingBook({ ...importingBook, fullText: e.target.value });
+            }}
+            placeholder="可在此处粘贴或编辑书籍正文..."
+            className={`w-full p-3 text-xs rounded-xl outline-none resize-none h-32 leading-relaxed ${inputClass}`}
+          />
         </div>
 
-        {/* Cover Image Section - Styled to match Import Text */}
         <div className={`p-4 rounded-xl space-y-3 ${isDarkMode ? 'bg-black/20' : 'bg-slate-100/50'}`}>
-            <div className="flex items-center justify-between">
-                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                    <Image size={14} /> 封面图片
-                </label>
-                <span className="text-[10px] text-slate-400">{book.coverUrl ? '已设置' : '默认封面'}</span>
-            </div>
-            
-            <div className="flex items-center gap-4">
-                 {/* Cover Preview */}
-                 <div className={`w-16 h-20 rounded-lg overflow-hidden flex-shrink-0 shadow-sm ${cardClass}`}>
-                    {book.coverUrl ? (
-                       <ResolvedImage src={book.coverUrl} className="w-full h-full object-cover" alt="Cover" />
-                    ) : (
-                       <DefaultBookCover />
-                    )}
-                 </div>
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+              <Image size={14} /> 封面图片
+            </label>
+            <span className="text-[10px] text-slate-400">{book.coverUrl ? '已设置' : '默认封面'}</span>
+          </div>
 
-                 {/* Controls */}
-                 <div className="flex-1">
-                     {!urlInputMode ? (
-                        <div className="flex gap-2">
-                           <button 
-                              onClick={() => fileInputRef.current?.click()}
-                              className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1 ${btnClass} text-slate-500 hover:text-rose-400`}
-                           >
-                              <FileUp size={12} /> 本地上传
-                           </button>
-                           <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleCoverFileSelect} />
-                           
-                           <button 
-                              onClick={() => setUrlInputMode(true)}
-                              className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1 ${btnClass} text-slate-500 hover:text-rose-400`}
-                           >
-                              <Link size={12} /> 网络链接
-                           </button>
-                        </div>
-                     ) : (
-                        <div className="w-full flex gap-2 app-view-enter-left">
-                           <input 
-                              type="text" 
-                              value={tempCoverUrl}
-                              onChange={(e) => setTempCoverUrl(e.target.value)}
-                              placeholder="输入图片链接..."
-                              className={`flex-1 px-3 py-1.5 text-xs rounded-lg outline-none ${inputClass}`}
-                           />
-                           <button onClick={handleCoverUrlSubmit} className="text-rose-400"><Check size={16} /></button>
-                           <button onClick={() => setUrlInputMode(false)} className="text-slate-400"><X size={16} /></button>
-                        </div>
-                     )}
-                 </div>
+          <div className="flex items-center gap-4">
+            <div className={`w-16 h-20 rounded-lg overflow-hidden flex-shrink-0 shadow-sm ${cardClass}`}>
+              {book.coverUrl ? (
+                <ResolvedImage src={book.coverUrl} className="w-full h-full object-cover" alt="Cover" />
+              ) : (
+                <DefaultBookCover />
+              )}
             </div>
+
+            <div className="flex-1">
+              {!urlInputMode ? (
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1 ${btnClass} text-slate-500 hover:text-rose-400`}
+                  >
+                    <FileUp size={12} /> 本地上传
+                  </button>
+                  <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleCoverFileSelect} />
+
+                  <button
+                    onClick={() => setUrlInputMode(true)}
+                    className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1 ${btnClass} text-slate-500 hover:text-rose-400`}
+                  >
+                    <Link size={12} /> 网络链接
+                  </button>
+                </div>
+              ) : (
+                <div className="w-full flex gap-2 app-view-enter-left">
+                  <input
+                    type="text"
+                    value={tempCoverUrl}
+                    onChange={(e) => setTempCoverUrl(e.target.value)}
+                    placeholder="输入图片链接..."
+                    className={`flex-1 px-3 py-1.5 text-xs rounded-lg outline-none ${inputClass}`}
+                  />
+                  <button onClick={handleCoverUrlSubmit} className="text-rose-400"><Check size={16} /></button>
+                  <button onClick={() => setUrlInputMode(false)} className="text-slate-400"><X size={16} /></button>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
-        {/* Text Fields */}
         <div className="space-y-3">
-           <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">书名</label>
-              <input 
-                 type="text" 
-                 value={book.title}
-                 onChange={(e) => isEdit ? setEditingBook({...editingBook!, title: e.target.value}) : setImportingBook({...importingBook, title: e.target.value})}
-                 className={`w-full px-4 py-3 text-sm rounded-xl outline-none ${inputClass}`}
-              />
-           </div>
-           <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">作者</label>
-              <input 
-                 type="text" 
-                 value={book.author}
-                 onChange={(e) => isEdit ? setEditingBook({...editingBook!, author: e.target.value}) : setImportingBook({...importingBook, author: e.target.value})}
-                 className={`w-full px-4 py-3 text-sm rounded-xl outline-none ${inputClass}`}
-              />
-           </div>
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">书名</label>
+            <input
+              type="text"
+              value={book.title}
+              onChange={(e) => isEdit ? setEditingBook({ ...editingBook!, title: e.target.value }) : setImportingBook({ ...importingBook, title: e.target.value })}
+              className={`w-full px-4 py-3 text-sm rounded-xl outline-none ${inputClass}`}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">作者</label>
+            <input
+              type="text"
+              value={book.author}
+              onChange={(e) => isEdit ? setEditingBook({ ...editingBook!, author: e.target.value }) : setImportingBook({ ...importingBook, author: e.target.value })}
+              className={`w-full px-4 py-3 text-sm rounded-xl outline-none ${inputClass}`}
+            />
+          </div>
         </div>
 
-        {/* Regex / Chapter Parsing */}
         <div className="space-y-1">
-             <div className="flex justify-between items-center mb-1">
-                 <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1 flex items-center gap-1">
-                    章节匹配正则
-                 </label>
-                 <span className={`text-[10px] ${detectedChapters > 0 ? 'text-emerald-500' : 'text-slate-400'}`}>
-                    {detectedChapters > 0 ? `检测到 ${detectedChapters} 章` : '默认全文一章'}
-                 </span>
-             </div>
-             
-             <div className="flex gap-2">
-                 <input 
-                     type="text" 
-                     value={book.chapterRegex || ''}
-                     onChange={(e) => isEdit ? setEditingBook({...editingBook!, chapterRegex: e.target.value}) : setImportingBook({...importingBook, chapterRegex: e.target.value})}
-                     placeholder="例如: 第[0-9]+章"
-                     className={`flex-1 px-4 py-3 text-sm rounded-xl outline-none ${inputClass}`}
-                 />
-                 <button 
-                    onClick={handleAutoGenerateRegex}
-                    disabled={isGeneratingRegex}
-                    className={`px-4 rounded-xl flex items-center justify-center gap-1 text-xs font-bold text-rose-400 transition-all active:scale-95 whitespace-nowrap disabled:opacity-50 ${btnClass}`}
-                    title="输入示例标题后点击自动生成"
-                 >
-                    <Sparkles size={14} className={isGeneratingRegex ? "animate-spin" : ""} /> 
-                    {isGeneratingRegex ? '生成中...' : '自动生成'}
-                 </button>
-             </div>
-             <p className="text-[10px] text-slate-400 px-2 leading-tight mt-1">
-                输入示例标题(如"第一章 起点")点击自动生成正则。
-             </p>
+          <div className="flex justify-between items-center mb-1">
+            <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1 flex items-center gap-1">
+              章节匹配正则
+            </label>
+            <span className={`text-[10px] ${detectedChapters > 0 ? 'text-emerald-500' : 'text-slate-400'}`}>
+              {detectedChapters > 0 ? `检测到 ${detectedChapters} 章` : '默认全文一章'}
+            </span>
+          </div>
+
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={book.chapterRegex || ''}
+              onChange={(e) => {
+                if (structuredChapterMode) return;
+                if (isEdit) {
+                  setEditingBook({ ...editingBook!, chapterRegex: e.target.value });
+                  return;
+                }
+                setImportingBook({ ...importingBook, chapterRegex: e.target.value });
+              }}
+              disabled={structuredChapterMode}
+              placeholder={structuredChapterMode ? '已启用内建章节结构' : '例如: ^第\\s*[0-9]+\\s*章'}
+              className={`flex-1 px-4 py-3 text-sm rounded-xl outline-none ${inputClass} ${structuredChapterMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+            />
+            <button
+              onClick={handleAutoGenerateRegex}
+              disabled={isGeneratingRegex || structuredChapterMode}
+              className={`px-4 rounded-xl flex items-center justify-center gap-1 text-xs font-bold text-rose-400 transition-all active:scale-95 whitespace-nowrap disabled:opacity-50 ${btnClass}`}
+              title={structuredChapterMode ? '已启用结构化章节模式' : '输入示例标题后点击自动生成'}
+            >
+              <Sparkles size={14} className={isGeneratingRegex ? 'animate-spin' : ''} />
+              {isGeneratingRegex ? '生成中...' : '自动生成'}
+            </button>
+          </div>
+          <p className="text-[10px] text-slate-400 px-2 leading-tight mt-1">
+            {structuredChapterMode
+              ? '检测到内建章节结构，已禁用正则拆章。'
+              : '输入示例标题（如“第一章 起点”）后点击自动生成。'}
+          </p>
         </div>
 
-        {/* Tag Management */}
         <div className="space-y-2">
-           <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">标签</label>
-           <div className={`w-full p-2 rounded-xl flex flex-wrap gap-2 min-h-[48px] ${inputClass}`}>
-              {book.tags && book.tags.map((tag, idx) => (
-                 <span key={idx} className="bg-rose-400 text-white text-xs px-2 py-1 rounded-lg flex items-center gap-1 animate-fade-in">
-                    {tag}
-                    <button onClick={() => removeTag(tag)} className="hover:text-rose-100"><X size={10} /></button>
-                 </span>
-              ))}
-              <input 
-                 type="text"
-                 value={tagInput}
-                 onChange={(e) => setTagInput(e.target.value)}
-                 onKeyDown={(e) => e.key === 'Enter' && addTag()}
-                 placeholder={book.tags && book.tags.length > 0 ? "+ 添加" : "添加标签..."}
-                 className="bg-transparent outline-none text-xs flex-1 min-w-[60px] py-1"
-              />
-           </div>
+          <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">标签</label>
+          <div className={`w-full p-2 rounded-xl flex flex-wrap gap-2 min-h-[48px] ${inputClass}`}>
+            {book.tags && book.tags.map((tag, idx) => (
+              <span key={idx} className="bg-rose-400 text-white text-xs px-2 py-1 rounded-lg flex items-center gap-1 animate-fade-in">
+                {tag}
+                <button onClick={() => removeTag(tag)} className="hover:text-rose-100"><X size={10} /></button>
+              </span>
+            ))}
+            <input
+              type="text"
+              value={tagInput}
+              onChange={(e) => setTagInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addTag()}
+              placeholder={book.tags && book.tags.length > 0 ? '+ 添加' : '添加标签...'}
+              className="bg-transparent outline-none text-xs flex-1 min-w-[60px] py-1"
+            />
+          </div>
         </div>
-     </div>
-  );
+      </div>
+    );
+  };
 
   const renderSortMenu = () => (
     <div className={`absolute right-0 top-12 w-48 rounded-2xl p-3 z-30 shadow-xl border border-slate-400/10 animate-fade-in ${cardClass}`}>
@@ -957,7 +1178,7 @@ const Library: React.FC<LibraryProps> = ({
                  setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
                } else {
                  setSortField(opt.id as SortField);
-                 setSortDirection('desc'); // Default new field to desc
+                 setSortDirection('desc');
                }
              }}
              className={`flex items-center justify-between p-2 rounded-lg text-sm cursor-pointer transition-colors ${
@@ -1273,7 +1494,7 @@ const Library: React.FC<LibraryProps> = ({
                >
                   <Plus size={32} />
                   <span className="text-sm font-medium mt-2">导入书籍</span>
-                  <span className="text-xs mt-1 opacity-60">TXT</span>
+                  <span className="text-xs mt-1 opacity-60">TXT / WORD / PDF / EPUB</span>
                </div>
 
                {/* Grid Books */}
@@ -1331,7 +1552,7 @@ const Library: React.FC<LibraryProps> = ({
                   className={`p-4 rounded-2xl flex items-center justify-center gap-2 hover:text-rose-400 transition-all cursor-pointer border-2 border-transparent hover:border-rose-100/20 active:scale-[0.98] ${pressedClass} ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}
                >
                   <Plus size={18} />
-                  <span className="text-sm font-medium">导入新书籍 (TXT)</span>
+                  <span className="text-sm font-medium">导入新书籍 (TXT / WORD / PDF / EPUB)</span>
                </div>
                
                {/* List Books */}
@@ -1413,7 +1634,7 @@ const Library: React.FC<LibraryProps> = ({
             <h3 className={`text-lg font-bold mb-6 text-center ${headingClass}`}>编辑书籍信息</h3>
 
             {isLoadingBookContent && (
-              <div className="mb-3 text-xs text-slate-400 text-center">Loading book content...</div>
+              <div className="mb-3 text-xs text-slate-400 text-center">正在加载书籍正文...</div>
             )}
             {renderBookForm(editingBook, true)}
 
@@ -1462,7 +1683,7 @@ const Library: React.FC<LibraryProps> = ({
                   </button>
                   <button 
                      onClick={saveImportBook}
-                     disabled={!importingBook.fullText || !importingBook.title}
+                     disabled={!importingBook.title}
                      className={`flex-1 py-3 rounded-full text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all font-bold text-sm disabled:opacity-50 disabled:active:scale-100`}
                   >
                      确认导入
@@ -1535,3 +1756,9 @@ const Library: React.FC<LibraryProps> = ({
 };
 
 export default Library;
+
+
+
+
+
+

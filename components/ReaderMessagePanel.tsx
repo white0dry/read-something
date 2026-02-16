@@ -43,6 +43,7 @@ import {
   buildReadingContextSnapshot,
   ReadingContextSnapshot,
   runConversationGeneration,
+  sanitizeTextForAiPrompt,
 } from '../utils/readerAiEngine';
 import {
   DEFAULT_NEUMORPHISM_BUBBLE_CSS,
@@ -1177,7 +1178,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           if (nextTask.kind === 'chat') {
             const messageSlice = messagesRef.current
               .slice(sliceStart, sliceEnd)
-              .map((item) => `[${item.sender === 'user' ? '用户' : 'AI'}] ${item.content}`)
+              .map((item) => `[${item.sender === 'user' ? '用户' : 'AI'}] ${sanitizeTextForAiPrompt(item.content || '')}`)
               .join('\n');
             return [
               `请将以下聊天记录总结为 100-200 字，第三人称、凝练、可读性强。`,
@@ -1187,7 +1188,9 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
               messageSlice || '（空）',
             ].join('\n');
           }
-          const fullBookText = chapters.length > 0 ? chapters.map((chapter) => chapter.content || '').join('') : (bookText || '');
+          const fullBookText = sanitizeTextForAiPrompt(
+            chapters.length > 0 ? chapters.map((chapter) => chapter.content || '').join('') : (bookText || '')
+          );
           const excerpt = fullBookText.slice(sliceStart, sliceEnd);
           return [
             `请将以下书籍片段总结为 100-200 字，语言凝练，不剧透范围外内容。`,

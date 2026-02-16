@@ -34,11 +34,71 @@ const normalizeSummaryCard = (value: unknown): ReaderSummaryCard | null => {
   };
 };
 
+const normalizeChapterBlocks = (value: unknown): Chapter['blocks'] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const blocks = value.reduce<NonNullable<Chapter['blocks']>>((acc, item) => {
+    if (!item || typeof item !== 'object') return acc;
+    const source = item as Partial<NonNullable<Chapter['blocks']>[number]>;
+
+    if (source.type === 'text') {
+      if (typeof (source as { text?: unknown }).text !== 'string') return acc;
+      acc.push({
+        type: 'text',
+        text: (source as { text: string }).text,
+      });
+      return acc;
+    }
+
+    if (source.type === 'image') {
+      const imageRef = typeof (source as { imageRef?: unknown }).imageRef === 'string'
+        ? (source as { imageRef: string }).imageRef.trim()
+        : '';
+      if (!imageRef) return acc;
+      const width = Number((source as { width?: unknown }).width);
+      const height = Number((source as { height?: unknown }).height);
+      acc.push({
+        type: 'image',
+        imageRef,
+        alt: typeof (source as { alt?: unknown }).alt === 'string'
+          ? (source as { alt: string }).alt
+          : undefined,
+        title: typeof (source as { title?: unknown }).title === 'string'
+          ? (source as { title: string }).title
+          : undefined,
+        width: Number.isFinite(width) && width > 0 ? Math.round(width) : undefined,
+        height: Number.isFinite(height) && height > 0 ? Math.round(height) : undefined,
+      });
+    }
+
+    return acc;
+  }, []);
+
+  return blocks.length > 0 ? blocks : undefined;
+};
+
+const normalizeChapter = (value: unknown): Chapter | null => {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Partial<Chapter>;
+  const title = typeof source.title === 'string' ? source.title.trim() : '';
+  const content = typeof source.content === 'string' ? source.content : '';
+  if (!title && !content) return null;
+  const blocks = normalizeChapterBlocks((source as { blocks?: unknown }).blocks);
+  return {
+    title: title || 'Untitled Chapter',
+    content,
+    ...(blocks ? { blocks } : {}),
+  };
+};
+
 const normalizeStoredBookContent = (value: unknown): StoredBookContent | null => {
   if (!value || typeof value !== 'object') return null;
   const source = value as Partial<StoredBookContent>;
   const fullText = typeof source.fullText === 'string' ? source.fullText : '';
-  const chapters = Array.isArray(source.chapters) ? source.chapters : [];
+  const chapters = Array.isArray(source.chapters)
+    ? source.chapters
+        .map((item) => normalizeChapter(item))
+        .filter((item): item is Chapter => Boolean(item))
+    : [];
   const bookSummaryCards = Array.isArray(source.bookSummaryCards)
     ? source.bookSummaryCards
         .map((item) => normalizeSummaryCard(item))

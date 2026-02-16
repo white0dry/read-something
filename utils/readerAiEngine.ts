@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+﻿import { GoogleGenAI } from '@google/genai';
 import { ApiConfig, Chapter, ReaderHighlightRange, ReaderPositionState } from '../types';
 import { Character, WorldBookEntry } from '../components/settings/types';
 import {
@@ -83,8 +83,28 @@ const DEFAULT_MEMORY_BUBBLE_COUNT = 100;
 const DEFAULT_REPLY_BUBBLE_MIN = 3;
 const DEFAULT_REPLY_BUBBLE_MAX = 8;
 
+const DATA_IMAGE_REGEX = /data:image\/[a-zA-Z0-9.+-]+;base64,[a-zA-Z0-9+/=\s]+/gi;
+const IMAGE_REF_REGEX = /idb:\/\/[a-zA-Z0-9._-]+/gi;
+const IMAGE_TAG_REGEX = /<img\b[^>]*>/gi;
+const MARKDOWN_IMAGE_REGEX = /!\[[^\]]*]\((data:image[^)]+|idb:\/\/[^)]+)\)/gi;
+const IMAGE_PLACEHOLDER_REGEX = /\[(?:image|img|media|鍥剧墖|鍥惧儚)[:锛歖[^\]]*]/gi;
+
+export const sanitizeTextForAiPrompt = (raw: string) => {
+  if (!raw) return '';
+  return raw
+    .replace(DATA_IMAGE_REGEX, ' ')
+    .replace(IMAGE_REF_REGEX, ' ')
+    .replace(IMAGE_TAG_REGEX, ' ')
+    .replace(MARKDOWN_IMAGE_REGEX, ' ')
+    .replace(IMAGE_PLACEHOLDER_REGEX, ' ')
+    .replace(/\s+\n/g, '\n')
+    .replace(/\n\s+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+};
+
 const normalizeReaderLayoutText = (raw: string) => {
-  const normalizedText = raw.replace(/\r\n/g, '\n').trim();
+  const normalizedText = sanitizeTextForAiPrompt(raw).replace(/\r\n/g, '\n').trim();
   if (!normalizedText) return '';
 
   const splitByBlankLine = normalizedText
@@ -124,7 +144,7 @@ const ensureBubbleCount = (items: string[], minCount: number, maxCount: number) 
 
   const raw = compactText(lines.join(' '));
   const splitByPunctuation = raw
-    .split(/[。！？!?；;\n]+/)
+    .split(/[銆傦紒锛??锛?\n]+/)
     .map(compactText)
     .filter(Boolean);
 
@@ -141,7 +161,7 @@ const ensureBubbleCount = (items: string[], minCount: number, maxCount: number) 
     if (chunks.length > 0) lines = chunks;
   }
 
-  const fallback = lines[0] || '收到';
+  const fallback = lines[0] || '鏀跺埌';
   while (lines.length < minCount) {
     lines.push(fallback);
   }
@@ -163,13 +183,13 @@ const normalizeAiBubbleLines = (raw: string, minCount: number, maxCount: number)
 
   const lines = cleaned.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const marked = lines
-    .map((line) => line.match(/^\[气泡\]\s*(.+)$/)?.[1] || line.match(/^【气泡】\s*(.+)$/)?.[1] || '')
+    .map((line) => line.match(/^\[姘旀场\]\s*(.+)$/)?.[1] || line.match(/^銆愭皵娉°€慭s*(.+)$/)?.[1] || '')
     .map(compactText)
     .filter(Boolean);
   if (marked.length > 0) return ensureBubbleCount(marked, minCount, maxCount);
 
   const plainLines = lines
-    .map((line) => line.replace(/^\d+[\.\)．、]\s*/, ''))
+    .map((line) => line.replace(/^\d+[\.\)\s]*/, ''))
     .map(compactText)
     .filter(Boolean);
   return ensureBubbleCount(plainLines.length > 0 ? plainLines : [cleaned], minCount, maxCount);
@@ -181,7 +201,7 @@ const parseAiReplyPayload = (raw: string): ParsedAiReply => {
   const bubbleLines: string[] = [];
 
   lines.forEach((line) => {
-    const matched = line.match(/^\s*\[划线\]\s*(.+)\s*$/);
+    const matched = line.match(/^\s*\[鍒掔嚎\]\s*(.+)\s*$/);
     if (matched) {
       if (!firstUnderline) {
         const text = compactText(matched[1] || '');
@@ -353,15 +373,15 @@ const sortWorldBookEntriesByCode = (entries: WorldBookEntry[]) =>
     .map((item) => item.entry);
 
 const formatWorldBookSection = (entries: WorldBookEntry[], title: string) => {
-  if (entries.length === 0) return `${title}:（无）`;
+  if (entries.length === 0) return `${title}:(none)`;
   return [
     `${title}:`,
     ...entries.map((entry, index) => {
       const code = getWorldBookOrderCode(entry);
       const codeText = Number.isFinite(code) ? code.toString() : '-';
-      const entryTitle = entry.title?.trim() || `条目${index + 1}`;
-      const entryContent = entry.content?.trim() || '（空）';
-      return `[世界书-${index + 1} | 编码:${codeText} | 分类:${entry.category}] ${entryTitle}\n${entryContent}`;
+      const entryTitle = entry.title?.trim() || `Entry ${index + 1}`;
+      const entryContent = entry.content?.trim() || '(empty)';
+      return `[WorldBook-${index + 1} | code:${codeText} | category:${entry.category}] ${entryTitle}\n${entryContent}`;
     }),
   ].join('\n');
 };
@@ -404,8 +424,8 @@ const buildAiPrompt = (params: {
     replyBubbleMin,
     replyBubbleMax,
   } = params;
+
   const { excerpt, highlightedSnippets } = readingContext;
-  const hasReadableExcerpt = compactText(excerpt).length > 0;
   const recentHistory = sourceMessages
     .slice(-memoryBubbleCount)
     .map((message) => message.promptRecord)
@@ -419,18 +439,27 @@ const buildAiPrompt = (params: {
       : mode === 'proactive'
         ? '（本轮为角色主动发起，无待回复用户消息）'
         : latestUserRecord;
+
+  const safeExcerpt = sanitizeTextForAiPrompt(excerpt);
+  const safeHasReadableExcerpt = compactText(safeExcerpt).length > 0;
+  const safeHighlightedSnippets = highlightedSnippets.map((item) => sanitizeTextForAiPrompt(item)).filter(Boolean);
+  const safeActiveBookSummary = sanitizeTextForAiPrompt(activeBookSummary);
+  const safeChatHistorySummary = sanitizeTextForAiPrompt(chatHistorySummary);
+  const safeRecentHistory = sanitizeTextForAiPrompt(recentHistory);
+  const safePendingRecordText = sanitizeTextForAiPrompt(pendingRecordText);
+
   const proactiveUnderlineRule = allowAiUnderlineInThisReply
-    ? '【主动划线规则】你可以额外输出 0 或 1 行 `[划线] 文本`。划线文本必须是“当前阅读进度前文 800 字符”中的连续原文片段。若没有明确想重点讨论的句子，则不要输出 `[划线]` 行。'
+    ? '【主动划线规则】你可以额外输出 0 或 1 行 `[划线] 文本`，且该文本必须来自当前前文原句。'
     : '【主动划线规则】本轮不要输出任何 `[划线]` 行。';
   const triggerModeRule =
     mode === 'proactive'
-      ? '【触发方式】本轮是你主动发起消息，不是用户催你回复。请自然开启对话。'
+      ? '【触发方式】本轮是角色主动发起消息，不是对用户输入的被动回复。'
       : '【触发方式】本轮是用户手动请求你的回复。';
 
   return [
     `你是角色 ${characterRealName}。`,
     `你的聊天显示名是 ${characterNickname}。`,
-    `当前共读用户真名：${userRealName}。`,
+    `当前共读用户真实名：${userRealName}。`,
     `当前共读用户显示名：${userNickname}。`,
     triggerModeRule,
     '',
@@ -440,29 +469,28 @@ const buildAiPrompt = (params: {
     formatWorldBookSection(characterWorldBookEntries.after, '【世界书-角色定义后】'),
     '',
     `【当前书籍】${activeBookTitle || '未选择书籍'}`,
-    `【书籍前文总结（预留字段）】${activeBookSummary || '（尚未生成）'}`,
-    `【聊天前文总结（预留字段）】${chatHistorySummary || '（尚未生成）'}`,
+    `【书籍前文总结】${safeActiveBookSummary || '（尚未生成）'}`,
+    `【聊天前文总结】${safeChatHistorySummary || '（尚未生成）'}`,
     '',
-    '【当前阅读进度前文800字符（仅前文）】',
-    hasReadableExcerpt ? excerpt : '（当前无可用前文）',
+    '【当前阅读进度前文（最多800字符）】',
+    safeHasReadableExcerpt ? safeExcerpt : '（当前无可用前文）',
     '',
-    '【前文中荧光笔重点】',
-    highlightedSnippets.length > 0 ? highlightedSnippets.map((item) => `- ${item}`).join('\n') : '（暂无）',
-    highlightedSnippets.length === 0 ? '【荧光笔状态】当前没有任何划线句子，禁止编造“划线内容”。' : '',
+    '【前文中的高亮重点】',
+    safeHighlightedSnippets.length > 0 ? safeHighlightedSnippets.map((item) => `- ${item}`).join('\n') : '（暂无）',
+    safeHighlightedSnippets.length === 0 ? '【高亮状态】当前没有任何高亮句子，禁止编造高亮内容。' : '',
     '',
     '【最近聊天记录】',
     `【本轮记忆条数】${memoryBubbleCount}`,
-    recentHistory || '（暂无）',
+    safeRecentHistory || '（暂无）',
     '',
     '【本轮待回复用户消息】',
-    pendingRecordText,
+    safePendingRecordText || '（暂无）',
     '',
     '【场景与语气要求】',
     '- 当前场景是两人正在共读同一本书。',
-    '- 语气要接近真人网络聊天，短句、口语化，可拆分句子。',
-    '- 可以省略部分标点，不要写成书面报告。',
-    '- 不能剧透用户尚未读到的后文。',
-    '- 如果荧光笔重点为“（暂无）”，不要提及任何不存在的划线句子。',
+    '- 语气要口语化、短句、像即时聊天。',
+    '- 不能剧透用户尚未阅读到的后文。',
+    '- 如果高亮重点为空，不要提及任何不存在的高亮句子。',
     proactiveUnderlineRule,
     '',
     '【输出格式要求（必须严格遵守）】',
@@ -470,7 +498,7 @@ const buildAiPrompt = (params: {
     '- 每一行必须以 [气泡] 开头。',
     '- [气泡] 后面只写一条聊天消息。',
     '- `[划线]` 行最多 1 行，且可选。',
-    '- 不要输出任何解释、标题、编号、代码块。',
+    '- 不要输出解释、标题、编号或代码块。',
     '',
     '[气泡] 示例',
     '[气泡] 继续示例',
@@ -636,9 +664,9 @@ const validateApiConfig = (apiConfig: ApiConfig): string | null => {
   const endpoint = (apiConfig.endpoint || '').trim();
   const apiKey = (apiConfig.apiKey || '').trim();
   const model = (apiConfig.model || '').trim();
-  if (!apiKey) return '请先设置 API Key';
-  if (!model) return '请先设置模型名称';
-  if (apiConfig.provider !== 'GEMINI' && !endpoint) return '请先设置 API 地址';
+  if (!apiKey) return '璇峰厛璁剧疆 API Key';
+  if (!model) return '璇峰厛璁剧疆妯″瀷鍚嶇О';
+  if (apiConfig.provider !== 'GEMINI' && !endpoint) return '璇峰厛璁剧疆 API 鍦板潃';
   return null;
 };
 
@@ -688,7 +716,7 @@ export const runConversationGeneration = async (
       status: 'skip',
       reason: 'no-pending',
       silent: mode === 'proactive',
-      message: '当前没有待发送的用户消息',
+      message: '褰撳墠娌℃湁寰呭彂閫佺殑鐢ㄦ埛娑堟伅',
     };
   }
 
@@ -835,3 +863,5 @@ export const runConversationGeneration = async (
     finishConversationGeneration(conversationKey, requestId, 'completed');
   }
 };
+
+

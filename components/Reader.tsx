@@ -31,6 +31,7 @@ import { Character, Persona, WorldBookEntry } from './settings/types';
 import { getBookContent, saveBookReaderState } from '../utils/bookContentStorage';
 import { buildConversationKey, persistConversationBucket, readConversationBucket } from '../utils/readerChatRuntime';
 import ReaderMessagePanel from './ReaderMessagePanel';
+import ResolvedImage from './ResolvedImage';
 
 interface ReaderProps {
   onBack: (snapshot?: ReaderSessionSnapshot) => void;
@@ -77,6 +78,24 @@ interface ParagraphSegment {
   color?: string;
   hasAiUnderline?: boolean;
 }
+
+interface ReaderRenderParagraphItem {
+  type: 'paragraph';
+  key: string;
+  paragraphIndex: number;
+}
+
+interface ReaderRenderImageItem {
+  type: 'image';
+  key: string;
+  imageRef: string;
+  alt?: string;
+  title?: string;
+  width?: number;
+  height?: number;
+}
+
+type ReaderRenderItem = ReaderRenderParagraphItem | ReaderRenderImageItem;
 
 interface ReaderTypographyStyle {
   fontSizePx: number;
@@ -565,6 +584,8 @@ const Reader: React.FC<ReaderProps> = ({
   const readerScrollbarTrackRef = useRef<HTMLDivElement>(null);
   const readerArticleRef = useRef<HTMLElement>(null);
   const readerFontDropdownRef = useRef<HTMLDivElement>(null);
+  const tocPanelRef = useRef<HTMLDivElement>(null);
+  const tocItemRefs = useRef<Record<number, HTMLButtonElement | null>>({});
   const chapterAutoSwitchLockRef = useRef(false);
   const lastReaderScrollTopRef = useRef(0);
   const touchStartYRef = useRef<number | null>(null);
@@ -1060,6 +1081,28 @@ const Reader: React.FC<ReaderProps> = ({
     pendingRestorePositionRef.current = null;
   }, [activeBook?.id, isLoadingBookContent, bookText]);
 
+  useLayoutEffect(() => {
+    if (!isTocOpen) return;
+    if (selectedChapterIndex === null || selectedChapterIndex < 0) return;
+
+    const panel = tocPanelRef.current;
+    const activeItem = tocItemRefs.current[selectedChapterIndex];
+    if (!panel || !activeItem) return;
+
+    const frameId = window.requestAnimationFrame(() => {
+      const panelRect = panel.getBoundingClientRect();
+      const itemRect = activeItem.getBoundingClientRect();
+      const delta = itemRect.top - panelRect.top - (panel.clientHeight - itemRect.height) / 2;
+      const maxScrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+      const nextScrollTop = clamp(panel.scrollTop + delta, 0, maxScrollTop);
+      panel.scrollTo({ top: nextScrollTop, behavior: 'auto' });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [isTocOpen, selectedChapterIndex, chapters.length]);
+
   useEffect(() => {
     refreshReaderScrollbar();
     const rafId = window.requestAnimationFrame(() => refreshReaderScrollbar());
@@ -1255,7 +1298,76 @@ const Reader: React.FC<ReaderProps> = ({
     };
   }, []);
 
-  const paragraphs = useMemo(() => splitReaderParagraphs(bookText), [bookText]);
+  const currentChapterBlocks = useMemo(() => {
+    if (selectedChapterIndex === null) return [] as NonNullable<Chapter['blocks']>;
+    const chapter = chapters[selectedChapterIndex];
+    if (!chapter || !Array.isArray(chapter.blocks)) return [] as NonNullable<Chapter['blocks']>;
+    return chapter.blocks;
+  }, [chapters, selectedChapterIndex]);
+
+  const { paragraphs, renderItems } = useMemo(() => {
+    const fallbackParagraphs = splitReaderParagraphs(bookText);
+    const fallbackRenderItems: ReaderRenderItem[] = fallbackParagraphs.map((_, index) => ({
+      type: 'paragraph',
+      key: `plain-paragraph-${index}`,
+      paragraphIndex: index,
+    }));
+
+    if (currentChapterBlocks.length === 0) {
+      return {
+        paragraphs: fallbackParagraphs,
+        renderItems: fallbackRenderItems,
+      };
+    }
+
+    const nextParagraphs: string[] = [];
+    const nextRenderItems: ReaderRenderItem[] = [];
+
+    currentChapterBlocks.forEach((block, blockIndex) => {
+      if (block.type === 'image') {
+        nextRenderItems.push({
+          type: 'image',
+          key: `chapter-image-${blockIndex}-${block.imageRef}`,
+          imageRef: block.imageRef,
+          alt: block.alt,
+          title: block.title,
+          width: block.width,
+          height: block.height,
+        });
+        return;
+      }
+
+      const blockParagraphs = splitReaderParagraphs(block.text || '');
+      blockParagraphs.forEach((paragraphText, localIndex) => {
+        const paragraphIndex = nextParagraphs.length;
+        nextParagraphs.push(paragraphText);
+        nextRenderItems.push({
+          type: 'paragraph',
+          key: `chapter-text-${blockIndex}-${localIndex}-${paragraphIndex}`,
+          paragraphIndex,
+        });
+      });
+    });
+
+    if (nextParagraphs.length === 0 && nextRenderItems.length > 0) {
+      return {
+        paragraphs: [],
+        renderItems: nextRenderItems,
+      };
+    }
+
+    if (nextParagraphs.length === 0) {
+      return {
+        paragraphs: fallbackParagraphs,
+        renderItems: fallbackRenderItems,
+      };
+    }
+
+    return {
+      paragraphs: nextParagraphs,
+      renderItems: nextRenderItems,
+    };
+  }, [bookText, currentChapterBlocks]);
 
   const chapterNormalizedLengths = useMemo(
     () => chapters.map((chapter) => normalizeReaderLayoutText(chapter.content || '').length),
@@ -2398,7 +2510,10 @@ const Reader: React.FC<ReaderProps> = ({
             onClick={closeFloatingPanel}
           />
           {isTocOpen && (
-            <div className={`absolute z-30 top-16 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[32vh] overflow-y-auto no-scrollbar rounded-2xl p-3 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${closingFloatingPanel === 'toc' ? 'reader-flyout-exit' : 'reader-flyout-enter'}`}>
+            <div
+              ref={tocPanelRef}
+              className={`absolute z-30 top-16 right-4 w-[min(22rem,calc(100vw-2rem))] max-h-[32vh] overflow-y-auto no-scrollbar rounded-2xl p-3 border ${isDarkMode ? 'bg-[#2d3748] border-slate-600 shadow-2xl' : 'bg-[#e0e5ec] border-white/50 shadow-2xl'} ${closingFloatingPanel === 'toc' ? 'reader-flyout-exit' : 'reader-flyout-enter'}`}
+            >
               <div className="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 py-2">
                 {`\u76ee\u5f55 ${chapters.length > 0 ? `(${chapters.length})` : ''}`}
               </div>
@@ -2411,6 +2526,13 @@ const Reader: React.FC<ReaderProps> = ({
                 return (
                   <button
                     key={`${title}-${index}`}
+                    ref={(node) => {
+                      if (node) {
+                        tocItemRefs.current[index] = node;
+                        return;
+                      }
+                      delete tocItemRefs.current[index];
+                    }}
                     onClick={() => handleJumpToChapter(index)}
                     className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${isActive ? 'text-rose-400 bg-rose-400/10' : 'text-slate-500 hover:bg-black/5 dark:hover:bg-white/5'}`}
                   >
@@ -2738,39 +2860,62 @@ const Reader: React.FC<ReaderProps> = ({
           >
             {!activeBook && <p className="mb-6 indent-8 opacity-70">{'\u672a\u9009\u62e9\u4e66\u7c4d\uff0c\u8bf7\u8fd4\u56de\u4e66\u67b6\u9009\u62e9\u4e00\u672c\u4e66\u3002'}</p>}
             {activeBook && isLoadingBookContent && <p className="mb-6 indent-8 opacity-70">{'\u6b63\u5728\u52a0\u8f7d\u6b63\u6587\u5185\u5bb9...'}</p>}
-            {activeBook && !isLoadingBookContent && paragraphs.length === 0 && (
+            {activeBook && !isLoadingBookContent && renderItems.length === 0 && (
               <p className="mb-6 indent-8 opacity-70">{'\u8fd9\u672c\u4e66\u8fd8\u6ca1\u6709\u6b63\u6587\u5185\u5bb9\u3002'}</p>
             )}
-            {activeBook && !isLoadingBookContent && paragraphRenderData.map(({ segments }, index) => (
-              <p key={index} className="mb-6 indent-8">
-                {segments.map(segment => (
-                  <span
-                    key={`${segment.start}-${segment.end}-${segment.color || 'plain'}`}
-                    data-reader-segment="1"
-                    data-start={segment.start}
-                    className={segment.color ? 'rounded-[0.14em]' : undefined}
-                    style={{
-                      ...(segment.color ? { backgroundColor: resolveHighlightBackgroundColor(segment.color, isDarkMode) } : {}),
-                      ...(segment.hasAiUnderline
-                        ? {
-                            textDecorationLine: 'underline',
-                            textDecorationStyle: 'dashed',
-                            textDecorationColor: isDarkMode
-                              ? 'rgb(var(--theme-300) / 0.95)'
-                              : 'rgb(var(--theme-500) / 0.92)',
-                            textDecorationThickness: '1.5px',
-                            textUnderlineOffset: '0.16em',
-                            textDecorationSkipInk: 'none',
-                            WebkitTextDecorationSkip: 'none',
-                          }
-                        : {}),
-                    }}
-                  >
-                    {segment.text}
-                  </span>
-                ))}
-              </p>
-            ))}
+            {activeBook && !isLoadingBookContent && renderItems.map((item) => {
+              if (item.type === 'image') {
+                return (
+                  <figure key={item.key} className="mb-6 not-prose">
+                    <div className={`w-full rounded-xl p-1.5 overflow-hidden ${isDarkMode ? 'bg-slate-900/30' : 'bg-white/60'}`}>
+                      <ResolvedImage
+                        src={item.imageRef}
+                        alt={item.alt || item.title || 'Embedded image'}
+                        className="w-full h-auto max-h-[60vh] object-contain rounded-lg mx-auto"
+                      />
+                    </div>
+                    {item.title && (
+                      <figcaption className={`mt-1.5 text-[11px] leading-relaxed ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                        {item.title}
+                      </figcaption>
+                    )}
+                  </figure>
+                );
+              }
+
+              const paragraph = paragraphRenderData[item.paragraphIndex];
+              if (!paragraph) return null;
+              return (
+                <p key={item.key} className="mb-6 indent-8">
+                  {paragraph.segments.map(segment => (
+                    <span
+                      key={`${segment.start}-${segment.end}-${segment.color || 'plain'}`}
+                      data-reader-segment="1"
+                      data-start={segment.start}
+                      className={segment.color ? 'rounded-[0.14em]' : undefined}
+                      style={{
+                        ...(segment.color ? { backgroundColor: resolveHighlightBackgroundColor(segment.color, isDarkMode) } : {}),
+                        ...(segment.hasAiUnderline
+                          ? {
+                              textDecorationLine: 'underline',
+                              textDecorationStyle: 'dashed',
+                              textDecorationColor: isDarkMode
+                                ? 'rgb(var(--theme-300) / 0.95)'
+                                : 'rgb(var(--theme-500) / 0.92)',
+                              textDecorationThickness: '1.5px',
+                              textUnderlineOffset: '0.16em',
+                              textDecorationSkipInk: 'none',
+                              WebkitTextDecorationSkip: 'none',
+                            }
+                          : {}),
+                      }}
+                    >
+                      {segment.text}
+                    </span>
+                  ))}
+                </p>
+              );
+            })}
           </article>
         </div>
 

@@ -4,7 +4,7 @@ import Library from './components/Library';
 import Reader from './components/Reader';
 import Stats from './components/Stats';
 import Settings from './components/Settings';
-import { AppView, Book, ApiConfig, ApiPreset, ApiProvider, AppSettings, ReaderSessionSnapshot } from './types';
+import { AppView, Book, Chapter, ApiConfig, ApiPreset, ApiProvider, AppSettings, ReaderSessionSnapshot } from './types';
 import { Persona, Character, WorldBookEntry } from './components/settings/types';
 import { deleteImageByRef, migrateDataUrlToImageRef } from './utils/imageStorage';
 import { compactBookForState, deleteBookContent, getBookContent, migrateInlineBookContent, saveBookContent } from './utils/bookContentStorage';
@@ -1278,6 +1278,28 @@ const App: React.FC = () => {
     transitionToView(AppView.LIBRARY);
   };
 
+  const collectChapterImageRefs = (chapters: Chapter[] | undefined) => {
+    const imageRefs = new Set<string>();
+    if (!Array.isArray(chapters)) return imageRefs;
+    chapters.forEach((chapter) => {
+      if (!Array.isArray(chapter.blocks)) return;
+      chapter.blocks.forEach((block) => {
+        if (block.type !== 'image' || !block.imageRef) return;
+        imageRefs.add(block.imageRef);
+      });
+    });
+    return imageRefs;
+  };
+
+  const deleteImageRefsBatch = (imageRefs: Iterable<string>, reason: string) => {
+    Array.from(imageRefs).forEach((imageRef) => {
+      if (!imageRef) return;
+      deleteImageByRef(imageRef).catch((error) => {
+        console.error(`${reason}:`, error);
+      });
+    });
+  };
+
   const handleAddBook = async (newBook: Book) => {
     const fullText = newBook.fullText || '';
     const chapters = newBook.chapters || [];
@@ -1305,6 +1327,17 @@ const App: React.FC = () => {
     const chapters = updatedBook.chapters || [];
     const previousBook = books.find((book) => book.id === updatedBook.id);
     const reached100Now = updatedBook.progress >= 100 && (previousBook?.progress || 0) < 100;
+    const previousStoredContent = await getBookContent(updatedBook.id).catch(() => null);
+    const previousImageRefs = new Set<string>();
+    const nextImageRefs = new Set<string>();
+
+    if (previousBook?.coverUrl) previousImageRefs.add(previousBook.coverUrl);
+    collectChapterImageRefs(previousStoredContent?.chapters || previousBook?.chapters || []).forEach((ref) =>
+      previousImageRefs.add(ref)
+    );
+
+    if (updatedBook.coverUrl) nextImageRefs.add(updatedBook.coverUrl);
+    collectChapterImageRefs(chapters).forEach((ref) => nextImageRefs.add(ref));
 
     try {
       await saveBookContent(updatedBook.id, fullText, chapters);
@@ -1319,6 +1352,9 @@ const App: React.FC = () => {
           setCompletedAtByBookId((prev) => ({ ...prev, [updatedBook.id]: reachedAt }));
         }
       }
+
+      const staleImageRefs = Array.from(previousImageRefs).filter((ref) => !nextImageRefs.has(ref));
+      deleteImageRefsBatch(staleImageRefs, 'Failed to delete stale updated-book image');
       showNotification('书本信息已更新');
     } catch (error) {
       console.error('Failed to persist updated book content:', error);
@@ -1326,12 +1362,15 @@ const App: React.FC = () => {
     }
   };
 
-  const handleDeleteBook = (bookId: string) => {
+  const handleDeleteBook = async (bookId: string) => {
     const targetBook = books.find(b => b.id === bookId);
-    if (targetBook?.coverUrl) {
-      deleteImageByRef(targetBook.coverUrl).catch(err => console.error('Failed to delete deleted-book cover image:', err));
-    }
+    const storedContent = await getBookContent(bookId).catch(() => null);
+    const imageRefs = new Set<string>();
+    if (targetBook?.coverUrl) imageRefs.add(targetBook.coverUrl);
+    collectChapterImageRefs(storedContent?.chapters || targetBook?.chapters || []).forEach((ref) => imageRefs.add(ref));
+
     deleteBookContent(bookId).catch(err => console.error('Failed to delete deleted-book text content:', err));
+    deleteImageRefsBatch(imageRefs, 'Failed to delete deleted-book image');
 
     setBooks(prev => prev.filter(b => b.id !== bookId));
     setCompletedBookIds(prev => prev.filter(id => id !== bookId));

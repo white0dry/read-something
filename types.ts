@@ -1,6 +1,23 @@
+export interface ReaderContentTextBlock {
+  type: 'text';
+  text: string;
+}
+
+export interface ReaderContentImageBlock {
+  type: 'image';
+  imageRef: string;
+  alt?: string;
+  title?: string;
+  width?: number;
+  height?: number;
+}
+
+export type ReaderContentBlock = ReaderContentTextBlock | ReaderContentImageBlock;
+
 export interface Chapter {
   title: string;
   content: string;
+  blocks?: ReaderContentBlock[];
 }
 
 export interface ReaderHighlightRange {
