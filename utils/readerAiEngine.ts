@@ -417,13 +417,17 @@ const sortWorldBookEntriesByCode = (entries: WorldBookEntry[]) =>
     })
     .map((item) => item.entry);
 
-export const formatWorldBookSection = (entries: WorldBookEntry[], title: string) => {
+export const applyTemplatePlaceholders = (text: string, charName: string, userName: string): string =>
+  text.replace(/\{\{char\}\}/gi, charName).replace(/\{\{user\}\}/gi, userName);
+
+export const formatWorldBookSection = (entries: WorldBookEntry[], title: string, charName?: string, userName?: string) => {
   if (entries.length === 0) return `${title}\n（无）`;
   const contents = entries
     .map((entry) => compactText(entry.content || ''))
     .filter(Boolean);
   if (contents.length === 0) return `${title}\n（无）`;
-  return [title, ...contents].join('\n');
+  const joined = [title, ...contents].join('\n');
+  return charName && userName ? applyTemplatePlaceholders(joined, charName, userName) : joined;
 };
 
 interface BuildAiPromptParams {
@@ -530,7 +534,8 @@ const buildAiPromptLineItems = (params: BuildAiPromptParams): PromptLineItem[] =
   const safeChatHistorySummary = sanitizeTextForAiPrompt(chatHistorySummary);
   const safeRecentHistory = sanitizeTextForAiPrompt(recentHistory);
   const safePendingRecordText = sanitizeTextForAiPrompt(pendingRecordText);
-  const safeUserDescription = sanitizeTextForAiPrompt(userDescription);
+  const safeUserDescription = applyTemplatePlaceholders(sanitizeTextForAiPrompt(userDescription), characterRealName, userRealName);
+  const safeCharacterDescription = applyTemplatePlaceholders(sanitizeTextForAiPrompt(characterDescription), characterRealName, userRealName);
 
   const proactiveUnderlineRule = allowAiUnderlineInThisReply
     ? '【划线规则】如果读到触动你的句子，可以额外输出 0 或 1 行 `[划线] 文本`，这句话必须是当前读到的书中原句，禁止编造。'
@@ -553,10 +558,10 @@ const buildAiPromptLineItems = (params: BuildAiPromptParams): PromptLineItem[] =
   pushPromptLine(lines, 'otherInstructions', '</user_profile>');
   pushPromptLine(lines, 'otherInstructions', '');
   pushPromptLine(lines, 'otherInstructions', '<char_profile');
-  pushPromptLine(lines, 'worldBook', formatWorldBookSection(characterWorldBookEntries.before, '【以下是补充信息】'));
+  pushPromptLine(lines, 'worldBook', formatWorldBookSection(characterWorldBookEntries.before, '【以下是补充信息】', characterRealName, userRealName));
   pushPromptLine(lines, 'characterPersona', '【你是谁】');
-  pushPromptLine(lines, 'characterPersona', characterDescription);
-  pushPromptLine(lines, 'worldBook', formatWorldBookSection(characterWorldBookEntries.after, '【以下是补充信息】'));
+  pushPromptLine(lines, 'characterPersona', safeCharacterDescription);
+  pushPromptLine(lines, 'worldBook', formatWorldBookSection(characterWorldBookEntries.after, '【以下是补充信息】', characterRealName, userRealName));
   pushPromptLine(lines, 'otherInstructions', '</char_profile>');
   pushPromptLine(lines, 'otherInstructions', '');
   pushPromptLine(lines, 'otherInstructions', '<book_context>');

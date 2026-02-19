@@ -1,7 +1,7 @@
 import { ApiConfig, Book, QuizConfig, QuizQuestion } from '../types';
 import { Persona, Character, WorldBookEntry } from '../components/settings/types';
 import { getBookContent, StoredBookContent } from './bookContentStorage';
-import { callAiModel, sanitizeTextForAiPrompt, buildCharacterWorldBookSections, formatWorldBookSection } from './readerAiEngine';
+import { callAiModel, sanitizeTextForAiPrompt, buildCharacterWorldBookSections, formatWorldBookSection, applyTemplatePlaceholders } from './readerAiEngine';
 
 // ─── 获取书籍的阅读进度对应的最大章节索引 ───
 
@@ -109,11 +109,11 @@ export const prepareBookContexts = async (
 
 // ─── 共用工具：世界书分组 ───
 
-const buildWorldBookPromptSection = (character: Character, worldBookEntries: WorldBookEntry[]): { before: string; after: string } => {
+const buildWorldBookPromptSection = (character: Character, worldBookEntries: WorldBookEntry[], charName?: string, userName?: string): { before: string; after: string } => {
   const wbSections = buildCharacterWorldBookSections(character, worldBookEntries);
   return {
-    before: wbSections.before.length > 0 ? formatWorldBookSection(wbSections.before, '【以下是补充信息】') : '',
-    after: wbSections.after.length > 0 ? formatWorldBookSection(wbSections.after, '【以下是补充信息】') : '',
+    before: wbSections.before.length > 0 ? formatWorldBookSection(wbSections.before, '【以下是补充信息】', charName, userName) : '',
+    after: wbSections.after.length > 0 ? formatWorldBookSection(wbSections.after, '【以下是补充信息】', charName, userName) : '',
   };
 };
 
@@ -166,7 +166,7 @@ export const buildNoteCommentPrompt = (params: BuildNoteCommentPromptParams): st
 
   const charNickname = character.nickname || character.name;
   const userNickname = userPersona.userNickname || userPersona.name;
-  const wb = buildWorldBookPromptSection(character, worldBookEntries);
+  const wb = buildWorldBookPromptSection(character, worldBookEntries, character.name, userPersona.name);
 
   const historySection = conversationHistory && conversationHistory.length > 0
     ? `\n<chat_history>\n${conversationHistory.map((m) => `${m.role === 'ai' ? charNickname : userNickname}：${m.content}`).join('\n')}\n</chat_history>\n`
@@ -179,12 +179,12 @@ export const buildNoteCommentPrompt = (params: BuildNoteCommentPromptParams): st
 
 <user_profile>
 【${userPersona.name}的信息】
-${sanitizeTextForAiPrompt(userPersona.description) || '（暂无用户信息）'}
+${applyTemplatePlaceholders(sanitizeTextForAiPrompt(userPersona.description), character.name, userPersona.name) || '（暂无用户信息）'}
 </user_profile>
 
 <char_profile>
 ${wb.before ? wb.before + '\n' : ''}【你是谁】
-${sanitizeTextForAiPrompt(character.description)}
+${applyTemplatePlaceholders(sanitizeTextForAiPrompt(character.description), character.name, userPersona.name)}
 ${wb.after ? '\n' + wb.after : ''}
 </char_profile>
 
@@ -237,7 +237,7 @@ export const buildNoteReplyPrompt = (params: BuildNoteReplyPromptParams): string
 
   const charNickname = character.nickname || character.name;
   const userNickname = userPersona.userNickname || userPersona.name;
-  const wb = buildWorldBookPromptSection(character, worldBookEntries);
+  const wb = buildWorldBookPromptSection(character, worldBookEntries, character.name, userPersona.name);
 
   const historyLines = previousMessages
     .map((m) => `${m.role === 'ai' ? charNickname : userNickname}：${m.content}`)
@@ -250,12 +250,12 @@ export const buildNoteReplyPrompt = (params: BuildNoteReplyPromptParams): string
 
 <user_profile>
 【${userPersona.name}的信息】
-${sanitizeTextForAiPrompt(userPersona.description) || '（暂无用户信息）'}
+${applyTemplatePlaceholders(sanitizeTextForAiPrompt(userPersona.description), character.name, userPersona.name) || '（暂无用户信息）'}
 </user_profile>
 
 <char_profile>
 ${wb.before ? wb.before + '\n' : ''}【你是谁】
-${sanitizeTextForAiPrompt(character.description)}
+${applyTemplatePlaceholders(sanitizeTextForAiPrompt(character.description), character.name, userPersona.name)}
 ${wb.after ? '\n' + wb.after : ''}
 </char_profile>
 
@@ -404,7 +404,7 @@ export const buildQuizOverallCommentPrompt = (params: BuildQuizOverallCommentPar
 
   const charNickname = character.nickname || character.name;
   const userNickname = userPersona.userNickname || userPersona.name;
-  const wb = buildWorldBookPromptSection(character, worldBookEntries);
+  const wb = buildWorldBookPromptSection(character, worldBookEntries, character.name, userPersona.name);
 
   let correctCount = 0;
   const detailLines = questions.map((q, idx) => {
@@ -427,12 +427,12 @@ export const buildQuizOverallCommentPrompt = (params: BuildQuizOverallCommentPar
 
 <user_profile>
 【${userPersona.name}的信息】
-${sanitizeTextForAiPrompt(userPersona.description) || '（暂无用户信息）'}
+${applyTemplatePlaceholders(sanitizeTextForAiPrompt(userPersona.description), character.name, userPersona.name) || '（暂无用户信息）'}
 </user_profile>
 
 <char_profile>
 ${wb.before ? wb.before + '\n' : ''}【你是谁】
-${sanitizeTextForAiPrompt(character.description)}
+${applyTemplatePlaceholders(sanitizeTextForAiPrompt(character.description), character.name, userPersona.name)}
 ${wb.after ? '\n' + wb.after : ''}
 </char_profile>
 
