@@ -589,6 +589,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     () => `persona:${activePersonaId || 'none'}::character:${activeCharacterId || 'none'}`,
     [activePersonaId, activeCharacterId]
   );
+  const lastSyncedConversationKeyRef = useRef<string>(conversationKey);
 
   const characterWorldBookEntries = useMemo(
     () => buildCharacterWorldBookSections(activeCharacter, worldBookEntries),
@@ -1483,6 +1484,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         const parsed = parseConversationKey(key);
         if (!parsed) return null;
         if (parsed.bookId !== (activeBook?.id || null)) return null;
+        if (!Array.isArray(bucket.messages) || bucket.messages.length === 0) return null;
         const persona = personas.find((item) => item.id === parsed.personaId) || null;
         const character = characters.find((item) => item.id === parsed.characterId) || null;
         const isValid = Boolean(persona && character);
@@ -1766,6 +1768,17 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   };
 
   useEffect(() => {
+    const prevKey = lastSyncedConversationKeyRef.current;
+    if (prevKey && prevKey !== conversationKey) {
+      persistConversationBucket(
+        prevKey,
+        (existing) => ({
+          ...existing,
+          messages: messagesRef.current,
+        }),
+        'pre-switch-flush'
+      );
+    }
     bubbleRevealSequenceRef.current += 1;
     hiddenBubbleIdsRef.current = [];
     setHiddenBubbleIds([]);
@@ -1822,6 +1835,11 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   useEffect(() => {
     if (!isConversationHydrated) return;
     if (deletedConversationKeyRef.current === conversationKey) return;
+    if (lastSyncedConversationKeyRef.current !== conversationKey) {
+      lastSyncedConversationKeyRef.current = conversationKey;
+      return;
+    }
+    if (messages.length === 0 && !readChatStore()[conversationKey]) return;
     const personaName = activePersona?.name?.trim() || '';
     const characterName = activeCharacter?.name?.trim() || '';
     persistConversationBucket(
