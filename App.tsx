@@ -10,7 +10,7 @@ import { Persona, Character, WorldBookEntry } from './components/settings/types'
 import { deleteImageByRef, migrateDataUrlToImageRef } from './utils/imageStorage';
 import { compactBookForState, deleteBookContent, getBookContent, migrateInlineBookContent, saveBookContent } from './utils/bookContentStorage';
 import { buildConversationKey, readConversationBucket, persistConversationBucket } from './utils/readerChatRuntime';
-import { BUILT_IN_TUTORIAL_BOOK_ID, BUILT_IN_TUTORIAL_VERSION, createBuiltInTutorialBook, isBuiltInBook, markTutorialUnread, clearTutorialUnread } from './utils/builtInTutorialBook';
+import { BUILT_IN_TUTORIAL_BOOK_ID, BUILT_IN_TUTORIAL_VERSION, createBuiltInTutorialBook, migrateTutorialImages, isBuiltInBook, markTutorialUnread, clearTutorialUnread } from './utils/builtInTutorialBook';
 import { buildCharacterWorldBookSections, buildReadingContextSnapshot, runConversationGeneration } from './utils/readerAiEngine';
 import {
   DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID,
@@ -557,7 +557,12 @@ const App: React.FC = () => {
     const tutorialIdx = initial.findIndex(b => b.id === BUILT_IN_TUTORIAL_BOOK_ID);
     if (tutorialIdx === -1 || storedVersion < BUILT_IN_TUTORIAL_VERSION) {
       const tutorial = createBuiltInTutorialBook();
+      // 先用原始章节（含 data-URL）同步保存以确保书籍立即可用，
+      // 再异步将图片迁移为 idb:// Blob 引用并重新保存。
       saveBookContent(tutorial.id, tutorial.fullText || '', tutorial.chapters || []);
+      migrateTutorialImages(tutorial.chapters || []).then((migratedChapters) => {
+        saveBookContent(tutorial.id, tutorial.fullText || '', migratedChapters);
+      }).catch(() => { /* 迁移失败则保留 data-URL 作为 fallback */ });
       if (tutorialIdx === -1) {
         initial.push(compactBookForState(tutorial));
       } else {
