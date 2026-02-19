@@ -1,23 +1,23 @@
 {
-  "id": "/",
+  "id": "/read-something/",
   "name": "\u8bfb\u70b9\u4e66",
   "short_name": "\u8bfb\u70b9\u4e66",
   "description": "\u8bfb\u70b9\u4e66 - \u6c89\u6d78\u5f0f\u9605\u8bfb\u4e0e\u4e92\u52a8",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "/read-something/",
+  "scope": "/read-something/",
   "display": "standalone",
   "background_color": "#e0e5ec",
   "theme_color": "#e28a9d",
   "lang": "zh-CN",
   "icons": [
     {
-      "src": "/icons/icon-192.jpg",
+      "src": "icons/icon-192.jpg",
       "sizes": "192x192",
       "type": "image/jpeg",
       "purpose": "any maskable"
     },
     {
-      "src": "/icons/icon-512.jpg",
+      "src": "icons/icon-512.jpg",
       "sizes": "512x512",
       "type": "image/jpeg",
       "purpose": "any maskable"
