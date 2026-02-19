@@ -791,46 +791,11 @@ const App: React.FC = () => {
     document.body.classList.toggle('dark-mode', isDarkMode);
   }, [isDarkMode]);
   useEffect(() => {
-    const iosNavigator = window.navigator as Navigator & { standalone?: boolean };
-    const isIOSDevice = /iPad|iPhone|iPod/.test(iosNavigator.userAgent) || (iosNavigator.platform === 'MacIntel' && iosNavigator.maxTouchPoints > 1);
-    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || iosNavigator.standalone === true;
-
-    const readSafeAreaInsetBottom = () => {
-      const probe = document.createElement('div');
-      probe.style.position = 'fixed';
-      probe.style.left = '0';
-      probe.style.right = '0';
-      probe.style.bottom = '0';
-      probe.style.height = '0';
-      probe.style.paddingBottom = 'env(safe-area-inset-bottom)';
-      probe.style.visibility = 'hidden';
-      probe.style.pointerEvents = 'none';
-      document.body.appendChild(probe);
-      const inset = parseFloat(window.getComputedStyle(probe).paddingBottom || '0');
-      probe.remove();
-      return Number.isFinite(inset) ? inset : 0;
-    };
-
-    const resolveScreenHeight = () => {
-      const isLandscape = window.matchMedia('(orientation: landscape)').matches;
-      const screenHeight = isLandscape ? window.screen.width : window.screen.height;
-      return Number.isFinite(screenHeight) && screenHeight > 0 ? screenHeight : 0;
-    };
-
     const syncAppScreenHeight = () => {
       const visualHeight = window.visualViewport?.height ?? 0;
       const innerHeight = window.innerHeight || 0;
       const clientHeight = document.documentElement.clientHeight || 0;
-      let nextHeight = Math.max(visualHeight, innerHeight, clientHeight);
-
-      // iOS standalone can report a viewport that excludes the bottom home-indicator zone.
-      // Expand by safe-area inset and clamp to physical CSS screen height to avoid overshoot.
-      if (isIOSDevice && isStandalone) {
-        const safeAreaBottom = readSafeAreaInsetBottom();
-        const screenHeight = resolveScreenHeight();
-        const expandedHeight = nextHeight + safeAreaBottom;
-        nextHeight = screenHeight > 0 ? Math.min(screenHeight, expandedHeight) : expandedHeight;
-      }
+      const nextHeight = Math.max(visualHeight, innerHeight, clientHeight);
 
       document.documentElement.style.setProperty('--app-screen-height', `${nextHeight}px`);
     };
