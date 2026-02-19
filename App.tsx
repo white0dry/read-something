@@ -1,14 +1,16 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
-import { BookOpen, PieChart, Settings as SettingsIcon, LayoutGrid, CheckCircle2, AlertCircle } from 'lucide-react';
+﻿import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { BookOpen, PieChart, Settings as SettingsIcon, LayoutGrid, Sparkles, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import Library from './components/Library';
 import Reader from './components/Reader';
 import Stats from './components/Stats';
+import StudyHub from './components/StudyHub';
 import Settings from './components/Settings';
-import { AppView, Book, Chapter, ApiConfig, ApiPreset, ApiProvider, AppSettings, ReaderSessionSnapshot } from './types';
+import { AppView, Book, Chapter, ApiConfig, ApiPreset, ApiProvider, AppSettings, ReaderSessionSnapshot, RagPreset } from './types';
 import { Persona, Character, WorldBookEntry } from './components/settings/types';
 import { deleteImageByRef, migrateDataUrlToImageRef } from './utils/imageStorage';
 import { compactBookForState, deleteBookContent, getBookContent, migrateInlineBookContent, saveBookContent } from './utils/bookContentStorage';
 import { buildConversationKey, readConversationBucket, persistConversationBucket } from './utils/readerChatRuntime';
+import { BUILT_IN_TUTORIAL_BOOK_ID, BUILT_IN_TUTORIAL_VERSION, createBuiltInTutorialBook, isBuiltInBook, markTutorialUnread, clearTutorialUnread } from './utils/builtInTutorialBook';
 import { buildCharacterWorldBookSections, buildReadingContextSnapshot, runConversationGeneration } from './utils/readerAiEngine';
 import {
   DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID,
@@ -22,6 +24,13 @@ interface Notification {
   show: boolean;
   message: string;
   type: 'success' | 'error';
+}
+
+interface RagWarmupState {
+  active: boolean;
+  stage: 'model' | 'index';
+  progress: number;
+  bookTitle?: string;
 }
 
 const DEFAULT_API_CONFIG: ApiConfig = {
@@ -44,6 +53,11 @@ const READING_MS_BY_BOOK_ID_STORAGE_KEY = 'app_reading_ms_by_book_id';
 const PROACTIVE_DELAY_TOLERANCE_MS = 3000;
 const KEEP_ALIVE_SILENT_AUDIO_URL = 'https://files.catbox.moe/qx14i5.mp3';
 const FIXED_MESSAGE_TIME_GAP_MINUTES = 60;
+const RAG_WARMUP_RETRY_BASE_MS = 1500;
+const RAG_WARMUP_RETRY_MAX_MS = 15000;
+const RAG_PRESETS_STORAGE_KEY = 'app_rag_presets';
+const ACTIVE_RAG_PRESET_ID_STORAGE_KEY = 'app_active_rag_preset_id';
+const DEFAULT_RAG_PRESET_ID = '__default_rag_preset__';
 const DEFAULT_READER_MORE_SETTINGS = {
   appearance: {
     bubbleFontSizeScale: 1,
@@ -436,6 +450,8 @@ const App: React.FC = () => {
   
   // Global Notification State
   const [notification, setNotification] = useState<Notification>({ show: false, message: '', type: 'success' });
+  const [ragWarmupByBookId, setRagWarmupByBookId] = useState<Record<string, RagWarmupState>>({});
+  const [ragErrorToast, setRagErrorToast] = useState<{ show: boolean; message: string }>({ show: false, message: '' });
   const [dailyReadingMsByDate, setDailyReadingMsByDate] = useState<Record<string, number>>(() => {
     try {
       const saved = localStorage.getItem(DAILY_READING_MS_STORAGE_KEY);
@@ -517,17 +533,40 @@ const App: React.FC = () => {
   const keepAliveUnlockCleanupRef = useRef<(() => void) | null>(null);
   const activeCommentsEnabledRef = useRef(false);
   const proactiveLoopTokenRef = useRef(0);
+  const ragGlobalWarmupBookIdRef = useRef<string | null>(null);
+  const ragWarmupTokenByBookRef = useRef<Record<string, number>>({});
+  const ragWarmupLockByBookRef = useRef<Record<string, boolean>>({});
+  const ragApiFailedBookIdsRef = useRef<Set<string>>(new Set());
+  const ragResumeScanInProgressRef = useRef(false);
+  const ragResumeLastScanAtRef = useRef(0);
 
   // --- PERSISTENT STATE ---
 
   // Books
   const [books, setBooks] = useState<Book[]>(() => {
+    let initial: Book[] = [];
     try {
       const saved = localStorage.getItem('app_books');
-      if (!saved) return [];
-      const parsed = JSON.parse(saved);
-      return Array.isArray(parsed) ? stripBuiltInSampleBooks(parsed) : [];
-    } catch { return []; }
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        initial = Array.isArray(parsed) ? stripBuiltInSampleBooks(parsed) : [];
+      }
+    } catch { /* no-op */ }
+    const versionKey = '__built_in_tutorial_version__';
+    const storedVersion = (() => { try { return Number(localStorage.getItem(versionKey)) || 0; } catch { return 0; } })();
+    const tutorialIdx = initial.findIndex(b => b.id === BUILT_IN_TUTORIAL_BOOK_ID);
+    if (tutorialIdx === -1 || storedVersion < BUILT_IN_TUTORIAL_VERSION) {
+      const tutorial = createBuiltInTutorialBook();
+      saveBookContent(tutorial.id, tutorial.fullText || '', tutorial.chapters || []);
+      if (tutorialIdx === -1) {
+        initial.push(compactBookForState(tutorial));
+      } else {
+        initial[tutorialIdx] = compactBookForState(tutorial);
+      }
+      try { localStorage.setItem(versionKey, String(BUILT_IN_TUTORIAL_VERSION)); } catch { /* no-op */ }
+      if (storedVersion > 0) markTutorialUnread();
+    }
+    return initial;
   });
 
   // API Config
@@ -545,6 +584,17 @@ const App: React.FC = () => {
       return saved ? JSON.parse(saved) : DEFAULT_PRESETS;
     } catch { return DEFAULT_PRESETS; }
   });
+
+  // RAG Presets
+  const [ragPresets, setRagPresets] = useState<RagPreset[]>(() => {
+    try {
+      const saved = localStorage.getItem(RAG_PRESETS_STORAGE_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
+  const [activeRagPresetId, setActiveRagPresetId] = useState<string>(() =>
+    localStorage.getItem(ACTIVE_RAG_PRESET_ID_STORAGE_KEY) || DEFAULT_RAG_PRESET_ID
+  );
 
   // General App Settings (Automation, Appearance)
   const [appSettings, setAppSettings] = useState<AppSettings>(() => {
@@ -823,6 +873,31 @@ const App: React.FC = () => {
   useEffect(() => { safeSetStorageItem('app_user_signature', userSignature); }, [userSignature]);
   useEffect(() => { safeSetStorageItem('app_active_persona_id', activePersonaId || ''); }, [activePersonaId]);
   useEffect(() => { safeSetStorageItem('app_active_character_id', activeCharacterId || ''); }, [activeCharacterId]);
+  useEffect(() => { safeSetStorageItem(RAG_PRESETS_STORAGE_KEY, JSON.stringify(ragPresets)); }, [ragPresets]);
+  useEffect(() => { safeSetStorageItem(ACTIVE_RAG_PRESET_ID_STORAGE_KEY, activeRagPresetId || ''); }, [activeRagPresetId]);
+
+  // Derived: effective RAG presets list (always includes default)
+  const effectiveRagPresets = useMemo<RagPreset[]>(() => [
+    { id: DEFAULT_RAG_PRESET_ID, name: '默认（当前API配置）', config: { ...apiConfig }, isDefault: true },
+    ...ragPresets.filter(p => p.id !== DEFAULT_RAG_PRESET_ID),
+  ], [apiConfig, ragPresets]);
+
+  // Resolve a RAG preset ID to its ApiConfig (undefined = local model)
+  const resolveRagApiConfig = useCallback((presetId: string | undefined): ApiConfig | undefined => {
+    if (!presetId || presetId === DEFAULT_RAG_PRESET_ID) return undefined;
+    const preset = effectiveRagPresets.find(p => p.id === presetId);
+    return preset?.config;
+  }, [effectiveRagPresets]);
+
+  // RAG model mismatch dialog
+  const [ragMismatchDialog, setRagMismatchDialog] = useState<{
+    show: boolean;
+    bookId: string;
+    bookTitle: string;
+    oldPresetId: string;
+    newPresetId: string;
+    resolve: ((action: 'rebuild' | 'keep') => void) | null;
+  } | null>(null);
 
   // One-time migration: move old inline images/text out of localStorage into IndexedDB.
   useEffect(() => {
@@ -976,6 +1051,43 @@ const App: React.FC = () => {
     }, 3000);
   };
 
+  const showRagErrorToast = (message: string) => {
+    setRagErrorToast({ show: true, message });
+    setTimeout(() => setRagErrorToast({ show: false, message: '' }), 6000);
+  };
+
+  const getActiveRagWarmupBookId = (): string | null => {
+    const byRef = ragGlobalWarmupBookIdRef.current;
+    if (byRef) return byRef;
+
+    const activeEntry = Object.entries(ragWarmupByBookId).find(
+      (entry): entry is [string, RagWarmupState] => {
+        const state = entry[1];
+        return Boolean(state && typeof state === 'object' && (state as RagWarmupState).active);
+      },
+    );
+    return activeEntry?.[0] || null;
+  };
+
+  const getBookDisplayTitleById = (bookId: string | null): string => {
+    if (!bookId) return '当前书籍';
+    const warmupTitle = ragWarmupByBookId[bookId]?.bookTitle;
+    if (warmupTitle && warmupTitle.trim()) return warmupTitle;
+    const book = books.find((item) => item.id === bookId);
+    if (book?.title?.trim()) return book.title;
+    return '当前书籍';
+  };
+
+  const getRagBlockingBook = (targetBookId?: string): { id: string; title: string } | null => {
+    const activeBookId = getActiveRagWarmupBookId();
+    if (!activeBookId) return null;
+    if (targetBookId && activeBookId === targetBookId) return null;
+    return {
+      id: activeBookId,
+      title: getBookDisplayTitleById(activeBookId),
+    };
+  };
+
   useEffect(() => {
     activeCommentsEnabledRef.current = appSettings.activeCommentsEnabled;
   }, [appSettings.activeCommentsEnabled]);
@@ -1124,6 +1236,28 @@ const App: React.FC = () => {
 
         const conversationKey = buildConversationKey(targetBook.id, activePersonaId, activeCharacterId);
         const bucket = readConversationBucket(conversationKey);
+
+        // RAG: 检索相关书籍片段（proactive模式用最近对话内容）
+        let ragContext = '';
+        try {
+          const recentText = bucket.messages.slice(-3).map((m) => m.content).join(' ');
+          if (recentText) {
+            const { retrieveRelevantChunks, estimateRagSafeOffset } = await import('./utils/ragEngine');
+            const safeOffset = estimateRagSafeOffset(
+              content?.chapters || [],
+              readerState?.readingPosition || null,
+              readingContext.excerptEnd || 0,
+            );
+            const chunks = await retrieveRelevantChunks(
+              recentText,
+              { [targetBook.id]: safeOffset },
+              { topK: 3, perBookTopK: 3 },
+              resolveRagApiConfig,
+            );
+            if (chunks.length > 0) ragContext = chunks.slice(0, 3).map((c) => c.text).join('\n---\n');
+          }
+        } catch { /* RAG 静默失败 */ }
+
         const result = await runConversationGeneration({
           mode: 'proactive',
           conversationKey,
@@ -1147,6 +1281,7 @@ const App: React.FC = () => {
           replyBubbleMin: appSettings.readerMore.feature.replyBubbleMin,
           replyBubbleMax: appSettings.readerMore.feature.replyBubbleMax,
           allowEmptyPending: true,
+          ragContext,
         });
         if (!isLoopActive()) return;
         if (result.status !== 'ok') return;
@@ -1249,7 +1384,46 @@ const App: React.FC = () => {
     }, VIEW_TRANSITION_MS);
   };
 
+  const checkRagModelMismatch = async (book: Book): Promise<'rebuild' | 'keep'> => {
+    if (!book.ragEnabled) return 'keep';
+    try {
+      const { getBookMeta } = await import('./utils/ragEngine');
+      const meta = await getBookMeta(book.id);
+      if (!meta) return 'keep';
+      // Old indexes without ragModelPresetId are treated as built with default preset
+      const existingPresetId = meta.ragModelPresetId || DEFAULT_RAG_PRESET_ID;
+      const desiredPresetId = book.ragModelPresetId || activeRagPresetId;
+      if (existingPresetId === desiredPresetId) return 'keep';
+      // Model mismatch detected — show confirm dialog
+      return new Promise<'rebuild' | 'keep'>((resolve) => {
+        setRagMismatchDialog({
+          show: true,
+          bookId: book.id,
+          bookTitle: book.title,
+          oldPresetId: existingPresetId,
+          newPresetId: desiredPresetId,
+          resolve: (action: 'rebuild' | 'keep') => {
+            setRagMismatchDialog(null);
+            if (action === 'keep') {
+              setActiveRagPresetId(existingPresetId);
+            }
+            resolve(action);
+          },
+        });
+      });
+    } catch {
+      return 'keep';
+    }
+  };
+
   const handleOpenBook = (book: Book) => {
+    if (isBuiltInBook(book.id)) clearTutorialUnread();
+    const blockingWarmup = getRagBlockingBook(book.id);
+    if (blockingWarmup) {
+      showNotification(`《${blockingWarmup.title}》RAG索引构建中，暂时无法打开其他书籍`, 'error');
+      return;
+    }
+
     const openedAt = Date.now();
     setBooks(prev =>
       prev.map(item =>
@@ -1262,7 +1436,21 @@ const App: React.FC = () => {
           : item
       )
     );
-    transitionToView(AppView.READER, book);
+    if (book.ragEnabled) {
+      void checkRagModelMismatch(book).then((action) => {
+        if (action === 'rebuild') {
+          const desiredPresetId = book.ragModelPresetId || activeRagPresetId;
+          const updatedBook = { ...book, ragModelPresetId: desiredPresetId };
+          setBooks(prev => prev.map(b => b.id === book.id ? { ...b, ragModelPresetId: desiredPresetId } : b));
+          warmupRagForBook(updatedBook, 'open');
+        } else {
+          warmupRagForBook(book, 'open');
+        }
+        transitionToView(AppView.READER, book);
+      });
+    } else {
+      transitionToView(AppView.READER, book);
+    }
   };
 
   const handleBackToLibrary = (snapshot?: ReaderSessionSnapshot) => {
@@ -1331,7 +1519,229 @@ const App: React.FC = () => {
     });
   };
 
-  const handleAddBook = async (newBook: Book) => {
+  const warmupRagForBook = (book: Book, source: 'upload' | 'open' | 'resume') => {
+    if (!book?.id) return;
+    if (!book.ragEnabled) return;
+    const globalWarmupBookId = ragGlobalWarmupBookIdRef.current;
+    if (globalWarmupBookId && globalWarmupBookId !== book.id) return;
+    if (ragWarmupLockByBookRef.current[book.id]) return;
+    // 用户主动触发（open/upload）时清除失败标记，允许重试
+    if (source !== 'resume') ragApiFailedBookIdsRef.current.delete(book.id);
+    ragGlobalWarmupBookIdRef.current = book.id;
+    ragWarmupLockByBookRef.current[book.id] = true;
+
+    const token = Date.now();
+    ragWarmupTokenByBookRef.current[book.id] = token;
+    const setWarmupState = (next: Partial<RagWarmupState>) => {
+      if (ragWarmupTokenByBookRef.current[book.id] !== token) return;
+      setRagWarmupByBookId((prev) => ({
+        ...prev,
+        [book.id]: {
+          active: true,
+          stage: 'model',
+          progress: 0,
+          bookTitle: book.title || '未命名书籍',
+          ...(prev[book.id] || {}),
+          ...next,
+        },
+      }));
+    };
+    const clearWarmupState = (delayMs: number = 0) => {
+      window.setTimeout(() => {
+        if (ragWarmupTokenByBookRef.current[book.id] !== token) return;
+        setRagWarmupByBookId((prev) => {
+          if (!(book.id in prev)) return prev;
+          const next = { ...prev };
+          delete next[book.id];
+          return next;
+        });
+        delete ragWarmupLockByBookRef.current[book.id];
+        delete ragWarmupTokenByBookRef.current[book.id];
+        if (ragGlobalWarmupBookIdRef.current === book.id) {
+          ragGlobalWarmupBookIdRef.current = null;
+        }
+      }, delayMs);
+    };
+    const releaseWarmupLock = () => {
+      if (ragWarmupTokenByBookRef.current[book.id] !== token) return;
+      delete ragWarmupLockByBookRef.current[book.id];
+      delete ragWarmupTokenByBookRef.current[book.id];
+      if (ragGlobalWarmupBookIdRef.current === book.id) {
+        ragGlobalWarmupBookIdRef.current = null;
+      }
+    };
+
+    const startDelayMs = source === 'open' ? 500 : source === 'resume' ? 80 : 150;
+    window.setTimeout(() => {
+      let retryCount = 0;
+      const runWarmup = async (): Promise<void> => {
+        try {
+          const {
+            warmupRagModel,
+            ensureBookIndexedUpTo,
+            getBookIndexedUpTo,
+            estimateRagSafeOffset,
+          } = await import('./utils/ragEngine');
+
+          const stored = await getBookContent(book.id).catch(() => null);
+          const chapters = stored?.chapters || [];
+          if (chapters.length === 0) {
+            clearWarmupState(300);
+            return;
+          }
+
+          const fullIndexTargetOffset = estimateRagSafeOffset(
+            chapters,
+            null,
+            Number.MAX_SAFE_INTEGER,
+          );
+          if (fullIndexTargetOffset <= 0) {
+            clearWarmupState(300);
+            return;
+          }
+
+          const indexedUpTo = await getBookIndexedUpTo(book.id);
+          if (indexedUpTo >= fullIndexTargetOffset) {
+            releaseWarmupLock();
+            return;
+          }
+
+          const ragApiCfg = resolveRagApiConfig(book.ragModelPresetId);
+          // 使用 API embedding 时跳过本地模型预热
+          if (!ragApiCfg) {
+            setWarmupState({ active: true, stage: 'model', progress: 0.02 });
+            setWarmupState({ active: true, stage: 'model', progress: 0.08 });
+            await warmupRagModel();
+          }
+          setWarmupState({ active: true, stage: 'index', progress: 0.12 });
+          await ensureBookIndexedUpTo(
+            book.id,
+            chapters,
+            fullIndexTargetOffset,
+            (pct) => {
+              const safePct = Math.max(0, Math.min(1, Number.isFinite(pct) ? pct : 0));
+              setWarmupState({ active: true, stage: 'index', progress: 0.12 + safePct * 0.88 });
+            },
+            book.ragModelPresetId,
+            ragApiCfg,
+          );
+          setWarmupState({ active: true, stage: 'index', progress: 1 });
+          clearWarmupState(900);
+        } catch (error) {
+          if (ragWarmupTokenByBookRef.current[book.id] !== token) return;
+
+          // 使用 API embedding 时任何错误都不重试，直接报错
+          if (resolveRagApiConfig(book.ragModelPresetId)) {
+            const msg = error instanceof Error ? error.message : String(error);
+            showRagErrorToast(`RAG索引失败: ${msg}`);
+            ragApiFailedBookIdsRef.current.add(book.id);
+            clearWarmupState(0);
+            return;
+          }
+
+          retryCount += 1;
+          const retryDelayMs = Math.min(
+            RAG_WARMUP_RETRY_MAX_MS,
+            RAG_WARMUP_RETRY_BASE_MS * Math.max(1, 2 ** (retryCount - 1)),
+          );
+          setWarmupState({ active: true, stage: 'model', progress: 0.08 });
+          console.warn(
+            `[RAG] Background warmup failed (${source}) for book ${book.id}, retry #${retryCount} in ${retryDelayMs}ms:`,
+            error,
+          );
+          window.setTimeout(() => {
+            if (ragWarmupTokenByBookRef.current[book.id] !== token) return;
+            void runWarmup();
+          }, retryDelayMs);
+        }
+      };
+      void runWarmup();
+    }, startDelayMs);
+  };
+
+  const resumeIncompleteRagIndexing = useCallback((trigger: 'foreground' | 'books-sync') => {
+    if (ragResumeScanInProgressRef.current) return;
+    if (ragGlobalWarmupBookIdRef.current) return;
+
+    const now = Date.now();
+    const minIntervalMs = trigger === 'foreground' ? 2000 : 8000;
+    if (now - ragResumeLastScanAtRef.current < minIntervalMs) return;
+
+    ragResumeScanInProgressRef.current = true;
+    ragResumeLastScanAtRef.current = now;
+
+    void (async () => {
+      try {
+        if (books.length === 0) return;
+        const { getBookIndexedUpTo, estimateRagSafeOffset } = await import('./utils/ragEngine');
+
+        const orderedBooks = activeBook
+          ? [
+              activeBook,
+              ...books
+                .filter((book) => book.id !== activeBook.id)
+                .sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0)),
+            ]
+          : [...books].sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0));
+        for (const book of orderedBooks) {
+          if (!book?.id) continue;
+          if (!book.ragEnabled) continue;
+          if (ragWarmupLockByBookRef.current[book.id]) continue;
+          if (ragApiFailedBookIdsRef.current.has(book.id)) continue;
+
+          const stored = await getBookContent(book.id).catch(() => null);
+          const chapters = stored?.chapters || [];
+          if (chapters.length === 0) continue;
+
+          const fullIndexTargetOffset = estimateRagSafeOffset(chapters, null, Number.MAX_SAFE_INTEGER);
+          if (fullIndexTargetOffset <= 0) continue;
+
+          const indexedUpTo = await getBookIndexedUpTo(book.id);
+          if (indexedUpTo >= fullIndexTargetOffset) continue;
+
+          warmupRagForBook(book, 'resume');
+          break;
+        }
+      } catch (error) {
+        console.warn(`[RAG] Resume scan failed (${trigger}):`, error);
+      } finally {
+        ragResumeScanInProgressRef.current = false;
+      }
+    })();
+  }, [books, activeBook]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      resumeIncompleteRagIndexing('foreground');
+    };
+    const handleFocus = () => {
+      resumeIncompleteRagIndexing('foreground');
+    };
+    const handlePageShow = () => {
+      resumeIncompleteRagIndexing('foreground');
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('pageshow', handlePageShow);
+
+    resumeIncompleteRagIndexing('books-sync');
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('pageshow', handlePageShow);
+    };
+  }, [resumeIncompleteRagIndexing]);
+
+  const handleAddBook = async (newBook: Book): Promise<boolean> => {
+    const blockingWarmup = getRagBlockingBook();
+    if (blockingWarmup) {
+      showNotification(`《${blockingWarmup.title}》RAG索引构建中，请稍后再导入新书`, 'error');
+      return false;
+    }
+
     const fullText = newBook.fullText || '';
     const chapters = newBook.chapters || [];
 
@@ -1339,6 +1749,9 @@ const App: React.FC = () => {
       await saveBookContent(newBook.id, fullText, chapters);
       const compacted = compactBookForState({ ...newBook, fullText, chapters });
       setBooks(prev => [compacted, ...prev]);
+      if (compacted.ragEnabled) {
+        warmupRagForBook(compacted, 'upload');
+      }
       if (newBook.progress >= 100) {
         setCompletedBookIds(prev => (prev.includes(newBook.id) ? prev : [...prev, newBook.id]));
         const reachedAt = typeof newBook.lastReadAt === 'number' && newBook.lastReadAt > 0
@@ -1347,10 +1760,19 @@ const App: React.FC = () => {
         setCompletedAtByBookId((prev) => ({ ...prev, [newBook.id]: reachedAt }));
       }
       showNotification('成功导入');
+      return true;
     } catch (error) {
       console.error('Failed to persist new book content:', error);
       showNotification('Failed to save book content', 'error');
+      return false;
     }
+  };
+
+  const handleRequestImportBook = (): boolean => {
+    const blockingWarmup = getRagBlockingBook();
+    if (!blockingWarmup) return true;
+    showNotification(`《${blockingWarmup.title}》RAG索引构建中，请稍后再导入新书`, 'error');
+    return false;
   };
 
   const handleUpdateBook = async (updatedBook: Book) => {
@@ -1394,6 +1816,7 @@ const App: React.FC = () => {
   };
 
   const handleDeleteBook = async (bookId: string) => {
+    if (isBuiltInBook(bookId)) return;
     const targetBook = books.find(b => b.id === bookId);
     const storedContent = await getBookContent(bookId).catch(() => null);
     const imageRefs = new Set<string>();
@@ -1417,6 +1840,17 @@ const App: React.FC = () => {
       delete next[bookId];
       return next;
     });
+    setRagWarmupByBookId((prev) => {
+      if (!(bookId in prev)) return prev;
+      const next = { ...prev };
+      delete next[bookId];
+      return next;
+    });
+    delete ragWarmupTokenByBookRef.current[bookId];
+    delete ragWarmupLockByBookRef.current[bookId];
+    if (ragGlobalWarmupBookIdRef.current === bookId) {
+      ragGlobalWarmupBookIdRef.current = null;
+    }
     showNotification('书本已删除');
   };
 
@@ -1434,6 +1868,68 @@ const App: React.FC = () => {
     height: 'var(--app-screen-height)',
     paddingTop: `${manualSafeAreaTop}px`
   };
+  const activeRagWarmupEntries = Object.entries(ragWarmupByBookId).filter(
+    (entry): entry is [string, RagWarmupState] => {
+      const state = entry[1];
+      return Boolean(state && typeof state === 'object' && (state as RagWarmupState).active);
+    },
+  );
+  const primaryRagWarmupEntry = activeRagWarmupEntries[0] || null;
+  const primaryRagWarmupState = primaryRagWarmupEntry?.[1] || null;
+  const primaryRagWarmupBookId = primaryRagWarmupEntry?.[0] || '';
+  const primaryRagWarmupBookTitle = primaryRagWarmupState?.bookTitle
+    || books.find((item) => item.id === primaryRagWarmupBookId)?.title
+    || '当前书籍';
+  const primaryRagWarmupPercent = primaryRagWarmupState
+    ? Math.max(0, Math.min(100, Math.round((Number.isFinite(primaryRagWarmupState.progress) ? primaryRagWarmupState.progress : 0) * 100)))
+    : 0;
+  const primaryRagWarmupStageLabel = !primaryRagWarmupState
+    ? '空闲'
+    : (primaryRagWarmupState.stage === 'model' ? '模型加载中' : '索引构建中');
+  const hasMultipleRagWarmups = activeRagWarmupEntries.length > 1;
+
+  const globalToastsJsx = (
+    <>
+      {/* Global Notification */}
+      <div
+        className={`fixed left-1/2 -translate-x-1/2 z-[110] transition-all duration-500 ease-out transform ${notification.show ? 'translate-y-0 opacity-100' : '-translate-y-20 opacity-0 pointer-events-none'}`}
+        style={{ top: `${manualSafeAreaTop + 24}px` }}
+      >
+        <div className={`w-[min(94vw,760px)] px-8 py-4 rounded-[28px] flex items-center gap-4 border backdrop-blur-md ${isDarkMode ? 'bg-[#2d3748] text-slate-200 border-slate-700/70 shadow-[8px_8px_16px_#232b39,-8px_-8px_16px_#374357]' : 'bg-[#e0e5ec] text-slate-600 border-white/20 shadow-[8px_8px_16px_rgba(0,0,0,0.1),-8px_-8px_16px_rgba(255,255,255,0.8)]'}`}>
+          {notification.type === 'success' ? <CheckCircle2 size={28} className="text-emerald-500 flex-shrink-0" /> : <AlertCircle size={28} className="text-rose-500 flex-shrink-0" />}
+          <span className="font-bold text-xs sm:text-sm leading-snug">{notification.message}</span>
+        </div>
+      </div>
+      {/* RAG Warmup Progress */}
+      {primaryRagWarmupState && (
+        <div
+          className="fixed left-1/2 -translate-x-1/2 z-[110] pointer-events-none transition-all duration-300"
+          style={{ top: `${manualSafeAreaTop + (notification.show ? 122 : 24)}px` }}
+        >
+          <div className={`w-[min(94vw,760px)] px-8 py-4 rounded-[28px] flex items-center gap-4 border backdrop-blur-md ${isDarkMode ? 'bg-[#2d3748]/95 text-slate-200 border-slate-700/70 shadow-[8px_8px_16px_#232b39,-8px_-8px_16px_#374357]' : 'bg-[#e0e5ec]/95 text-slate-600 border-white/20 shadow-[8px_8px_16px_rgba(0,0,0,0.1),-8px_-8px_16px_rgba(255,255,255,0.8)]'}`}>
+            <Loader2 size={28} className="animate-spin text-rose-400 flex-shrink-0" />
+            <span className="font-bold text-xs sm:text-sm leading-snug">
+              {`RAG ${primaryRagWarmupStageLabel} ${primaryRagWarmupPercent}% · ${primaryRagWarmupBookTitle}${hasMultipleRagWarmups ? ` 等${activeRagWarmupEntries.length}本` : ''}`}
+            </span>
+          </div>
+        </div>
+      )}
+      {/* RAG Error Toast */}
+      {ragErrorToast.show && (
+        <div
+          className="fixed left-1/2 -translate-x-1/2 z-[110] pointer-events-none transition-all duration-300"
+          style={{ top: `${manualSafeAreaTop + (notification.show ? 122 : 24) + (primaryRagWarmupState ? 72 : 0)}px` }}
+        >
+          <div className={`w-[min(94vw,760px)] px-8 py-4 rounded-[28px] flex items-center gap-4 border backdrop-blur-md ${isDarkMode ? 'bg-[#2d3748]/95 text-slate-200 border-slate-700/70 shadow-[8px_8px_16px_#232b39,-8px_-8px_16px_#374357]' : 'bg-[#e0e5ec]/95 text-slate-600 border-white/20 shadow-[8px_8px_16px_rgba(0,0,0,0.1),-8px_-8px_16px_rgba(255,255,255,0.8)]'}`}>
+            <AlertCircle size={28} className="text-rose-400 flex-shrink-0" />
+            <span className="font-bold text-xs sm:text-sm leading-snug">
+              {ragErrorToast.message}
+            </span>
+          </div>
+        </div>
+      )}
+    </>
+  );
 
   // If in Reader mode
   if (currentView === AppView.READER) {
@@ -1451,6 +1947,7 @@ const App: React.FC = () => {
             onBack={handleBackToLibrary}
             isDarkMode={isDarkMode}
             activeBook={activeBook}
+            ragIndexingState={activeBook ? (ragWarmupByBookId[activeBook.id] || null) : null}
             appSettings={appSettings}
             setAppSettings={setAppSettings}
             safeAreaTop={manualSafeAreaTop}
@@ -1464,37 +1961,70 @@ const App: React.FC = () => {
             activeCharacterId={activeCharacterId}
             onSelectCharacter={setActiveCharacterId}
             worldBookEntries={worldBookEntries}
+            ragApiConfigResolver={resolveRagApiConfig}
           />
         </div>
+        {/* Global toasts (shared across all views) */}
+        {globalToastsJsx}
       </div>
     );
   }
 
   return (
-    <div 
+    <div
       className={appWrapperClass}
       style={appWrapperStyle}
     >
-      
-      {/* Global Notification */}
-      <div
-        className={`fixed left-1/2 -translate-x-1/2 z-50 transition-all duration-500 ease-out transform ${notification.show ? 'translate-y-0 opacity-100' : '-translate-y-20 opacity-0 pointer-events-none'}`}
-        style={{ top: `${manualSafeAreaTop + 24}px` }}
-      >
-        <div className={`px-6 py-3 rounded-full flex items-center gap-3 border backdrop-blur-md ${isDarkMode ? 'bg-[#2d3748] text-slate-200 border-slate-700/70 shadow-[6px_6px_12px_#232b39,-6px_-6px_12px_#374357]' : 'bg-[#e0e5ec] text-slate-600 border-white/20 shadow-[6px_6px_12px_rgba(0,0,0,0.1),-6px_-6px_12px_rgba(255,255,255,0.8)]'}`}>
-           {notification.type === 'success' ? <CheckCircle2 size={20} className="text-emerald-500" /> : <AlertCircle size={20} className="text-rose-500" />}
-           <span className="font-bold text-sm">{notification.message}</span>
+
+      {/* Global toasts */}
+      {globalToastsJsx}
+
+      {/* RAG Model Mismatch Dialog */}
+      {ragMismatchDialog?.show && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-slate-500/20 backdrop-blur-sm animate-fade-in">
+          <div className={`w-full max-w-sm rounded-2xl p-6 shadow-2xl border relative ${isDarkMode ? 'bg-[#2d3748] border-slate-600 text-slate-200' : 'bg-[#e0e5ec] border-white/50 text-slate-600'}`}>
+            <div className={`w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-4 ${isDarkMode ? 'bg-amber-500/20' : 'bg-amber-100'}`}>
+              <AlertCircle size={24} className="text-amber-500" />
+            </div>
+            <h3 className={`text-lg font-bold mb-2 text-center ${isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>
+              RAG模型已变更
+            </h3>
+            <p className={`text-sm text-center mb-6 ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+              《{ragMismatchDialog.bookTitle}》的RAG索引使用的模型预设与当前选择的不同。是否用新模型重新构建索引库？
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => ragMismatchDialog.resolve?.('keep')}
+                className={`flex-1 py-3 rounded-full text-sm font-bold ${isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357] text-slate-300' : 'neu-btn text-slate-500'}`}
+              >
+                使用原配置
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    const { deleteEmbeddingsByBook } = await import('./utils/ragEngine');
+                    await deleteEmbeddingsByBook(ragMismatchDialog.bookId);
+                  } catch {}
+                  ragMismatchDialog.resolve?.('rebuild');
+                }}
+                className="flex-1 py-3 rounded-full text-white bg-rose-400 shadow-lg hover:bg-rose-500 active:scale-95 transition-all font-bold text-sm"
+              >
+                确认重建
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Main Content Area */}
       <div className={`flex-1 flex flex-col overflow-hidden relative ${viewAnimationClass}`}>
         {currentView === AppView.LIBRARY && (
-          <Library 
+          <Library
             books={books}
             onOpenBook={handleOpenBook} 
             onAddBook={handleAddBook}
-            onUpdateBook={handleUpdateBook}
+            onRequestImportBook={handleRequestImportBook}
+            onUpdateBook={handleUpdateBook} 
             onDeleteBook={handleDeleteBook}
             isDarkMode={isDarkMode} 
             userSignature={userSignature}
@@ -1506,6 +2036,8 @@ const App: React.FC = () => {
             activeCharacterId={activeCharacterId}
             onSelectCharacter={setActiveCharacterId}
             apiConfig={apiConfig}
+            ragPresets={effectiveRagPresets}
+            activeRagPresetId={activeRagPresetId}
           />
         )}
         {currentView === AppView.STATS && (
@@ -1527,11 +2059,26 @@ const App: React.FC = () => {
             worldBookEntries={worldBookEntries}
           />
         )}
+        <div className={`flex-1 flex flex-col overflow-hidden ${currentView === AppView.STUDY_HUB ? '' : 'hidden'}`}>
+          <StudyHub
+            isDarkMode={isDarkMode}
+            books={books}
+            personas={personas}
+            activePersonaId={activePersonaId}
+            characters={characters}
+            activeCharacterId={activeCharacterId}
+            worldBookEntries={worldBookEntries}
+            apiConfig={apiConfig}
+            readingExcerptCharCount={appSettings.readerMore.feature.readingExcerptCharCount}
+            showNotification={showNotification}
+            ragApiConfigResolver={resolveRagApiConfig}
+          />
+        </div>
         {currentView === AppView.SETTINGS && (
-          <Settings 
-            isDarkMode={isDarkMode} 
-            onToggleDarkMode={() => setIsDarkMode(!isDarkMode)} 
-            
+          <Settings
+            isDarkMode={isDarkMode}
+            onToggleDarkMode={() => setIsDarkMode(!isDarkMode)}
+
             // API
             apiConfig={apiConfig}
             setApiConfig={setApiConfig}
@@ -1551,6 +2098,12 @@ const App: React.FC = () => {
             setWorldBookEntries={setWorldBookEntries}
             wbCategories={wbCategories}
             setWbCategories={setWbCategories}
+
+            // RAG Presets
+            ragPresets={ragPresets}
+            setRagPresets={setRagPresets}
+            activeRagPresetId={activeRagPresetId}
+            setActiveRagPresetId={setActiveRagPresetId}
           />
         )}
       </div>
@@ -1569,7 +2122,7 @@ const App: React.FC = () => {
             <LayoutGrid size={22} strokeWidth={currentView === AppView.LIBRARY ? 2.5 : 2} />
           </button>
           
-          <button 
+          <button
             onClick={() => transitionToView(AppView.STATS)}
             disabled={isViewTransitioning}
             className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${currentView === AppView.STATS ? 'text-rose-400 shadow-[inset_3px_3px_6px_rgba(0,0,0,0.2),inset_-3px_-3px_6px_rgba(255,255,255,0.1)]' : 'text-slate-400 hover:text-slate-600'}`}
@@ -1577,7 +2130,15 @@ const App: React.FC = () => {
             <PieChart size={22} strokeWidth={currentView === AppView.STATS ? 2.5 : 2} />
           </button>
 
-          <button 
+          <button
+            onClick={() => transitionToView(AppView.STUDY_HUB)}
+            disabled={isViewTransitioning}
+            className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${currentView === AppView.STUDY_HUB ? 'text-rose-400 shadow-[inset_3px_3px_6px_rgba(0,0,0,0.2),inset_-3px_-3px_6px_rgba(255,255,255,0.1)]' : 'text-slate-400 hover:text-slate-600'}`}
+          >
+            <Sparkles size={22} strokeWidth={currentView === AppView.STUDY_HUB ? 2.5 : 2} />
+          </button>
+
+          <button
             onClick={() => transitionToView(AppView.SETTINGS)}
             disabled={isViewTransitioning}
             className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${currentView === AppView.SETTINGS ? 'text-rose-400 shadow-[inset_3px_3px_6px_rgba(0,0,0,0.2),inset_-3px_-3px_6px_rgba(255,255,255,0.1)]' : 'text-slate-400 hover:text-slate-600'}`}

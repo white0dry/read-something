@@ -9,6 +9,7 @@ import {
   ChevronDown,
   Highlighter,
   List as ListIcon,
+  Loader2,
   MoreHorizontal,
   RotateCcw,
   Save,
@@ -21,6 +22,7 @@ import {
   ApiPreset,
   Book,
   Chapter,
+  RagApiConfigResolver,
   ReaderAiUnderlineRange,
   ReaderBookmarkState,
   ReaderBookState,
@@ -52,6 +54,12 @@ interface ReaderProps {
   worldBookEntries: WorldBookEntry[];
   safeAreaTop?: number;
   safeAreaBottom?: number;
+  ragIndexingState?: {
+    active: boolean;
+    stage: 'model' | 'index';
+    progress: number;
+  } | null;
+  ragApiConfigResolver?: RagApiConfigResolver;
 }
 
 type ScrollTarget = 'top' | 'bottom';
@@ -595,6 +603,8 @@ const Reader: React.FC<ReaderProps> = ({
   worldBookEntries,
   safeAreaTop = 0,
   safeAreaBottom = 0,
+  ragIndexingState = null,
+  ragApiConfigResolver,
 }) => {
   const [activeFloatingPanel, setActiveFloatingPanel] = useState<FloatingPanel>('none');
   const [closingFloatingPanel, setClosingFloatingPanel] = useState<FloatingPanel | null>(null);
@@ -2803,6 +2813,11 @@ const Reader: React.FC<ReaderProps> = ({
     );
   };
 
+  const ragIndexingPercent = ragIndexingState
+    ? Math.max(0, Math.min(100, Math.round((Number.isFinite(ragIndexingState.progress) ? ragIndexingState.progress : 0) * 100)))
+    : 0;
+  const ragIndexingStageLabel = ragIndexingState?.stage === 'model' ? '模型加载中' : '索引构建中';
+
   return (
     <div
       ref={readerRootRef}
@@ -2860,6 +2875,15 @@ const Reader: React.FC<ReaderProps> = ({
           </button>
         </div>
       </div>
+
+      {ragIndexingState?.active && (
+        <div className="absolute left-1/2 -translate-x-1/2 z-30 pointer-events-none" style={{ top: `${Math.max(0, safeAreaTop) + 68}px` }}>
+          <div className={`px-4 py-2 rounded-full flex items-center gap-2 text-xs font-semibold border backdrop-blur-sm ${isDarkMode ? 'bg-[#2d3748]/95 text-slate-200 border-slate-600 shadow-[6px_6px_12px_#232b39,-6px_-6px_12px_#374357]' : 'bg-[#e0e5ec]/95 text-slate-600 border-white/35 shadow-[6px_6px_12px_rgba(0,0,0,0.08),-6px_-6px_12px_rgba(255,255,255,0.75)]'}`}>
+            <Loader2 size={14} className="animate-spin text-rose-400" />
+            <span>{`RAG ${ragIndexingStageLabel} ${ragIndexingPercent}%`}</span>
+          </div>
+        </div>
+      )}
 
       {isFloatingPanelVisible && (
         <>
@@ -3421,12 +3445,12 @@ const Reader: React.FC<ReaderProps> = ({
         </div>
 
         {readerScrollbar.visible && (
-          <div ref={readerScrollbarTrackRef} className="absolute right-1.5 top-3 bottom-3 w-2 z-10 pointer-events-none overflow-hidden rounded-full">
+          <div ref={readerScrollbarTrackRef} className="absolute right-1.5 top-3 bottom-3 w-1 z-10 pointer-events-none overflow-hidden rounded-full">
             <button
               type="button"
               aria-label="reader-scrollbar-thumb"
               onPointerDown={handleReaderThumbPointerDown}
-              className={`absolute left-0 w-2 rounded-full border pointer-events-auto touch-none ${
+              className={`absolute left-0 w-1 rounded-full border pointer-events-auto touch-none ${
                 isDarkMode
                   ? 'bg-slate-400/70 border-slate-300/30'
                   : 'bg-slate-500/65 border-slate-200/50'
@@ -3475,6 +3499,7 @@ const Reader: React.FC<ReaderProps> = ({
         getLatestReadingPosition={() => syncReadingPositionRef(Date.now()) || latestReadingPositionRef.current}
         isMoreSettingsOpen={isMoreSettingsOpen}
         onCloseMoreSettings={() => setIsMoreSettingsOpen(false)}
+        ragApiConfigResolver={ragApiConfigResolver}
       />
     </div>
   );

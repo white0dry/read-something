@@ -1,5 +1,5 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Check, ChevronDown, Trash2, AlertTriangle, Image as ImageIcon, Link as LinkIcon, Loader2, X, RefreshCw, Save, Edit2, Paintbrush, Wrench, MessageSquareText } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, Trash2, AlertTriangle, Image as ImageIcon, Link as LinkIcon, Loader2, X, RefreshCw, Save, Edit2, Paintbrush, Wrench, MessageSquareText, Eraser } from 'lucide-react';
 import { ApiPreset, AppSettings, ReaderSummaryCard } from '../types';
 import ResolvedImage from './ResolvedImage';
 import { DEFAULT_NEUMORPHISM_BUBBLE_CSS_PRESET_ID } from '../utils/readerBubbleCssPresets';
@@ -331,6 +331,10 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
   const [selectedChatSummaryCardIds, setSelectedChatSummaryCardIds] = useState<string[]>([]);
   const [pendingArchiveDelete, setPendingArchiveDelete] = useState<ReaderArchiveOption | null>(null);
   const [archiveDeleteDialogClosing, setArchiveDeleteDialogClosing] = useState(false);
+  const [cssApplySuccess, setCssApplySuccess] = useState(false);
+  const [cssClearSuccess, setCssClearSuccess] = useState(false);
+  const cssApplyTimerRef = useRef<number | null>(null);
+  const cssClearTimerRef = useRef<number | null>(null);
   const closeTimerRef = useRef<number | null>(null);
   const modalCloseTimerRef = useRef<number | null>(null);
   const archiveDeleteDialogTimerRef = useRef<number | null>(null);
@@ -378,6 +382,14 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     if (archiveDeleteDialogTimerRef.current) {
       window.clearTimeout(archiveDeleteDialogTimerRef.current);
       archiveDeleteDialogTimerRef.current = null;
+    }
+    if (cssApplyTimerRef.current) {
+      window.clearTimeout(cssApplyTimerRef.current);
+      cssApplyTimerRef.current = null;
+    }
+    if (cssClearTimerRef.current) {
+      window.clearTimeout(cssClearTimerRef.current);
+      cssClearTimerRef.current = null;
     }
   }, []);
   useEffect(() => {
@@ -952,10 +964,26 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
 
                       {/* 应用和清空 */}
                       <div className="flex gap-2 mb-3">
-                        <button type="button" onClick={onApplyBubbleCssDraft} className={`flex-1 h-10 rounded-xl text-sm text-rose-400 ${btnClass} ${activeBtnClass} transition-all`}>
+                        <button type="button" onClick={() => {
+                          if (cssApplyTimerRef.current) window.clearTimeout(cssApplyTimerRef.current);
+                          setTimeout(() => onApplyBubbleCssDraft(), 80);
+                          setCssApplySuccess(true);
+                          cssApplyTimerRef.current = window.setTimeout(() => setCssApplySuccess(false), 1600);
+                        }} className={`flex-1 h-10 rounded-xl text-sm ${btnClass} ${activeBtnClass} flex items-center justify-center gap-1.5`} style={{ color: cssApplySuccess ? 'rgb(var(--theme-500) / 1)' : undefined, transition: 'color 0.3s ease' }}>
+                          <span className={`inline-flex transition-all duration-300 ${cssApplySuccess ? 'w-[15px] opacity-100 scale-100' : 'w-0 opacity-0 scale-50'}`} style={{ overflow: 'hidden' }}>
+                            <Check size={15} className="shrink-0" />
+                          </span>
                           应用
                         </button>
-                        <button type="button" onClick={onClearBubbleCssDraft} className={`flex-1 h-10 rounded-xl text-sm ${btnClass} ${activeBtnClass} transition-all`}>
+                        <button type="button" onClick={() => {
+                          if (cssClearTimerRef.current) window.clearTimeout(cssClearTimerRef.current);
+                          setTimeout(() => onClearBubbleCssDraft(), 80);
+                          setCssClearSuccess(true);
+                          cssClearTimerRef.current = window.setTimeout(() => setCssClearSuccess(false), 1600);
+                        }} className={`flex-1 h-10 rounded-xl text-sm ${btnClass} ${activeBtnClass} flex items-center justify-center gap-1.5`} style={{ color: cssClearSuccess ? 'rgb(var(--theme-500) / 1)' : undefined, transition: 'color 0.3s ease' }}>
+                          <span className={`inline-flex transition-all duration-300 ${cssClearSuccess ? 'w-[15px] opacity-100 scale-100' : 'w-0 opacity-0 scale-50'}`} style={{ overflow: 'hidden' }}>
+                            <Eraser size={15} className="shrink-0" />
+                          </span>
                           清空
                         </button>
                       </div>

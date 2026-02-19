@@ -239,6 +239,13 @@
         border: none;
       }
 
+      .neu-card-pressable {
+        transition: box-shadow 150ms ease;
+      }
+      .neu-card-pressable:active {
+        box-shadow: inset 3px 3px 6px var(--neu-shadow-dark), inset -3px -3px 6px var(--neu-shadow-light) !important;
+      }
+
       .neu-btn {
         background: var(--neu-bg);
         box-shadow: 5px 5px 10px var(--neu-shadow-dark), -5px -5px 10px var(--neu-shadow-light);
@@ -278,6 +285,10 @@
 
       .reader-ai-fab {
         transition: color 0.2s ease, box-shadow 0.14s ease, transform 0.14s ease, opacity 0.2s ease;
+      }
+      .reader-ai-fab:active,
+      .reader-ai-fab.neu-btn-active {
+        color: rgb(var(--theme-500) / 1) !important;
       }
 
       .reader-ai-fab-badge {

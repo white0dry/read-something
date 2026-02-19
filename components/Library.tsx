@@ -1,18 +1,20 @@
 ﻿import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Book as BookIcon, Plus, Clock, Edit2, Check, UserCircle, LogOut, Link2, Search, Filter, MoreVertical, X, Image, Trash2, Link, FileText, FileUp, List, Sparkles, AlertTriangle, ArrowUpDown, ArrowUp, ArrowDown, LayoutGrid, AlignJustify } from 'lucide-react';
+import { Book as BookIcon, Plus, Clock, Edit2, Check, UserCircle, LogOut, Link2, Search, Filter, MoreVertical, X, Image, Trash2, Link, FileText, FileUp, List, Sparkles, AlertTriangle, ArrowUpDown, ArrowUp, ArrowDown, LayoutGrid, AlignJustify, HelpCircle, ChevronDown } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
-import { Book, Chapter, ApiConfig } from '../types';
+import { Book, Chapter, ApiConfig, RagPreset } from '../types';
 import { Persona, Character } from './settings/types';
 import ModalPortal from './ModalPortal';
 import ResolvedImage from './ResolvedImage';
 import { deleteImageByRef, saveImageFile } from '../utils/imageStorage';
 import { getBookContent, getBookTextLength } from '../utils/bookContentStorage';
 import { BOOK_IMPORT_ACCEPT, parseImportedBookFile, SUPPORTED_BOOK_IMPORT_SUFFIXES } from '../utils/bookImportParser';
+import { isBuiltInBook, isTutorialUnread } from '../utils/builtInTutorialBook';
 
 interface LibraryProps {
   books: Book[];
   onOpenBook: (book: Book) => void;
-  onAddBook: (book: Book) => void;
+  onAddBook: (book: Book) => Promise<boolean> | boolean;
+  onRequestImportBook?: () => boolean;
   onUpdateBook: (book: Book) => void;
   onDeleteBook: (id: string) => void;
   isDarkMode: boolean;
@@ -25,6 +27,8 @@ interface LibraryProps {
   activeCharacterId: string | null;
   onSelectCharacter: (id: string | null) => void;
   apiConfig: ApiConfig;
+  ragPresets: RagPreset[];
+  activeRagPresetId: string;
 }
 
 // Custom Feather Icon provided by user
@@ -105,6 +109,7 @@ const Library: React.FC<LibraryProps> = ({
   books,
   onOpenBook, 
   onAddBook,
+  onRequestImportBook,
   onUpdateBook,
   onDeleteBook,
   isDarkMode,
@@ -116,7 +121,9 @@ const Library: React.FC<LibraryProps> = ({
   characters,
   activeCharacterId,
   onSelectCharacter,
-  apiConfig
+  apiConfig,
+  ragPresets,
+  activeRagPresetId
 }) => {
   const MODAL_TRANSITION_MS = 240;
   const containerClass = isDarkMode ? 'bg-[#2d3748] text-slate-200' : 'neu-bg text-slate-600';
@@ -194,6 +201,18 @@ const Library: React.FC<LibraryProps> = ({
   const [errorModal, setErrorModal] = useState<{show: boolean, msg: string}>({ show: false, msg: '' });
   const [isErrorModalClosing, setIsErrorModalClosing] = useState(false);
 
+  // State for RAG toggle in modals
+  const [importRagEnabled, setImportRagEnabled] = useState(false);
+  const [importRagPresetId, setImportRagPresetId] = useState(activeRagPresetId);
+  const [editRagEnabled, setEditRagEnabled] = useState(false);
+  const [editRagPresetId, setEditRagPresetId] = useState(activeRagPresetId);
+  const [showRagHelpModal, setShowRagHelpModal] = useState(false);
+  const [isRagHelpModalClosing, setIsRagHelpModalClosing] = useState(false);
+  const [ragPresetDropdownOpen, setRagPresetDropdownOpen] = useState(false);
+  const [isRagDropdownClosing, setIsRagDropdownClosing] = useState(false);
+  const [ragDropdownPos, setRagDropdownPos] = useState({ top: 0, left: 0, width: 0 });
+  const ragDropdownTriggerRef = useRef<HTMLDivElement>(null);
+
   // State for AI Regex Generation
   const [isGeneratingRegex, setIsGeneratingRegex] = useState(false);
   const [clockNow, setClockNow] = useState(() => Date.now());
@@ -210,6 +229,31 @@ const Library: React.FC<LibraryProps> = ({
 
   // Sync prop changes
   useEffect(() => setTempSig(userSignature), [userSignature]);
+
+  // Sync RAG state when editingBook changes
+  useEffect(() => {
+    if (editingBook) {
+      setEditRagEnabled(!!editingBook.ragEnabled);
+      setEditRagPresetId(editingBook.ragModelPresetId || activeRagPresetId);
+    }
+  }, [editingBook?.id]);
+
+  // RAG dropdown open/close helpers
+  const openRagDropdown = () => {
+    if (ragDropdownTriggerRef.current) {
+      const rect = ragDropdownTriggerRef.current.getBoundingClientRect();
+      setRagDropdownPos({ top: rect.bottom + 8, left: rect.left, width: rect.width });
+    }
+    setRagPresetDropdownOpen(true);
+  };
+  const closeRagDropdown = () => {
+    if (!ragPresetDropdownOpen || isRagDropdownClosing) return;
+    setIsRagDropdownClosing(true);
+    setTimeout(() => {
+      setRagPresetDropdownOpen(false);
+      setIsRagDropdownClosing(false);
+    }, 200);
+  };
 
   // Effects to save persistent states
   useEffect(() => { localStorage.setItem('lib_selectedTags', JSON.stringify(selectedTags)); }, [selectedTags]);
@@ -477,6 +521,7 @@ const Library: React.FC<LibraryProps> = ({
   // Open Edit
   const openEditModal = (e: React.MouseEvent, book: Book) => {
     e.stopPropagation();
+    if (isBuiltInBook(book.id)) return;
     clearSessionGeneratedImageRefs(true);
     if (editModalCloseTimerRef.current) {
       window.clearTimeout(editModalCloseTimerRef.current);
@@ -513,6 +558,7 @@ const Library: React.FC<LibraryProps> = ({
 
   // Open Import
   const openImportModal = () => {
+     if (onRequestImportBook && onRequestImportBook() === false) return;
      clearSessionGeneratedImageRefs(true);
      if (importModalCloseTimerRef.current) {
        window.clearTimeout(importModalCloseTimerRef.current);
@@ -554,6 +600,8 @@ const Library: React.FC<LibraryProps> = ({
       setIsImportModalOpen(false);
       setImportingBook({});
       setIsImportStructuredChapterMode(false);
+      setImportRagEnabled(false);
+      setImportRagPresetId(activeRagPresetId);
       setClosingModal(prev => prev === 'import' ? null : prev);
     }, MODAL_TRANSITION_MS);
   };
@@ -585,6 +633,8 @@ const Library: React.FC<LibraryProps> = ({
         ...editingBook,
         chapterRegex: isEditStructuredChapterMode ? '' : (editingBook.chapterRegex || ''),
         chapters,
+        ragEnabled: editRagEnabled,
+        ragModelPresetId: editRagEnabled ? editRagPresetId : undefined,
       };
       onUpdateBook(updatedBook);
       clearSessionGeneratedImageRefs(false);
@@ -593,7 +643,7 @@ const Library: React.FC<LibraryProps> = ({
   };
 
   // Save Import
-  const saveImportBook = () => {
+  const saveImportBook = async () => {
      if (importingBook.title) {
         const text = importingBook.fullText || '';
         const regex = isImportStructuredChapterMode ? '' : (importingBook.chapterRegex || '');
@@ -609,9 +659,12 @@ const Library: React.FC<LibraryProps> = ({
             lastRead: '从未阅读',
             fullText: text,
             chapterRegex: regex,
-            chapters: chapters
+            chapters: chapters,
+            ragEnabled: importRagEnabled,
+            ragModelPresetId: importRagEnabled ? importRagPresetId : undefined,
         };
-        onAddBook(newBook);
+        const saved = await onAddBook(newBook);
+        if (!saved) return;
         clearSessionGeneratedImageRefs(false);
         closeImportModal({ preserveGeneratedImages: true });
      }
@@ -1156,6 +1209,58 @@ const Library: React.FC<LibraryProps> = ({
             />
           </div>
         </div>
+
+        {/* RAG索引设置 */}
+        {(() => {
+          const ragEnabled = isEdit ? editRagEnabled : importRagEnabled;
+          const setRagEnabled = isEdit ? setEditRagEnabled : setImportRagEnabled;
+          const ragPresetId = isEdit ? editRagPresetId : importRagPresetId;
+          const setRagPresetId = isEdit ? setEditRagPresetId : setImportRagPresetId;
+          const selectedPreset = ragPresets.find(p => p.id === ragPresetId) || ragPresets[0];
+          return (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">建立RAG索引库</label>
+                  <button
+                    type="button"
+                    onClick={() => setShowRagHelpModal(true)}
+                    className="text-slate-400 hover:text-rose-400 transition-colors"
+                  >
+                    <HelpCircle size={14} />
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRagEnabled(!ragEnabled)}
+                  className={`w-14 h-8 rounded-full relative transition-colors duration-300 ${ragEnabled ? 'bg-rose-400' : pressedClass}`}
+                >
+                  <div className={`w-6 h-6 rounded-full bg-white shadow-md absolute top-1 transition-transform duration-300 ${ragEnabled ? 'translate-x-7' : 'translate-x-1'}`} />
+                </button>
+              </div>
+
+              <div
+                className={`overflow-hidden transition-all duration-300 ease-in-out ${ragEnabled ? 'max-h-[400px] opacity-100' : 'max-h-0 opacity-0'}`}
+              >
+                <div className="pt-2">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1 mb-1 block">RAG模型预设</label>
+                  <div
+                    ref={ragDropdownTriggerRef}
+                    onClick={() => { if (ragPresetDropdownOpen) closeRagDropdown(); else openRagDropdown(); }}
+                    className={`w-full px-4 py-3 rounded-xl flex items-center justify-between cursor-pointer transition-all active:scale-[0.99] ${inputClass}`}
+                  >
+                    <span className="text-sm truncate">
+                      {selectedPreset?.name || '选择预设...'}
+                    </span>
+                    <div className="opacity-50">
+                      <ChevronDown size={16} className={`transition-transform duration-200 ${ragPresetDropdownOpen && !isRagDropdownClosing ? 'rotate-180' : ''}`} />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     );
   };
@@ -1364,11 +1469,14 @@ const Library: React.FC<LibraryProps> = ({
               onClick={() => onOpenBook(recentBook)}
               className={`${cardClass} app-card-press p-5 flex gap-5 cursor-pointer rounded-2xl relative group`}
             >
-              <div className="w-20 h-28 flex-shrink-0 rounded-lg overflow-hidden shadow-md app-card-press-media">
+              <div className="w-20 h-28 flex-shrink-0 rounded-lg overflow-hidden shadow-md app-card-press-media relative">
                 {recentBook.coverUrl ? (
                     <ResolvedImage src={recentBook.coverUrl} alt="Cover" className="w-full h-full object-cover opacity-90" />
                 ) : (
                     <DefaultBookCover />
+                )}
+                {isBuiltInBook(recentBook.id) && isTutorialUnread() && (
+                  <span className="absolute top-1.5 right-1.5 w-3 h-3 rounded-full shadow-md animate-pulse z-10" style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }} />
                 )}
               </div>
               <div className="flex flex-col justify-between flex-1 py-1">
@@ -1389,12 +1497,14 @@ const Library: React.FC<LibraryProps> = ({
               </div>
               
               {/* Edit Button for Recent Book */}
-              <button 
+              {!isBuiltInBook(recentBook.id) && (
+              <button
                 onClick={(e) => openEditModal(e, recentBook)}
                 className={`absolute top-4 right-4 ${compactEditButtonClass}`}
               >
                 <Edit2 size={16} />
               </button>
+              )}
             </div>
           </div>
         )}
@@ -1530,12 +1640,18 @@ const Library: React.FC<LibraryProps> = ({
                        </div>
                      )}
 
-                     <button 
+                     {isBuiltInBook(book.id) && isTutorialUnread() && (
+                       <span className="absolute top-2.5 right-2.5 w-3 h-3 rounded-full shadow-md animate-pulse" style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }} />
+                     )}
+
+                     {!isBuiltInBook(book.id) && (
+                     <button
                         onClick={(e) => openEditModal(e, book)}
                         className="absolute top-2 right-2 w-7 h-7 bg-black/40 hover:bg-rose-500 text-white rounded-full flex items-center justify-center backdrop-blur-sm transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
                      >
                         <Edit2 size={14} />
                      </button>
+                     )}
                    </div>
                    <div className="pl-1">
                      <h3 className={`font-bold text-sm line-clamp-1 ${headingClass}`}>{book.title}</h3>
@@ -1552,7 +1668,7 @@ const Library: React.FC<LibraryProps> = ({
                   className={`p-4 rounded-2xl flex items-center justify-center gap-2 hover:text-rose-400 transition-all cursor-pointer border-2 border-transparent hover:border-rose-100/20 active:scale-[0.98] ${pressedClass} ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}
                >
                   <Plus size={18} />
-                  <span className="text-sm font-medium">导入新书籍 (TXT / WORD / PDF / EPUB)</span>
+                  <span className="text-sm"><span className="font-medium">导入书籍</span> <span className="opacity-60 font-normal">TXT / WORD / PDF / EPUB</span></span>
                </div>
                
                {/* List Books */}
@@ -1568,6 +1684,9 @@ const Library: React.FC<LibraryProps> = ({
                           <ResolvedImage src={book.coverUrl} className="w-full h-full object-cover absolute inset-0" alt={book.title} />
                        ) : (
                           <div className="absolute inset-0"><DefaultBookCover /></div>
+                       )}
+                       {isBuiltInBook(book.id) && isTutorialUnread() && (
+                         <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full shadow-md animate-pulse z-10" style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }} />
                        )}
                     </div>
 
@@ -1608,14 +1727,16 @@ const Library: React.FC<LibraryProps> = ({
                     </div>
 
                     {/* Actions */}
+                    {!isBuiltInBook(book.id) && (
                     <div className="flex flex-col justify-center">
-                        <button 
+                        <button
                             onClick={(e) => openEditModal(e, book)}
                             className={compactEditButtonClass}
                          >
                             <Edit2 size={14} />
                          </button>
                     </div>
+                    )}
                  </div>
                ))}
            </div>
@@ -1750,6 +1871,91 @@ const Library: React.FC<LibraryProps> = ({
              </div>
            </div>
          </ModalPortal>
+      )}
+
+      {/* RAG Preset Dropdown Portal */}
+      {(ragPresetDropdownOpen || isRagDropdownClosing) && (
+        <ModalPortal>
+          <div className="fixed inset-0 z-[110]" onClick={closeRagDropdown}>
+            <div
+              style={{ position: 'fixed', top: ragDropdownPos.top, left: ragDropdownPos.left, width: ragDropdownPos.width }}
+              className={`p-2 rounded-xl max-h-48 overflow-y-auto ${cardClass} border border-slate-400/10 shadow-2xl ${isRagDropdownClosing ? 'reader-flyout-exit' : 'reader-flyout-enter'}`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {ragPresets.map((preset: RagPreset) => {
+                const currentPresetId = editingBook ? editRagPresetId : importRagPresetId;
+                const setCurrentPresetId = editingBook ? setEditRagPresetId : setImportRagPresetId;
+                const isSelected = preset.id === currentPresetId;
+                return (
+                  <div
+                    key={preset.id}
+                    onClick={() => { setCurrentPresetId(preset.id); closeRagDropdown(); }}
+                    className={`flex items-center gap-2 p-2 rounded-lg text-sm cursor-pointer transition-colors ${
+                      isSelected
+                        ? 'text-rose-400 font-bold bg-rose-400/10'
+                        : isDarkMode ? 'text-slate-300 hover:bg-slate-700' : 'text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    <div className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${isSelected ? 'bg-rose-400 border-rose-400' : 'border-slate-400'}`}>
+                      {isSelected && <Check size={10} className="text-white" />}
+                    </div>
+                    <span className="truncate">{preset.name}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </ModalPortal>
+      )}
+
+      {/* RAG Help Modal */}
+      {showRagHelpModal && (
+        <ModalPortal>
+          <div
+            className={`fixed inset-0 z-[120] flex items-center justify-center p-6 pb-28 bg-black/40 backdrop-blur-sm ${isRagHelpModalClosing ? 'app-fade-exit' : 'app-fade-enter'}`}
+            onClick={() => {
+              setIsRagHelpModalClosing(true);
+              setTimeout(() => { setShowRagHelpModal(false); setIsRagHelpModalClosing(false); }, MODAL_TRANSITION_MS);
+            }}
+          >
+            <div
+              className={`${cardClass} w-full max-w-sm rounded-2xl p-6 shadow-2xl border border-slate-400/10 relative ${isRagHelpModalClosing ? 'app-fade-exit' : 'app-fade-enter'}`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className={`text-base font-bold mb-4 text-center ${headingClass}`}>RAG（检索增强生成）功能说明</h3>
+
+              <div className="space-y-3 text-xs text-slate-500 leading-relaxed">
+                <div>
+                  <div className="font-bold text-rose-400 flex items-center gap-1 mb-1"><Search size={12} /> 作用</div>
+                  为书籍建立向量索引库，在阅读、评论、出题等场景中能根据用户输入更精准检索书中相关段落，跨章节内容关联能力更强。
+                </div>
+                <div>
+                  <div className="font-bold text-rose-400 flex items-center gap-1 mb-1"><BookIcon size={12} /> 涉及功能</div>
+                  阅读区伴读聊天 · 共读集出题与笔记评论
+                </div>
+                <div>
+                  <div className="font-bold text-rose-400 flex items-center gap-1 mb-1"><AlertTriangle size={12} /> 注意事项</div>
+                  <ul className="list-disc pl-4 mt-1 space-y-1">
+                    <li>开启后首次构建索引耗时较长（取决于书籍篇幅和使用模型）并且会占用一定本地存储空间</li>
+                    <li>构建过程中请保持应用运行（可切至后台，但不要杀掉应用进程）</li>
+                    <li>构建期间无法导入其他书籍或打开其他书的阅读界面</li>
+                    <li>可在「设置 → API设置」底部的 RAG模型预设配置中添加RAG专用模型预设</li>
+                  </ul>
+                </div>
+              </div>
+
+              <button
+                onClick={() => {
+                  setIsRagHelpModalClosing(true);
+                  setTimeout(() => { setShowRagHelpModal(false); setIsRagHelpModalClosing(false); }, MODAL_TRANSITION_MS);
+                }}
+                className={`w-full mt-5 py-2.5 rounded-full text-rose-400 text-sm font-bold ${btnClass}`}
+              >
+                知道了
+              </button>
+            </div>
+          </div>
+        </ModalPortal>
       )}
     </>
   );

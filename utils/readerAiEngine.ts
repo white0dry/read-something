@@ -76,6 +76,7 @@ interface RunConversationGenerationParams {
   memoryBubbleCount?: number;
   replyBubbleMin?: number;
   replyBubbleMax?: number;
+  ragContext?: string;
 }
 
 type RunGenerationSkipReason =
@@ -336,7 +337,7 @@ const parseResponseError = async (response: Response, fallback: string) => {
   }
 };
 
-const callAiModel = async (prompt: string, apiConfig: ApiConfig, signal?: AbortSignal) => {
+export const callAiModel = async (prompt: string, apiConfig: ApiConfig, signal?: AbortSignal) => {
   const provider = apiConfig.provider;
   const endpoint = (apiConfig.endpoint || '').trim().replace(/\/+$/, '');
   const apiKey = (apiConfig.apiKey || '').trim();
@@ -416,7 +417,7 @@ const sortWorldBookEntriesByCode = (entries: WorldBookEntry[]) =>
     })
     .map((item) => item.entry);
 
-const formatWorldBookSection = (entries: WorldBookEntry[], title: string) => {
+export const formatWorldBookSection = (entries: WorldBookEntry[], title: string) => {
   if (entries.length === 0) return `${title}\n（无）`;
   const contents = entries
     .map((entry) => compactText(entry.content || ''))
@@ -444,6 +445,7 @@ interface BuildAiPromptParams {
   memoryBubbleCount: number;
   replyBubbleMin: number;
   replyBubbleMax: number;
+  ragContext?: string;
 }
 
 interface PromptLineItem {
@@ -503,6 +505,7 @@ const buildAiPromptLineItems = (params: BuildAiPromptParams): PromptLineItem[] =
     memoryBubbleCount,
     replyBubbleMin,
     replyBubbleMax,
+    ragContext,
   } = params;
 
   const { excerpt, highlightedSnippets } = readingContext;
@@ -579,6 +582,13 @@ const buildAiPromptLineItems = (params: BuildAiPromptParams): PromptLineItem[] =
       : ''
   );
   pushPromptLine(lines, 'otherInstructions', '</book_context>');
+  if (ragContext) {
+    pushPromptLine(lines, 'otherInstructions', '');
+    pushPromptLine(lines, 'otherInstructions', '<rag_context>');
+    pushPromptLine(lines, 'bookExcerpt', '【相关书籍片段（语义检索）】');
+    pushPromptLine(lines, 'bookExcerpt', ragContext);
+    pushPromptLine(lines, 'otherInstructions', '</rag_context>');
+  }
   pushPromptLine(lines, 'otherInstructions', '');
   pushPromptLine(lines, 'otherInstructions', '<chat_history>');
   pushPromptLine(lines, 'chatSummary', `【之前聊天话题】${safeChatHistorySummary || '（还未整理）'}`);
@@ -881,6 +891,7 @@ export const runConversationGeneration = async (
     memoryBubbleCount,
     replyBubbleMin,
     replyBubbleMax,
+    ragContext,
   } = params;
 
   const validationMessage = validateApiConfig(apiConfig);
@@ -974,6 +985,7 @@ export const runConversationGeneration = async (
       memoryBubbleCount: normalizedMemoryBubbleCount,
       replyBubbleMin: resolvedReplyBubbleMin,
       replyBubbleMax: resolvedReplyBubbleMax,
+      ragContext,
     });
     console.groupCollapsed(`[AI Prompt:${mode}] ${new Date().toLocaleTimeString()}`);
     console.log(prompt);

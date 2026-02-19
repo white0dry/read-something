@@ -16,6 +16,7 @@ import {
   Link as LinkIcon
 } from 'lucide-react';
 import { SettingsView, Persona, Character, WorldBookEntry, ThemeClasses, ApiConfig, ApiPreset, AppSettings } from './settings/types';
+import { RagPreset } from '../types';
 import PersonaSettings from './settings/PersonaSettings';
 import CharacterSettings from './settings/CharacterSettings';
 import WorldBookSettings from './settings/WorldBookSettings';
@@ -52,6 +53,10 @@ interface SettingsProps {
   setWorldBookEntries: React.Dispatch<React.SetStateAction<WorldBookEntry[]>>;
   wbCategories: string[];
   setWbCategories: React.Dispatch<React.SetStateAction<string[]>>;
+  ragPresets: RagPreset[];
+  setRagPresets: React.Dispatch<React.SetStateAction<RagPreset[]>>;
+  activeRagPresetId: string;
+  setActiveRagPresetId: (id: string) => void;
 }
 
 // Custom Feather Icon provided by user
@@ -114,7 +119,11 @@ const Settings: React.FC<SettingsProps> = ({
   worldBookEntries,
   setWorldBookEntries,
   wbCategories,
-  setWbCategories
+  setWbCategories,
+  ragPresets,
+  setRagPresets,
+  activeRagPresetId,
+  setActiveRagPresetId
 }) => {
   const SETTINGS_VIEW_TRANSITION_MS = 260;
   const [currentView, setCurrentView] = useState<SettingsView>('MAIN');
@@ -221,6 +230,8 @@ const Settings: React.FC<SettingsProps> = ({
   const refreshStorageAnalysis = async () => {
     setStorageAnalysisLoading(true);
     setStorageAnalysisError('');
+    setStorageDonutReveal(0);
+    setStorageAnalysis(null);
     try {
       const analysis = await analyzeAppStorageUsage();
       setStorageAnalysis(analysis);
@@ -243,7 +254,7 @@ const Settings: React.FC<SettingsProps> = ({
       storageDonutAnimRef.current = null;
     }
 
-    if (currentView !== 'STORAGE') {
+    if (currentView !== 'STORAGE' || storageAnalysisLoading || !storageAnalysis) {
       setStorageDonutReveal(0);
       return;
     }
@@ -270,7 +281,7 @@ const Settings: React.FC<SettingsProps> = ({
         storageDonutAnimRef.current = null;
       }
     };
-  }, [currentView, storageAnalysis?.generatedAt]);
+  }, [currentView, storageAnalysisLoading, storageAnalysis?.generatedAt]);
 
   const handleExportArchive = async () => {
     if (archiveExporting || archiveImporting) return;
@@ -440,12 +451,15 @@ const Settings: React.FC<SettingsProps> = ({
 
   const storageTotalBytes = storageAnalysis?.totalBytes || 0;
   const storageLegendItems = useMemo(() => {
+    if (currentView !== 'STORAGE' || storageAnalysisLoading || !storageAnalysis) {
+      return [];
+    }
     const source = storageAnalysis?.items || [];
     return source.map((item) => ({
       ...item,
       color: resolveStorageColorForMode(item.color, isDarkMode),
     }));
-  }, [storageAnalysis, isDarkMode]);
+  }, [currentView, storageAnalysisLoading, storageAnalysis, isDarkMode]);
   const storageDonutGradient = useMemo(() => {
     const fallbackColor = isDarkMode ? '#4B5563' : '#CBD5E1';
     if (storageTotalBytes <= 0 || storageLegendItems.length === 0) {
@@ -531,13 +545,17 @@ const Settings: React.FC<SettingsProps> = ({
 
   if (currentView === 'API') {
     return (
-      <ApiSettings 
+      <ApiSettings
         config={apiConfig}
         setConfig={setApiConfig}
         presets={apiPresets}
         setPresets={setApiPresets}
         theme={theme}
         onBack={() => goBack()}
+        ragPresets={ragPresets}
+        setRagPresets={setRagPresets}
+        activeRagPresetId={activeRagPresetId}
+        setActiveRagPresetId={setActiveRagPresetId}
       />
     );
   }

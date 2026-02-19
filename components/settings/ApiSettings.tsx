@@ -17,6 +17,7 @@ import {
   Zap
 } from 'lucide-react';
 import { ApiConfig, ApiPreset, ApiProvider, ThemeClasses } from './types';
+import { RagPreset } from '../../types';
 import ModalPortal from '../ModalPortal';
 
 interface ApiSettingsProps {
@@ -26,6 +27,10 @@ interface ApiSettingsProps {
   setPresets: React.Dispatch<React.SetStateAction<ApiPreset[]>>;
   theme: ThemeClasses;
   onBack: () => void;
+  ragPresets: RagPreset[];
+  setRagPresets: React.Dispatch<React.SetStateAction<RagPreset[]>>;
+  activeRagPresetId: string;
+  setActiveRagPresetId: (id: string) => void;
 }
 
 // --- Icons ---
@@ -63,19 +68,19 @@ interface OptionItem {
   icon?: any;
 }
 
-const SingleSelectDropdown = ({ 
-  options, 
-  value, 
-  onChange, 
+const SingleSelectDropdown = ({
+  options,
+  value,
+  onChange,
   placeholder = "选择...",
   inputClass,
   cardClass,
   isDarkMode,
   disabled = false
-}: { 
-  options: OptionItem[], 
-  value: string, 
-  onChange: (val: string) => void, 
+}: {
+  options: OptionItem[],
+  value: string,
+  onChange: (val: string) => void,
   placeholder?: string,
   inputClass: string,
   cardClass: string,
@@ -83,17 +88,31 @@ const SingleSelectDropdown = ({
   disabled?: boolean
 }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [isClosing, setIsClosing] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const handleClose = () => {
+    if (!isOpen || isClosing) return;
+    setIsClosing(true);
+    setTimeout(() => {
+      setIsOpen(false);
+      setIsClosing(false);
+    }, 200);
+  };
+
+  const handleToggle = () => {
+    if (isOpen) { handleClose(); } else { setIsOpen(true); }
+  };
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
-        setIsOpen(false);
+        handleClose();
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  }, [isOpen, isClosing]);
 
   // Use the option from the list if found, otherwise create a temporary one to display the current value
   const selectedOption = options.find(o => o.value === value) || (value ? { value: value, label: value } : null);
@@ -101,8 +120,8 @@ const SingleSelectDropdown = ({
   return (
     <div className={`relative ${disabled ? 'opacity-50 pointer-events-none' : ''}`} ref={containerRef}>
       {/* Trigger Area */}
-      <div 
-        onClick={() => setIsOpen(!isOpen)}
+      <div
+        onClick={handleToggle}
         className={`w-full p-2 min-h-[42px] rounded-xl flex items-center justify-between cursor-pointer transition-all active:scale-[0.99] ${inputClass}`}
       >
         <div className="flex items-center gap-2 px-2">
@@ -118,25 +137,25 @@ const SingleSelectDropdown = ({
           )}
         </div>
         <div className="opacity-50 pr-2">
-           <ChevronDown size={16} className={`transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+           <ChevronDown size={16} className={`transition-transform duration-200 ${isOpen && !isClosing ? 'rotate-180' : ''}`} />
         </div>
       </div>
 
       {/* Dropdown Options */}
-      {isOpen && (
-        <div className={`absolute top-full left-0 right-0 mt-2 p-2 rounded-xl z-[50] max-h-60 overflow-y-auto ${cardClass} border border-slate-400/10 animate-fade-in shadow-2xl`}>
+      {(isOpen || isClosing) && (
+        <div className={`absolute top-full left-0 right-0 mt-2 p-2 rounded-xl z-[50] max-h-60 overflow-y-auto ${cardClass} border border-slate-400/10 shadow-2xl ${isClosing ? 'reader-flyout-exit' : 'reader-flyout-enter'}`}>
           {options.length > 0 ? options.map(opt => {
             const isSelected = opt.value === value;
             return (
-              <div 
+              <div
                 key={opt.value}
                 onClick={() => {
                   onChange(opt.value);
-                  setIsOpen(false);
+                  handleClose();
                 }}
                 className={`flex items-center gap-2 p-2 rounded-lg text-sm cursor-pointer transition-colors ${
-                  isSelected 
-                    ? 'text-rose-400 font-bold bg-rose-400/10' 
+                  isSelected
+                    ? 'text-rose-400 font-bold bg-rose-400/10'
                     : isDarkMode ? 'text-slate-300 hover:bg-slate-700' : 'text-slate-600 hover:bg-slate-200'
                 }`}
               >
@@ -226,13 +245,19 @@ const safeSaveModelCache = (store: ModelCacheStore) => {
   }
 };
 
+const DEFAULT_RAG_PRESET_ID = '__default_rag_preset__';
+
 const ApiSettings: React.FC<ApiSettingsProps> = ({
   config,
   setConfig,
   presets,
   setPresets,
   theme,
-  onBack
+  onBack,
+  ragPresets,
+  setRagPresets,
+  activeRagPresetId,
+  setActiveRagPresetId
 }) => {
   const { containerClass, animationClass, cardClass, inputClass, btnClass, pressedClass, headingClass, isDarkMode, activeBorderClass, baseBorderClass } = theme;
   
@@ -245,6 +270,11 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
   const [isPresetModalOpen, setIsPresetModalOpen] = useState(false);
   const [presetNameInput, setPresetNameInput] = useState('');
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
+
+  // RAG Preset State
+  const [isRagPresetModalOpen, setIsRagPresetModalOpen] = useState(false);
+  const [ragPresetNameInput, setRagPresetNameInput] = useState('');
+  const [editingRagPresetId, setEditingRagPresetId] = useState<string | null>(null);
   const normalizedEndpoint = normalizeEndpoint(config.endpoint);
   const modelCacheKey = buildModelCacheKey(config.provider, normalizedEndpoint, config.apiKey);
 
@@ -456,6 +486,46 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
     setIsPresetModalOpen(true);
   };
 
+  // RAG Preset CRUD
+  const openSaveRagPresetModal = () => {
+    const providerLabel = PROVIDERS.find(p => p.key === config.provider)?.label;
+    setRagPresetNameInput(`RAG - ${providerLabel} - ${config.model || 'Default'}`);
+    setEditingRagPresetId(null);
+    setIsRagPresetModalOpen(true);
+  };
+
+  const saveRagPreset = () => {
+    if (!ragPresetNameInput.trim()) return;
+    if (editingRagPresetId) {
+      setRagPresets(prev => prev.map(p => p.id === editingRagPresetId ? { ...p, name: ragPresetNameInput } : p));
+    } else {
+      const newPreset: RagPreset = {
+        id: Date.now().toString(),
+        name: ragPresetNameInput,
+        config: { ...config },
+      };
+      setRagPresets(prev => [...prev, newPreset]);
+    }
+    setIsRagPresetModalOpen(false);
+  };
+
+  const deleteRagPreset = (id: string) => {
+    setRagPresets(prev => prev.filter(p => p.id !== id));
+    if (activeRagPresetId === id) {
+      setActiveRagPresetId(DEFAULT_RAG_PRESET_ID);
+    }
+  };
+
+  const startRenameRagPreset = (preset: RagPreset) => {
+    setRagPresetNameInput(preset.name);
+    setEditingRagPresetId(preset.id);
+    setIsRagPresetModalOpen(true);
+  };
+
+  const loadRagPreset = (preset: RagPreset) => {
+    setActiveRagPresetId(preset.id);
+  };
+
   const renderHeader = (title: string, onBackAction?: () => void) => (
     <header className="mb-6 pt-2 flex items-center gap-4">
       {onBackAction && (
@@ -578,7 +648,7 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
       {/* Presets Section */}
       <div className="flex flex-col gap-4 z-10">
          <div className="flex items-center justify-between px-1">
-            <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">预设配置</h2>
+            <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">内容生成预设配置</h2>
             <button 
                onClick={openSavePresetModal}
                className={`w-8 h-8 rounded-full flex items-center justify-center text-rose-400 ${btnClass}`}
@@ -603,11 +673,11 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
                   const ProviderIcon = providerInfo?.icon || Server;
 
                   return (
-                     <div 
+                     <div
                         key={preset.id}
-                        className={`${cardClass} p-4 rounded-2xl flex items-center justify-between group transition-all ${isActive ? activeBorderClass : baseBorderClass}`}
+                        className={`${cardClass} neu-card-pressable p-4 rounded-2xl flex items-center justify-between group transition-all cursor-pointer ${isActive ? activeBorderClass : baseBorderClass}`}
                      >
-                        <div className="flex items-center gap-4 flex-1 cursor-pointer min-w-0" onClick={() => loadPreset(preset)}>
+                        <div className="flex items-center gap-4 flex-1 min-w-0" onClick={() => loadPreset(preset)}>
                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${isActive ? 'bg-rose-400 text-white' : `${pressedClass} text-slate-400`}`}>
                               <ProviderIcon size={20} />
                            </div>
@@ -624,11 +694,11 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
                            </div>
                         </div>
 
-                        <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
-                           <button onClick={() => startRenamePreset(preset)} className="p-2 text-slate-400 hover:text-slate-600">
+                        <div className="flex gap-2 flex-shrink-0 ml-2">
+                           <button onClick={() => startRenamePreset(preset)} className="p-2 text-slate-400 hover:text-slate-600 active:text-rose-400 transition-colors">
                               <Edit2 size={14} />
                            </button>
-                           <button onClick={() => deletePreset(preset.id)} className="p-2 text-slate-400 hover:text-rose-500">
+                           <button onClick={() => deletePreset(preset.id)} className="p-2 text-slate-400 hover:text-rose-500 active:text-rose-400 transition-colors">
                               <Trash2 size={14} />
                            </button>
                         </div>
@@ -637,6 +707,90 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
                })}
             </div>
          )}
+      </div>
+
+      {/* RAG Presets Section */}
+      <div className="flex flex-col gap-4 z-10 mt-8">
+         <div className="flex items-center justify-between px-1">
+            <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">RAG模型预设配置</h2>
+            <button
+               onClick={openSaveRagPresetModal}
+               className={`w-8 h-8 rounded-full flex items-center justify-center text-rose-400 ${btnClass}`}
+            >
+               <Plus size={16} />
+            </button>
+         </div>
+
+         <div className="grid grid-cols-1 gap-3">
+            {/* Default preset card (non-editable, non-deletable) */}
+            {(() => {
+              const isActive = activeRagPresetId === DEFAULT_RAG_PRESET_ID;
+              const providerInfo = PROVIDERS.find(p => p.key === config.provider);
+              const ProviderIcon = providerInfo?.icon || Server;
+              return (
+                <div
+                  className={`${cardClass} neu-card-pressable p-4 rounded-2xl flex items-center justify-between group cursor-pointer transition-[border-color] duration-200 ${isActive ? activeBorderClass : baseBorderClass}`}
+                >
+                  <div className="flex items-center gap-4 flex-1 min-w-0" onClick={() => loadRagPreset({ id: DEFAULT_RAG_PRESET_ID, name: '默认（当前API配置）', config: { ...config }, isDefault: true })}>
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${isActive ? 'bg-rose-400 text-white' : `${pressedClass} text-slate-400`}`}>
+                      <ProviderIcon size={20} />
+                    </div>
+                    <div className="min-w-0">
+                      <div className={`font-bold text-sm ${headingClass} flex items-center gap-2`}>
+                        <span className="truncate">默认（当前API配置）</span>
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded-md flex-shrink-0 transition-opacity duration-200 ${isActive ? 'bg-emerald-400/20 text-emerald-500 opacity-100' : 'opacity-0'}`}>ACTIVE</span>
+                      </div>
+                      <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-2">
+                        <span className="flex-shrink-0">{providerInfo?.label}</span>
+                        <span>•</span>
+                        <span className="font-mono opacity-70 truncate max-w-[100px]">{config.model || '未指定'}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* User-created RAG presets */}
+            {ragPresets.map(preset => {
+              const isActive = activeRagPresetId === preset.id;
+              const providerInfo = PROVIDERS.find(p => p.key === preset.config.provider);
+              const ProviderIcon = providerInfo?.icon || Server;
+
+              return (
+                <div
+                  key={preset.id}
+                  className={`${cardClass} neu-card-pressable p-4 rounded-2xl flex items-center justify-between group cursor-pointer transition-[border-color] duration-200 ${isActive ? activeBorderClass : baseBorderClass}`}
+                >
+                  <div className="flex items-center gap-4 flex-1 min-w-0" onClick={() => loadRagPreset(preset)}>
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${isActive ? 'bg-rose-400 text-white' : `${pressedClass} text-slate-400`}`}>
+                      <ProviderIcon size={20} />
+                    </div>
+                    <div className="min-w-0">
+                      <div className={`font-bold text-sm ${headingClass} flex items-center gap-2`}>
+                        <span className="truncate">{preset.name}</span>
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded-md flex-shrink-0 transition-opacity duration-200 ${isActive ? 'bg-emerald-400/20 text-emerald-500 opacity-100' : 'opacity-0'}`}>ACTIVE</span>
+                      </div>
+                      <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-2">
+                        <span className="flex-shrink-0">{providerInfo?.label}</span>
+                        <span>•</span>
+                        <span className="font-mono opacity-70 truncate max-w-[100px]">{preset.config.model || '未指定'}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2 flex-shrink-0 ml-2">
+                    <button onClick={() => startRenameRagPreset(preset)} className="p-2 text-slate-400 hover:text-slate-600 active:text-rose-400 transition-colors">
+                      <Edit2 size={14} />
+                    </button>
+                    <button onClick={() => deleteRagPreset(preset.id)} className="p-2 text-slate-400 hover:text-rose-500 active:text-rose-400 transition-colors">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+         </div>
       </div>
 
       {/* Preset Name Modal */}
@@ -669,6 +823,47 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
                 <button 
                   onClick={savePreset}
                   disabled={!presetNameInput.trim()}
+                  className={`flex-1 py-3 rounded-full text-rose-400 text-sm font-bold disabled:opacity-50 ${btnClass}`}
+                >
+                  确认
+                </button>
+              </div>
+            </div>
+          </div>
+          </div>
+        </ModalPortal>
+      )}
+
+      {/* RAG Preset Name Modal */}
+      {isRagPresetModalOpen && (
+        <ModalPortal>
+          <div className="fixed inset-0 z-[100] grid place-items-center p-6 bg-slate-500/20 backdrop-blur-sm animate-fade-in">
+          <div className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm rounded-2xl p-6 shadow-2xl border relative`}>
+            <button onClick={() => setIsRagPresetModalOpen(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
+              <X size={20} />
+            </button>
+
+            <h3 className={`text-lg font-bold mb-6 text-center ${headingClass}`}>
+               {editingRagPresetId ? '重命名RAG预设' : '保存为RAG预设'}
+            </h3>
+
+            <div className="flex flex-col gap-4">
+              <input
+                autoFocus
+                type="text"
+                value={ragPresetNameInput}
+                onChange={(e) => setRagPresetNameInput(e.target.value)}
+                placeholder="给RAG预设起个名字..."
+                className={`w-full p-4 rounded-xl text-sm outline-none ${inputClass}`}
+                onKeyDown={(e) => e.key === 'Enter' && saveRagPreset()}
+              />
+              <div className="flex gap-3 mt-2">
+                <button onClick={() => setIsRagPresetModalOpen(false)} className={`flex-1 py-3 rounded-full text-slate-500 text-sm font-bold ${btnClass}`}>
+                  取消
+                </button>
+                <button
+                  onClick={saveRagPreset}
+                  disabled={!ragPresetNameInput.trim()}
                   className={`flex-1 py-3 rounded-full text-rose-400 text-sm font-bold disabled:opacity-50 ${btnClass}`}
                 >
                   确认

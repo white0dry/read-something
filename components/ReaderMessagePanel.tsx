@@ -10,7 +10,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { ApiConfig, ApiPreset, AppSettings, Book, Chapter, ReaderSummaryCard, ReaderHighlightRange, ReaderPositionState } from '../types';
+import { ApiConfig, ApiPreset, AppSettings, Book, Chapter, RagApiConfigResolver, ReaderSummaryCard, ReaderHighlightRange, ReaderPositionState } from '../types';
 import { Character, Persona, WorldBookEntry } from './settings/types';
 import ResolvedImage from './ResolvedImage';
 import ReaderMoreSettingsPanel, { ReaderArchiveOption } from './ReaderMoreSettingsPanel';
@@ -47,6 +47,7 @@ import {
   sanitizeTextForAiPrompt,
 } from '../utils/readerAiEngine';
 import type { PromptTokenEstimate } from '../utils/readerAiEngine';
+import { estimateRagSafeOffset, retrieveRelevantChunks } from '../utils/ragEngine';
 import {
   DEFAULT_NEUMORPHISM_BUBBLE_CSS,
   LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS,
@@ -82,6 +83,7 @@ interface ReaderMessagePanelProps {
   getLatestReadingPosition: () => ReaderPositionState | null;
   isMoreSettingsOpen: boolean;
   onCloseMoreSettings: () => void;
+  ragApiConfigResolver?: RagApiConfigResolver;
 }
 
 interface ContextMenuState {
@@ -461,6 +463,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   getLatestReadingPosition,
   isMoreSettingsOpen,
   onCloseMoreSettings,
+  ragApiConfigResolver,
 }) => {
   const [isAiPanelOpen, setIsAiPanelOpen] = useState(true);
   const [isAiFabOpening, setIsAiFabOpening] = useState(false);
@@ -2391,6 +2394,67 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     const requestConversationKey = conversationKey;
     setContextMenu(null);
 
+    // RAG: 检索相关书籍片段
+    let ragContext = '';
+    if (activeBook?.id) {
+      try {
+        const pendingUserText = sourceMessages
+          .filter((m) => m.sender === 'user' && !m.sentToAi)
+          .map((m) => m.content)
+          .join(' ');
+        const recentContextText = sourceMessages
+          .slice(-6)
+          .map((m) => m.content)
+          .join(' ');
+        const primaryQuery = sanitizeTextForAiPrompt(pendingUserText);
+        const fallbackQuery = sanitizeTextForAiPrompt(recentContextText);
+        const ragQuery = (primaryQuery || fallbackQuery).slice(-1200);
+
+        if (ragQuery) {
+          const readingPosition = getLatestReadingPosition();
+          const safeOffset = estimateRagSafeOffset(chapters, readingPosition, readingContext.excerptEnd || 0);
+
+          // 先拿全书候选，再按阅读进度做程序过滤，尽量减少“每次都同一段/全被过滤为空”。
+          const candidateChunks = await retrieveRelevantChunks(
+            ragQuery,
+            { [activeBook.id]: Number.MAX_SAFE_INTEGER },
+            { topK: 18, perBookTopK: 18 },
+            ragApiConfigResolver,
+          );
+
+          const picked: typeof candidateChunks = [];
+          const seenChunkId = new Set<string>();
+          for (const chunk of candidateChunks) {
+            if (chunk.endOffset > safeOffset) continue;
+            if (seenChunkId.has(chunk.id)) continue;
+            seenChunkId.add(chunk.id);
+            picked.push(chunk);
+            if (picked.length >= 3) break;
+          }
+
+          // 保底：如果全书候选被进度过滤后不足3段，再从“进度内”直接补齐。
+          if (picked.length < 3 && safeOffset > 0) {
+            const fallbackChunks = await retrieveRelevantChunks(
+              ragQuery,
+              { [activeBook.id]: safeOffset },
+              { topK: 3, perBookTopK: 3 },
+              ragApiConfigResolver,
+            );
+            for (const chunk of fallbackChunks) {
+              if (seenChunkId.has(chunk.id)) continue;
+              seenChunkId.add(chunk.id);
+              picked.push(chunk);
+              if (picked.length >= 3) break;
+            }
+          }
+
+          if (picked.length > 0) {
+            ragContext = picked.slice(0, 3).map((c) => c.text).join('\n---\n');
+          }
+        }
+      } catch { /* RAG 静默失败 */ }
+    }
+
     try {
       const result = await runConversationGeneration({
         mode: 'manual',
@@ -2416,6 +2480,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         replyBubbleMax: appSettings.readerMore.feature.replyBubbleMax,
         allowEmptyPending: false,
         onAddAiUnderlineRange,
+        ragContext,
       });
 
       if (result.status === 'skip') {
@@ -2728,10 +2793,10 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       {!isAiPanelOpen && (
         <button
           onClick={handleOpenAiPanelFromFab}
-          className={`reader-ai-fab absolute right-6 w-12 h-12 neu-btn rounded-full z-20 text-rose-400 ${
+          className={`reader-ai-fab absolute right-6 w-12 h-12 neu-btn rounded-full z-20 ${
             isAiFabOpening ? 'neu-btn-active' : ''
           }`}
-          style={{ bottom: `${fabBottomPx}px` }}
+          style={{ bottom: `${fabBottomPx}px`, color: 'rgb(var(--theme-400) / 1)' }}
         >
           <MessagesSquare size={20} />
           <span
@@ -2755,7 +2820,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         }}
       >
         <div
-          className={`absolute bottom-0 left-0 right-0 pointer-events-auto overflow-hidden ${
+          className={`rm-panel absolute bottom-0 left-0 right-0 pointer-events-auto overflow-hidden ${
             isDarkMode ? 'bg-[#2d3748] rounded-t-3xl rounded-b-none shadow-[0_-5px_20px_rgba(0,0,0,0.4)]' : 'neu-flat rounded-t-3xl rounded-b-none'
           }`}
           style={{
@@ -2774,16 +2839,16 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           </div>
 
           <div className="flex flex-col h-[calc(100%-2rem)] min-h-0">
-          <div className="px-6 pb-2 flex items-center">
+          <div className="rm-header px-6 pb-2 flex items-center">
             <div className="flex items-center gap-2 min-w-0">
               <div
-                className={`w-10 h-10 rounded-full overflow-hidden flex items-center justify-center border-2 border-transparent ${
+                className={`rm-avatar w-10 h-10 rounded-full overflow-hidden flex items-center justify-center border-2 border-transparent ${
                   isDarkMode ? 'bg-[#1a202c]' : 'neu-pressed'
                 }`}
               >
                 {renderCharacterAvatar()}
               </div>
-              <span className={`text-sm font-bold truncate ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+              <span className={`rm-char-name text-sm font-bold truncate ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
                 {characterNickname}
               </span>
             </div>
@@ -2802,7 +2867,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           )}
           <div
             ref={messagesContainerRef}
-            className={`reader-scroll-panel reader-message-scroll flex-1 min-h-0 overflow-y-auto p-4 px-6 transition-transform duration-200 ${
+            className={`rm-messages reader-scroll-panel reader-message-scroll flex-1 min-h-0 overflow-y-auto p-4 px-6 transition-transform duration-200 ${
               isAiLoading ? '-translate-y-1' : 'translate-y-0'
             }`}
             style={{ overflowAnchor: 'none', zIndex: 1 }}
@@ -2819,7 +2884,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                 return (
                   <div key={item.id} className="flex justify-center">
                     <div
-                      className={`px-3 py-1 rounded-full text-[11px] ${
+                      className={`rm-time-tag px-3 py-1 rounded-full text-[11px] ${
                         isDarkMode ? 'bg-[#1a202c] text-slate-400' : 'bg-white/70 text-slate-500'
                       }`}
                     >
@@ -2858,7 +2923,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
                     <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
                       {readerMoreAppearance.showMessageTime && (
-                        <div className={`text-[11px] mb-1 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                        <div className={`rm-msg-time text-[11px] mb-1 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
                           {formatBubbleClock(message.timestamp)}
                         </div>
                       )}
@@ -2908,7 +2973,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
             </div>
           </div>
 
-          <div className="p-4 pb-6 relative z-10" style={{ paddingBottom: `${24 + safeBottomInset}px` }}>
+          <div className="rm-input-area p-4 pb-6 relative z-10" style={{ paddingBottom: `${24 + safeBottomInset}px` }}>
             {toast && (
               <div
                 className={`absolute z-20 left-1/2 -translate-x-1/2 -top-8 px-6 py-2 rounded-full flex items-center gap-2 border backdrop-blur-md text-xs font-bold ${
@@ -2944,11 +3009,12 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
             {isAiLoading && (
               <div
-                className={`mb-2 px-3 text-xs reader-typing-breath ${
+                className={`rm-typing mb-2 px-3 text-xs reader-typing-breath ${
                   isDarkMode ? 'text-slate-400' : 'text-slate-500'
                 }`}
               >
-                {characterNickname} 正在输入中...
+                <span className="rm-typing-name">{characterNickname}</span>{' '}
+                <span className="rm-typing-text">正在输入中...</span>
               </div>
             )}
 
@@ -2965,7 +3031,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
               </div>
             )}
 
-            <div className={`flex items-center gap-3 rounded-full px-2 py-2 ${isDarkMode ? 'bg-[#1a202c] shadow-inner' : 'neu-pressed'}`}>
+            <div className={`rm-input-wrap flex items-center gap-3 rounded-full px-2 py-2 ${isDarkMode ? 'bg-[#1a202c] shadow-inner' : 'neu-pressed'}`}>
               <input
                 type="text"
                 value={inputText}
@@ -2973,7 +3039,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                 onKeyDown={onInputKeyDown}
                 placeholder=""
                 disabled={isManualLoading || isDeleteMode}
-                className={`flex-1 bg-transparent outline-none text-sm min-w-0 px-4 ${
+                className={`rm-input flex-1 bg-transparent outline-none text-sm min-w-0 px-4 ${
                   isDarkMode ? 'text-slate-200 placeholder-slate-600' : 'text-slate-700'
                 } ${isManualLoading || isDeleteMode ? 'opacity-60 cursor-not-allowed' : ''}`}
               />
@@ -3009,7 +3075,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                   <button
                     onClick={() => void requestAiReply(messages)}
                     disabled={isManualLoading || !canSendToAi}
-                    className={`p-2 rounded-full transition-all ${
+                    className={`rm-send-btn p-2 rounded-full transition-all ${
                       !isManualLoading && canSendToAi
                         ? isDarkMode
                           ? 'bg-rose-400 text-white'
@@ -3023,7 +3089,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                   <button
                     onClick={() => void handleRefreshReply()}
                     disabled={isManualLoading}
-                    className={`p-2 rounded-full transition-all ${
+                    className={`rm-retry-btn p-2 rounded-full transition-all ${
                       isManualLoading
                         ? 'text-slate-400 opacity-50'
                         : isDarkMode

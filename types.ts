@@ -98,6 +98,8 @@ export interface Book {
   chapterRegex?: string; // The regex used to parse
   fullTextLength?: number; // Cached text length for lightweight listing/sorting
   chapterCount?: number; // Cached chapter count for lightweight listing/sorting
+  ragEnabled?: boolean; // Whether RAG index is enabled for this book
+  ragModelPresetId?: string; // Which RAG model preset was used / selected
 }
 
 export interface Message {
@@ -120,7 +122,78 @@ export enum AppView {
   LIBRARY = 'LIBRARY',
   READER = 'READER',
   STATS = 'STATS',
+  STUDY_HUB = 'STUDY_HUB',
   SETTINGS = 'SETTINGS'
+}
+
+// ─── 共读集：读书笔记 ───
+
+export interface StudyNoteCommentMessage {
+  id: string;
+  role: 'ai' | 'user';
+  content: string;
+  createdAt: number;
+}
+
+export interface StudyNoteCommentThread {
+  id: string;
+  characterId: string;
+  characterName: string;
+  characterAvatar: string;
+  messages: StudyNoteCommentMessage[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface StudyNote {
+  id: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+  commentThreads: StudyNoteCommentThread[];
+}
+
+export interface Notebook {
+  id: string;
+  title: string;
+  personaId: string;
+  boundBookIds: string[];
+  coverUrl?: string;
+  paperBgUrl?: string;
+  notes: StudyNote[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+// ─── 共读集：内容问答 ───
+
+export interface QuizQuestion {
+  id: string;
+  question: string;
+  options: string[];
+  correctAnswerIndices: number[];
+  type: 'single' | 'multiple' | 'truefalse';
+  explanation: string;
+}
+
+export interface QuizConfig {
+  bookIds: string[];
+  questionCount: number;
+  questionType: 'single' | 'multiple' | 'truefalse';
+  optionCount: number;
+  customPrompt: string;
+}
+
+export interface QuizSession {
+  id: string;
+  config: QuizConfig;
+  questions: QuizQuestion[];
+  userAnswers: Record<string, number[]>;
+  characterId: string;
+  characterName: string;
+  overallComment: string;
+  createdAt: number;
+  completedAt?: number;
 }
 
 export type ApiProvider = 'OPENAI' | 'DEEPSEEK' | 'GEMINI' | 'CLAUDE' | 'CUSTOM';
@@ -137,6 +210,16 @@ export interface ApiPreset {
   name: string;
   config: ApiConfig;
 }
+
+export interface RagPreset {
+  id: string;
+  name: string;
+  config: ApiConfig;
+  isDefault?: boolean;
+}
+
+/** 根据预设ID解析出ApiConfig。返回 undefined 表示使用本地模型。 */
+export type RagApiConfigResolver = (presetId: string | undefined) => ApiConfig | undefined;
 
 export interface ReaderCssPreset {
   id: string;

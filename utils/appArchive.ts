@@ -1,4 +1,5 @@
 import { StoredBookContent, getAllBookContents, getBookContentStorageUsageBytes, replaceAllBookContents } from './bookContentStorage';
+import { Notebook, QuizSession } from '../types';
 import {
   exportChatHistoryForArchive,
   getChatHistoryStorageUsageBytes,
@@ -11,9 +12,15 @@ import {
   isImageRef,
   saveImageBlobByRef,
 } from './imageStorage';
+import {
+  exportStudyHubForArchive,
+  getStudyHubStorageUsageBytes,
+  restoreStudyHubFromArchive,
+} from './studyHubStorage';
 
 export type StorageCategoryKey =
   | 'readingText'
+  | 'studyHub'
   | 'chatHistory'
   | 'worldBook'
   | 'personaCharacter'
@@ -23,12 +30,13 @@ export type StorageCategoryKey =
 
 const LOCAL_STORAGE_PREFIXES = ['app_', 'lib_'];
 const APP_ARCHIVE_SCHEMA = 'ai-reader-archive';
-const APP_ARCHIVE_VERSION = 1;
+const APP_ARCHIVE_VERSION = 3;
 const APP_ARCHIVE_APP_ID = 'ai-reader-companion';
 const LEGACY_CHAT_HISTORY_STORAGE_KEY = 'app_reader_chat_history_v1';
 
 export const STORAGE_CATEGORY_ORDER: StorageCategoryKey[] = [
   'readingText',
+  'studyHub',
   'chatHistory',
   'worldBook',
   'personaCharacter',
@@ -39,6 +47,7 @@ export const STORAGE_CATEGORY_ORDER: StorageCategoryKey[] = [
 
 export const STORAGE_CATEGORY_LABELS: Record<StorageCategoryKey, string> = {
   readingText: '阅读文本信息',
+  studyHub: '共读集数据',
   chatHistory: '聊天记录',
   worldBook: '世界书',
   personaCharacter: '用户与角色人设',
@@ -49,16 +58,24 @@ export const STORAGE_CATEGORY_LABELS: Record<StorageCategoryKey, string> = {
 
 export const STORAGE_CATEGORY_COLORS: Record<StorageCategoryKey, string> = {
   readingText: '#797D62',
+  studyHub: '#997B66',
   chatHistory: '#9B9B7A',
   worldBook: '#D9AE94',
   personaCharacter: '#F1DCA7',
   appearancePresets: '#FFCB69',
   stats: '#D08C60',
-  other: '#997B66',
+  other: '#B7B7A4',
 };
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
+
+const normalizeArchivedBookContent = (value: unknown): StoredBookContent | null => {
+  if (!isObjectRecord(value)) return null;
+  if (typeof value.fullText !== 'string') return null;
+  if (!Array.isArray(value.chapters)) return null;
+  return value as unknown as StoredBookContent;
+};
 
 const safeParseJson = (value: string): unknown => {
   try {
@@ -196,8 +213,21 @@ export const analyzeAppStorageUsage = async (): Promise<StorageAnalysisResult> =
 
   const bookContentUsage = await getBookContentStorageUsageBytes();
   categoryBytes.readingText += bookContentUsage.totalBytes;
+  try {
+    const ragModule = await import('./ragEngine');
+    const getRagUsage = (ragModule as { getRagStorageUsageBytes?: () => Promise<{ totalBytes: number }> })
+      .getRagStorageUsageBytes;
+    if (typeof getRagUsage === 'function') {
+      const ragUsage = await getRagUsage();
+      categoryBytes.readingText += Math.max(0, Number(ragUsage?.totalBytes || 0));
+    }
+  } catch {
+    // Ignore RAG usage failures and keep storage analysis available.
+  }
   const chatStoreUsage = await getChatHistoryStorageUsageBytes();
   categoryBytes.chatHistory += chatStoreUsage;
+  const studyHubUsage = await getStudyHubStorageUsageBytes();
+  categoryBytes.studyHub += Math.max(0, Number(studyHubUsage.totalBytes || 0));
 
   const imageUsage = await getAllImageRefsAndSizes();
   Object.entries(imageUsage).forEach(([imageRef, size]) => {
@@ -236,6 +266,14 @@ export interface AppArchivePayload {
     bookContents: Record<string, StoredBookContent>;
     images: Record<string, string>;
     chatStore: Record<string, unknown>;
+    ragIndex: {
+      embeddings: unknown[];
+      meta: unknown[];
+    };
+    studyHub: {
+      notebooks: Notebook[];
+      quizSessions: QuizSession[];
+    };
   };
 }
 
@@ -244,6 +282,20 @@ export const createAppArchivePayload = async (): Promise<AppArchivePayload> => {
   const bookContents = await getAllBookContents();
   const images = await exportAllImagesAsDataUrls();
   const chatStore = await exportChatHistoryForArchive();
+  const ragModule = await import('./ragEngine');
+  const exportRagIndex = (ragModule as {
+    exportRagIndexForArchive?: () => Promise<{ embeddings?: unknown[]; meta?: unknown[] }>;
+  }).exportRagIndexForArchive;
+  const ragRaw = typeof exportRagIndex === 'function' ? await exportRagIndex() : null;
+  const ragIndex = {
+    embeddings: Array.isArray(ragRaw?.embeddings) ? ragRaw.embeddings : [],
+    meta: Array.isArray(ragRaw?.meta) ? ragRaw.meta : [],
+  };
+  const studyHubRaw = await exportStudyHubForArchive();
+  const studyHub = {
+    notebooks: Array.isArray(studyHubRaw?.notebooks) ? studyHubRaw.notebooks : [],
+    quizSessions: Array.isArray(studyHubRaw?.quizSessions) ? studyHubRaw.quizSessions : [],
+  };
 
   return {
     meta: {
@@ -257,6 +309,8 @@ export const createAppArchivePayload = async (): Promise<AppArchivePayload> => {
       bookContents,
       images,
       chatStore,
+      ragIndex,
+      studyHub,
     },
   };
 };
@@ -291,12 +345,15 @@ const normalizeArchivePayload = (raw: unknown): AppArchivePayload => {
   const bookContentsSource = indexedDbSource.bookContents;
   const imagesSource = indexedDbSource.images;
   const chatStoreSource = isObjectRecord(indexedDbSource.chatStore) ? indexedDbSource.chatStore : {};
+  const ragIndexSource = isObjectRecord(indexedDbSource.ragIndex) ? indexedDbSource.ragIndex : {};
+  const studyHubSource = isObjectRecord(indexedDbSource.studyHub) ? indexedDbSource.studyHub : {};
 
   const bookContents: Record<string, StoredBookContent> = {};
   Object.entries(bookContentsSource).forEach(([bookId, payload]) => {
     if (!bookId || typeof bookId !== 'string') return;
-    if (!isObjectRecord(payload)) return;
-    bookContents[bookId] = payload as StoredBookContent;
+    const normalized = normalizeArchivedBookContent(payload);
+    if (!normalized) return;
+    bookContents[bookId] = normalized;
   });
 
   const images: Record<string, string> = {};
@@ -327,6 +384,15 @@ const normalizeArchivePayload = (raw: unknown): AppArchivePayload => {
   }
   delete localStorageSnapshot[LEGACY_CHAT_HISTORY_STORAGE_KEY];
 
+  const ragIndex = {
+    embeddings: Array.isArray(ragIndexSource.embeddings) ? ragIndexSource.embeddings : [],
+    meta: Array.isArray(ragIndexSource.meta) ? ragIndexSource.meta : [],
+  };
+  const studyHub = {
+    notebooks: (Array.isArray(studyHubSource.notebooks) ? studyHubSource.notebooks : []) as Notebook[],
+    quizSessions: (Array.isArray(studyHubSource.quizSessions) ? studyHubSource.quizSessions : []) as QuizSession[],
+  };
+
   return {
     meta: {
       schema,
@@ -339,6 +405,8 @@ const normalizeArchivePayload = (raw: unknown): AppArchivePayload => {
       bookContents,
       images,
       chatStore,
+      ragIndex,
+      studyHub,
     },
   };
 };
@@ -359,9 +427,16 @@ export const restoreAppArchivePayload = async (raw: unknown): Promise<AppArchive
       return [imageRef, blob] as const;
     })
   );
+  const ragModule = await import('./ragEngine');
+  const restoreRagIndex = (ragModule as { restoreRagIndexFromArchive?: (value: unknown) => Promise<void> })
+    .restoreRagIndexFromArchive;
 
   await replaceAllBookContents(archive.indexedDb.bookContents);
   await restoreChatHistoryFromArchive(archive.indexedDb.chatStore);
+  if (typeof restoreRagIndex === 'function') {
+    await restoreRagIndex(archive.indexedDb.ragIndex);
+  }
+  await restoreStudyHubFromArchive(archive.indexedDb.studyHub);
   await clearAllImages();
   for (const [imageRef, blob] of imageBlobEntries) {
     await saveImageBlobByRef(imageRef, blob);

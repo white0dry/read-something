@@ -75,7 +75,7 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
     return () => {
       if (innerTransitionTimerRef.current) window.clearTimeout(innerTransitionTimerRef.current);
       if (innerTransitionUnlockTimerRef.current) window.clearTimeout(innerTransitionUnlockTimerRef.current);
-      Object.values(insertPositionCommitTimersRef.current).forEach((timerId) => window.clearTimeout(timerId));
+      Object.values(insertPositionCommitTimersRef.current).forEach((timerId: number) => window.clearTimeout(timerId));
       insertPositionCommitTimersRef.current = {};
     };
   }, []);
@@ -524,7 +524,7 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
                         <div
                           className={`pointer-events-none absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-md transition-transform duration-300 ${
                             visualInsertPosition === 'AFTER' ? 'translate-x-full' : 'translate-x-0'
-                          } ${isDarkMode ? 'bg-slate-600' : 'neu-flat'}`}
+                          } ${isDarkMode ? 'bg-slate-600 shadow-[6px_6px_12px_#232b39]' : 'bg-[var(--neu-bg)] shadow-[6px_6px_12px_var(--neu-shadow-dark)]'}`}
                         />
                         <button
                           onClick={() => switchInsertPositionWithSlide(entry.id, visualInsertPosition, 'BEFORE')}
