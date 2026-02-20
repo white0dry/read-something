@@ -217,7 +217,7 @@ export const buildUserPromptRecord = (
   const quoteText = quote
     ? ` [引用:发送者=${quote.senderName};时间=${formatTimestampMinute(quote.timestamp)};内容=${compactText(quote.content)}]`
     : '';
-  return `[发送者:${userRealName}][时间:${formatTimestampMinute(timestamp)}] ${messageText}${quoteText}`;
+  return `[发送者:${userRealName}][${formatTimestampMinute(timestamp)}] ${messageText}${quoteText}`;
 };
 
 export const buildCharacterPromptRecord = (characterRealName: string, content: string, timestamp: number) => {
@@ -228,7 +228,9 @@ export const buildCharacterPromptRecord = (characterRealName: string, content: s
 const migratePromptRecordFormat = (value: string): string => {
   const compact = compactText(value || '');
   if (!compact) return '';
-  return compact.replace(LEGACY_PROMPT_ROLE_PREFIX_RE, '');
+  return compact
+    .replace(LEGACY_PROMPT_ROLE_PREFIX_RE, '')
+    .replace(/\[时间:([^\]]+)\]/g, '[$1]');
 };
 
 export const defaultChatBucket = (): ReaderChatBucket => ({
