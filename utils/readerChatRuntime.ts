@@ -78,6 +78,8 @@ let pendingStoreBeforeHydration: ReaderChatStore | null = null;
 
 export const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 export const compactText = (value: string) => value.replace(/\s+/g, ' ').trim();
+const LEGACY_PROMPT_ROLE_PREFIX_RE = /^\[(?:用户消息|角色消息)\]/;
+const MODERN_PROMPT_RECORD_RE = /^\[发送者:[^\]]+\]\[[^\]]+\]\s*/;
 
 const minutePad = (value: number) => `${value}`.padStart(2, '0');
 
@@ -223,6 +225,12 @@ export const buildCharacterPromptRecord = (characterRealName: string, content: s
   return `[发送者:${characterRealName}][${formatTimestampMinute(timestamp)}] ${messageText}`;
 };
 
+const migratePromptRecordFormat = (value: string): string => {
+  const compact = compactText(value || '');
+  if (!compact) return '';
+  return compact.replace(LEGACY_PROMPT_ROLE_PREFIX_RE, '');
+};
+
 export const defaultChatBucket = (): ReaderChatBucket => ({
   updatedAt: Date.now(),
   messages: [],
@@ -294,17 +302,20 @@ const normalizeChatBubble = (value: unknown): ChatBubble | null => {
   const timestamp = Number(source.timestamp);
   if (!content || !Number.isFinite(timestamp)) return null;
   const quote = normalizeQuotePayload(source.quote, timestamp);
+  const migratedPromptRecord =
+    typeof source.promptRecord === 'string'
+      ? migratePromptRecordFormat(source.promptRecord)
+      : '';
+  const fallbackPromptRecord =
+    source.sender === 'user'
+      ? buildUserPromptRecord(DEFAULT_USER_NAME, content, timestamp, quote)
+      : buildCharacterPromptRecord(DEFAULT_CHAR_NAME, content, timestamp);
   return {
     id: typeof source.id === 'string' && source.id.trim() ? source.id : `${timestamp}-${Math.random()}`,
     sender: source.sender,
     content,
     timestamp,
-    promptRecord:
-      typeof source.promptRecord === 'string' && compactText(source.promptRecord)
-        ? source.promptRecord
-        : source.sender === 'user'
-          ? buildUserPromptRecord(DEFAULT_USER_NAME, content, timestamp, quote)
-          : buildCharacterPromptRecord(DEFAULT_CHAR_NAME, content, timestamp),
+    promptRecord: MODERN_PROMPT_RECORD_RE.test(migratedPromptRecord) ? migratedPromptRecord : fallbackPromptRecord,
     sentToAi: source.sentToAi !== false,
     quote,
     generationId: typeof source.generationId === 'string' ? source.generationId : undefined,
