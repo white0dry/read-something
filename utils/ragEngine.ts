@@ -947,7 +947,7 @@ const getEmbedPipeline = async () => {
             progress_callback: (event: unknown) => {
               const progress = parseModelLoadProgressEvent(event);
               if (progress !== null) {
-                const capped = Math.min(0.95, progress);
+                const capped = Math.min(0.99, progress);
                 if (capped > modelLoadProgress) {
                   emitModelLoadProgress(capped);
                 }
@@ -955,13 +955,16 @@ const getEmbedPipeline = async () => {
             },
           });
           const runLoadPipeWithProgress = async (timeoutMessage: string): Promise<any> => {
-            let syntheticProgress = Math.max(0.1, modelLoadProgress);
+            let syntheticProgress = Math.max(0.12, modelLoadProgress);
             const ticker = setInterval(() => {
-              syntheticProgress = Math.min(0.95, syntheticProgress + 0.01);
+              const gap = Math.max(0, 0.99 - syntheticProgress);
+              if (gap <= 0) return;
+              const dynamicStep = Math.min(0.012, Math.max(0.0025, gap * 0.08));
+              syntheticProgress = Math.min(0.99, syntheticProgress + dynamicStep);
               if (syntheticProgress > modelLoadProgress) {
                 emitModelLoadProgress(syntheticProgress);
               }
-            }, 900);
+            }, 600);
             try {
               return await promiseWithTimeout(
                 loadPipe(),

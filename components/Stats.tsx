@@ -723,15 +723,20 @@ const Stats: React.FC<StatsProps> = ({
 
     return [
       `现在是${stickyNoteDateText}。`,
+      '<identity>',
       `你是${characterName}。`,
+      `你在意的人叫${personaName}。`,
+      '</identity>',
       '',
-      // 世界观与自我认知
+      '<char_profile>',
       formatWorldBookSection(characterWorldBookEntries.before),
       characterDescription,
       formatWorldBookSection(characterWorldBookEntries.after),
+      '</char_profile>',
       '',
-      `你在意的人叫${personaName}。`,
+      '<user_profile>',
       personaDescription ? `关于ta：${personaDescription}` : '',
+      '</user_profile>',
       '',
       '你们最近的对话：',
       historyText,

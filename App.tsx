@@ -1628,21 +1628,59 @@ const App: React.FC = () => {
           const ragApiCfg = resolveRagApiConfig(book.ragModelPresetId);
           const usesLocalEmbedModel = !ragApiCfg;
           const modelStageStart = 0.08;
-          const modelStageEnd = 0.72;
-          const indexStageBase = usesLocalEmbedModel ? 0.74 : 0.12;
-          const indexStageSpan = usesLocalEmbedModel ? 0.26 : 0.88;
+          const modelStageEnd = 0.9;
+          const indexStageBase = usesLocalEmbedModel ? 0.92 : 0.12;
+          const indexStageSpan = usesLocalEmbedModel ? 0.08 : 0.88;
 
           // 使用 API embedding 时跳过本地模型预热
           if (usesLocalEmbedModel) {
             let modelProgress = 0;
+            let displayedProgress = modelStageStart;
+            const modelStageWindow = modelStageEnd - modelStageStart;
+            const modelStageTickStartedAt = Date.now();
+            const modelEasingK = 3.5;
+            const mapModelProgress = (rawProgress: number) => {
+              const safeRaw = Math.max(0, Math.min(1, Number.isFinite(rawProgress) ? rawProgress : 0));
+              const eased = 1 - Math.exp(-modelEasingK * safeRaw);
+              const normalized = eased / (1 - Math.exp(-modelEasingK));
+              return modelStageStart + normalized * modelStageWindow;
+            };
+            const getTimeFloor = () => {
+              const elapsedMs = Math.max(0, Date.now() - modelStageTickStartedAt);
+              const elapsedRatio = Math.min(1, elapsedMs / 120000);
+              return modelStageStart + elapsedRatio * modelStageWindow * 0.9;
+            };
+
             setWarmupState({ active: true, stage: 'model', progress: modelStageStart });
-            await warmupRagModel((progress) => {
-              const safeProgress = Math.max(0, Math.min(1, Number.isFinite(progress) ? progress : 0));
-              if (safeProgress <= modelProgress) return;
-              modelProgress = safeProgress;
-              const mappedProgress = modelStageStart + modelProgress * (modelStageEnd - modelStageStart);
-              setWarmupState({ active: true, stage: 'model', progress: Math.max(modelStageStart, Math.min(modelStageEnd, mappedProgress)) });
-            });
+            const modelStageTicker = window.setInterval(() => {
+              const nextProgress = Math.max(displayedProgress, getTimeFloor());
+              if (nextProgress <= displayedProgress) return;
+              displayedProgress = Math.min(modelStageEnd, nextProgress);
+              setWarmupState({
+                active: true,
+                stage: 'model',
+                progress: displayedProgress,
+              });
+            }, 900);
+
+            try {
+              await warmupRagModel((progress) => {
+                const safeProgress = Math.max(0, Math.min(1, Number.isFinite(progress) ? progress : 0));
+                if (safeProgress <= modelProgress) return;
+                modelProgress = safeProgress;
+                const mappedProgress = mapModelProgress(modelProgress);
+                const nextProgress = Math.max(displayedProgress, getTimeFloor(), mappedProgress);
+                if (nextProgress <= displayedProgress) return;
+                displayedProgress = Math.min(modelStageEnd, nextProgress);
+                setWarmupState({
+                  active: true,
+                  stage: 'model',
+                  progress: displayedProgress,
+                });
+              });
+            } finally {
+              window.clearInterval(modelStageTicker);
+            }
             setWarmupState({ active: true, stage: 'model', progress: modelStageEnd });
           }
           setWarmupState({ active: true, stage: 'index', progress: indexStageBase });

@@ -177,16 +177,16 @@ export const buildNoteCommentPrompt = (params: BuildNoteCommentPromptParams): st
 你的昵称是「${charNickname}」，和你讨论的人叫${userPersona.name}，你叫Ta「${userNickname}」。
 </identity>
 
-<user_profile>
-【${userPersona.name}的信息】
-${applyTemplatePlaceholders(sanitizeTextForAiPrompt(userPersona.description), character.name, userPersona.name) || '（暂无用户信息）'}
-</user_profile>
-
 <char_profile>
 ${wb.before ? wb.before + '\n' : ''}【你是谁】
 ${applyTemplatePlaceholders(sanitizeTextForAiPrompt(character.description), character.name, userPersona.name)}
 ${wb.after ? '\n' + wb.after : ''}
 </char_profile>
+
+<user_profile>
+【${userPersona.name}的信息】
+${applyTemplatePlaceholders(sanitizeTextForAiPrompt(userPersona.description), character.name, userPersona.name) || '（暂无用户信息）'}
+</user_profile>
 
 <book_context>
 ${buildBookContextSection(bookContexts, ragContextByBookId)}
@@ -248,16 +248,16 @@ export const buildNoteReplyPrompt = (params: BuildNoteReplyPromptParams): string
 你的昵称是「${charNickname}」，和你讨论的人叫${userPersona.name}，你叫Ta「${userNickname}」。
 </identity>
 
-<user_profile>
-【${userPersona.name}的信息】
-${applyTemplatePlaceholders(sanitizeTextForAiPrompt(userPersona.description), character.name, userPersona.name) || '（暂无用户信息）'}
-</user_profile>
-
 <char_profile>
 ${wb.before ? wb.before + '\n' : ''}【你是谁】
 ${applyTemplatePlaceholders(sanitizeTextForAiPrompt(character.description), character.name, userPersona.name)}
 ${wb.after ? '\n' + wb.after : ''}
 </char_profile>
+
+<user_profile>
+【${userPersona.name}的信息】
+${applyTemplatePlaceholders(sanitizeTextForAiPrompt(userPersona.description), character.name, userPersona.name) || '（暂无用户信息）'}
+</user_profile>
 
 <book_context>
 ${buildBookContextSection(bookContexts, ragContextByBookId)}
@@ -425,16 +425,16 @@ export const buildQuizOverallCommentPrompt = (params: BuildQuizOverallCommentPar
 你的昵称是「${charNickname}」，和你讨论的人叫${userPersona.name}，你叫Ta「${userNickname}」。
 </identity>
 
-<user_profile>
-【${userPersona.name}的信息】
-${applyTemplatePlaceholders(sanitizeTextForAiPrompt(userPersona.description), character.name, userPersona.name) || '（暂无用户信息）'}
-</user_profile>
-
 <char_profile>
 ${wb.before ? wb.before + '\n' : ''}【你是谁】
 ${applyTemplatePlaceholders(sanitizeTextForAiPrompt(character.description), character.name, userPersona.name)}
 ${wb.after ? '\n' + wb.after : ''}
 </char_profile>
+
+<user_profile>
+【${userPersona.name}的信息】
+${applyTemplatePlaceholders(sanitizeTextForAiPrompt(userPersona.description), character.name, userPersona.name) || '（暂无用户信息）'}
+</user_profile>
 
 <quiz_result>
 【测验信息】

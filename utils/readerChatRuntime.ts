@@ -215,12 +215,12 @@ export const buildUserPromptRecord = (
   const quoteText = quote
     ? ` [引用:发送者=${quote.senderName};时间=${formatTimestampMinute(quote.timestamp)};内容=${compactText(quote.content)}]`
     : '';
-  return `[用户消息][发送者:${userRealName}][时间:${formatTimestampMinute(timestamp)}] ${messageText}${quoteText}`;
+  return `[发送者:${userRealName}][时间:${formatTimestampMinute(timestamp)}] ${messageText}${quoteText}`;
 };
 
 export const buildCharacterPromptRecord = (characterRealName: string, content: string, timestamp: number) => {
   const messageText = compactText(content);
-  return `[角色消息][发送者:${characterRealName}][时间:${formatTimestampMinute(timestamp)}] ${messageText}`;
+  return `[发送者:${characterRealName}][${formatTimestampMinute(timestamp)}] ${messageText}`;
 };
 
 export const defaultChatBucket = (): ReaderChatBucket => ({
