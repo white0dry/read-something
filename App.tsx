@@ -841,8 +841,21 @@ const App: React.FC = () => {
       const visualHeight = window.visualViewport?.height ?? 0;
       const innerHeight = window.innerHeight || 0;
       const clientHeight = document.documentElement.clientHeight || 0;
-      const nextHeight = Math.max(visualHeight, innerHeight, clientHeight);
+      const measuredHeight = visualHeight > 0 ? visualHeight : Math.max(innerHeight, clientHeight);
+      const safeBottomInset = Math.max(0, systemSafeAreaInsets.bottom || 0);
+      const screenDims = [window.screen?.height || 0, window.screen?.width || 0].filter((v) => v > 0);
+      const isPortrait = window.matchMedia('(orientation: portrait)').matches;
+      const screenHeight =
+        screenDims.length === 0
+          ? 0
+          : (isPortrait ? Math.max(...screenDims) : Math.min(...screenDims));
 
+      let totalHeight = measuredHeight + safeBottomInset;
+      if (screenHeight > 0) {
+        totalHeight = Math.min(totalHeight, screenHeight);
+      }
+
+      const nextHeight = Math.max(0, totalHeight - safeBottomInset);
       document.documentElement.style.setProperty('--app-screen-height', `${Math.round(nextHeight)}px`);
     };
 
@@ -856,7 +869,7 @@ const App: React.FC = () => {
       window.removeEventListener('orientationchange', syncAppScreenHeight);
       window.visualViewport?.removeEventListener('resize', syncAppScreenHeight);
     };
-  }, []);
+  }, [systemSafeAreaInsets.bottom]);
   useEffect(() => {
     try {
       if (localStorage.getItem(SAFE_AREA_DEFAULT_MIGRATION_KEY)) return;
@@ -1891,7 +1904,7 @@ const App: React.FC = () => {
 
   const manualSafeAreaTop = Math.max(0, appSettings.safeAreaTop || 0);
   const manualSafeAreaBottom = Math.max(0, appSettings.safeAreaBottom || 0);
-  const resolvedSafeAreaTop = manualSafeAreaTop + Math.max(0, systemSafeAreaInsets.top || 0);
+  const resolvedSafeAreaTop = manualSafeAreaTop;
   const resolvedSafeAreaBottom = manualSafeAreaBottom + Math.max(0, systemSafeAreaInsets.bottom || 0);
   const appViewportHeight = 'calc(var(--app-screen-height) + var(--app-safe-area-bottom-px))';
   const appWrapperClass = `relative flex flex-col h-full font-sans overflow-hidden transition-colors duration-300 ${isDarkMode ? 'dark-mode bg-[#2d3748] text-slate-200' : 'bg-[#e0e5ec] text-slate-600'}`;
@@ -1899,6 +1912,7 @@ const App: React.FC = () => {
     minHeight: appViewportHeight,
     height: appViewportHeight,
     paddingTop: `${resolvedSafeAreaTop}px`,
+    boxSizing: 'border-box',
   };
   const activeRagWarmupEntries = Object.entries(ragWarmupByBookId).filter(
     (entry): entry is [string, RagWarmupState] => {
@@ -1968,6 +1982,7 @@ const App: React.FC = () => {
     const readerWrapperStyle: React.CSSProperties = {
       minHeight: appViewportHeight,
       height: appViewportHeight,
+      boxSizing: 'border-box',
     };
     return (
       <div 
