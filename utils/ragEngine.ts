@@ -947,16 +947,35 @@ const getEmbedPipeline = async () => {
             progress_callback: (event: unknown) => {
               const progress = parseModelLoadProgressEvent(event);
               if (progress !== null) {
-                emitModelLoadProgress(progress);
+                const capped = Math.min(0.95, progress);
+                if (capped > modelLoadProgress) {
+                  emitModelLoadProgress(capped);
+                }
               }
             },
           });
+          const runLoadPipeWithProgress = async (timeoutMessage: string): Promise<any> => {
+            let syntheticProgress = Math.max(0.1, modelLoadProgress);
+            const ticker = setInterval(() => {
+              syntheticProgress = Math.min(0.95, syntheticProgress + 0.01);
+              if (syntheticProgress > modelLoadProgress) {
+                emitModelLoadProgress(syntheticProgress);
+              }
+            }, 900);
+            try {
+              return await promiseWithTimeout(
+                loadPipe(),
+                pipelineLoadTimeoutMs,
+                timeoutMessage,
+              );
+            } finally {
+              clearInterval(ticker);
+            }
+          };
           emitRagModelDebugEvent({ type: 'pipeline-load-start', host, detail: MODEL_NAME });
           let pipe: any;
           try {
-            pipe = await promiseWithTimeout(
-              loadPipe(),
-              pipelineLoadTimeoutMs,
+            pipe = await runLoadPipeWithProgress(
               `[RAG] Pipeline load timeout (${pipelineLoadTimeoutMs}ms) on ${host}`,
             );
           } catch (err) {
@@ -971,9 +990,7 @@ const getEmbedPipeline = async () => {
               host,
               detail: `${MODEL_NAME} (retry-after-cache-clear)`,
             });
-            pipe = await promiseWithTimeout(
-              loadPipe(),
-              pipelineLoadTimeoutMs,
+            pipe = await runLoadPipeWithProgress(
               `[RAG] Pipeline retry timeout (${pipelineLoadTimeoutMs}ms) on ${host}`,
             );
           }

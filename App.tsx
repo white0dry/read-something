@@ -453,6 +453,7 @@ const App: React.FC = () => {
   const [notification, setNotification] = useState<Notification>({ show: false, message: '', type: 'success' });
   const [ragWarmupByBookId, setRagWarmupByBookId] = useState<Record<string, RagWarmupState>>({});
   const [ragErrorToast, setRagErrorToast] = useState<{ show: boolean; message: string }>({ show: false, message: '' });
+  const [systemSafeAreaBottom, setSystemSafeAreaBottom] = useState(0);
   const [dailyReadingMsByDate, setDailyReadingMsByDate] = useState<Record<string, number>>(() => {
     try {
       const saved = localStorage.getItem(DAILY_READING_MS_STORAGE_KEY);
@@ -792,22 +793,60 @@ const App: React.FC = () => {
     document.body.classList.toggle('dark-mode', isDarkMode);
   }, [isDarkMode]);
   useEffect(() => {
+    if (!document.body) return;
+
+    const probe = document.createElement('div');
+    probe.setAttribute('aria-hidden', 'true');
+    probe.style.position = 'fixed';
+    probe.style.left = '0';
+    probe.style.bottom = '0';
+    probe.style.width = '0';
+    probe.style.height = '0';
+    probe.style.paddingBottom = 'env(safe-area-inset-bottom)';
+    probe.style.pointerEvents = 'none';
+    probe.style.visibility = 'hidden';
+    probe.style.zIndex = '-1';
+    document.body.appendChild(probe);
+
+    const syncSafeAreaBottom = () => {
+      const style = window.getComputedStyle(probe);
+      const bottom = Math.max(0, Math.round(parseFloat(style.paddingBottom || '0') || 0));
+      setSystemSafeAreaBottom((prev) => (prev === bottom ? prev : bottom));
+      document.documentElement.style.setProperty('--app-safe-area-bottom-px', `${bottom}px`);
+    };
+
+    syncSafeAreaBottom();
+    window.addEventListener('resize', syncSafeAreaBottom);
+    window.addEventListener('orientationchange', syncSafeAreaBottom);
+    window.visualViewport?.addEventListener('resize', syncSafeAreaBottom);
+
+    return () => {
+      window.removeEventListener('resize', syncSafeAreaBottom);
+      window.removeEventListener('orientationchange', syncSafeAreaBottom);
+      window.visualViewport?.removeEventListener('resize', syncSafeAreaBottom);
+      probe.remove();
+    };
+  }, []);
+  useEffect(() => {
     const syncAppScreenHeight = () => {
       const visualHeight = window.visualViewport?.height ?? 0;
       const innerHeight = window.innerHeight || 0;
       const clientHeight = document.documentElement.clientHeight || 0;
       const measuredHeight = visualHeight > 0 ? visualHeight : Math.max(innerHeight, clientHeight);
+      const safeBottomInset = Math.max(0, systemSafeAreaBottom || 0);
       const screenDims = [window.screen?.height || 0, window.screen?.width || 0].filter((v) => v > 0);
       const isPortrait = window.matchMedia('(orientation: portrait)').matches;
       const screenHeight =
         screenDims.length === 0
           ? 0
           : (isPortrait ? Math.max(...screenDims) : Math.min(...screenDims));
-      let nextHeight = measuredHeight;
+
+      let totalHeight = measuredHeight + safeBottomInset;
       if (screenHeight > 0) {
-        nextHeight = Math.min(nextHeight, screenHeight);
+        totalHeight = Math.min(totalHeight, screenHeight);
       }
-      document.documentElement.style.setProperty('--app-screen-height', `${Math.round(Math.max(0, nextHeight))}px`);
+      const nextHeight = Math.max(0, totalHeight - safeBottomInset);
+      document.documentElement.style.setProperty('--app-screen-height', `${Math.round(nextHeight)}px`);
     };
 
     syncAppScreenHeight();
@@ -820,7 +859,7 @@ const App: React.FC = () => {
       window.removeEventListener('orientationchange', syncAppScreenHeight);
       window.visualViewport?.removeEventListener('resize', syncAppScreenHeight);
     };
-  }, []);
+  }, [systemSafeAreaBottom]);
   useEffect(() => {
     try {
       if (localStorage.getItem(SAFE_AREA_DEFAULT_MIGRATION_KEY)) return;
@@ -1589,9 +1628,9 @@ const App: React.FC = () => {
           const ragApiCfg = resolveRagApiConfig(book.ragModelPresetId);
           const usesLocalEmbedModel = !ragApiCfg;
           const modelStageStart = 0.08;
-          const modelStageEnd = 0.48;
-          const indexStageBase = usesLocalEmbedModel ? 0.5 : 0.12;
-          const indexStageSpan = usesLocalEmbedModel ? 0.5 : 0.88;
+          const modelStageEnd = 0.72;
+          const indexStageBase = usesLocalEmbedModel ? 0.74 : 0.12;
+          const indexStageSpan = usesLocalEmbedModel ? 0.26 : 0.88;
 
           // 使用 API embedding 时跳过本地模型预热
           if (usesLocalEmbedModel) {
@@ -1874,7 +1913,7 @@ const App: React.FC = () => {
   const manualSafeAreaBottom = Math.max(0, appSettings.safeAreaBottom || 0);
   const resolvedSafeAreaTop = manualSafeAreaTop;
   const resolvedSafeAreaBottom = manualSafeAreaBottom;
-  const appViewportHeight = 'var(--app-screen-height)';
+  const appViewportHeight = 'calc(var(--app-screen-height) + var(--app-safe-area-bottom-px))';
   const appWrapperClass = `relative flex flex-col h-full font-sans overflow-hidden transition-colors duration-300 ${isDarkMode ? 'dark-mode bg-[#2d3748] text-slate-200' : 'bg-[#e0e5ec] text-slate-600'}`;
   const appWrapperStyle: React.CSSProperties = {
     minHeight: appViewportHeight,

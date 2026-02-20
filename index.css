@@ -11,6 +11,7 @@
         --neu-highlight: #e28a9d; 
         --app-font-scale: 1;
         --app-screen-height: 100vh;
+        --app-safe-area-bottom-px: env(safe-area-inset-bottom, 0px);
         
         /* Default Theme Colors (Rose-ish) - Will be overridden by JS */
         --theme-50: 253 242 244;
@@ -45,8 +46,8 @@
       body,
       #root {
         width: 100%;
-        min-height: var(--app-screen-height);
-        height: var(--app-screen-height);
+        min-height: calc(var(--app-screen-height) + var(--app-safe-area-bottom-px));
+        height: calc(var(--app-screen-height) + var(--app-safe-area-bottom-px));
       }
 
       html, body {
