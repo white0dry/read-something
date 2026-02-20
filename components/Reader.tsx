@@ -9,7 +9,6 @@ import {
   ChevronDown,
   Highlighter,
   List as ListIcon,
-  Loader2,
   MoreHorizontal,
   RotateCcw,
   Save,
@@ -2813,11 +2812,6 @@ const Reader: React.FC<ReaderProps> = ({
     );
   };
 
-  const ragIndexingPercent = ragIndexingState
-    ? Math.max(0, Math.min(100, Math.round((Number.isFinite(ragIndexingState.progress) ? ragIndexingState.progress : 0) * 100)))
-    : 0;
-  const ragIndexingStageLabel = ragIndexingState?.stage === 'model' ? '模型加载中' : '索引构建中';
-
   return (
     <div
       ref={readerRootRef}
@@ -2875,15 +2869,6 @@ const Reader: React.FC<ReaderProps> = ({
           </button>
         </div>
       </div>
-
-      {ragIndexingState?.active && (
-        <div className="absolute left-1/2 -translate-x-1/2 z-30 pointer-events-none" style={{ top: `${Math.max(0, safeAreaTop) + 68}px` }}>
-          <div className={`px-4 py-2 rounded-full flex items-center gap-2 text-xs font-semibold border backdrop-blur-sm ${isDarkMode ? 'bg-[#2d3748]/95 text-slate-200 border-slate-600 shadow-[6px_6px_12px_#232b39,-6px_-6px_12px_#374357]' : 'bg-[#e0e5ec]/95 text-slate-600 border-white/35 shadow-[6px_6px_12px_rgba(0,0,0,0.08),-6px_-6px_12px_rgba(255,255,255,0.75)]'}`}>
-            <Loader2 size={14} className="animate-spin text-rose-400" />
-            <span>{`RAG ${ragIndexingStageLabel} ${ragIndexingPercent}%`}</span>
-          </div>
-        </div>
-      )}
 
       {isFloatingPanelVisible && (
         <>

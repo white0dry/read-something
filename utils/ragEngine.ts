@@ -776,10 +776,63 @@ const chunkBookTextInRange = (
 
 let embedPipelinePromise: Promise<any> | null = null;
 let modelLoaded = false;
+let modelLoadProgress = 0;
+const modelLoadProgressListeners = new Set<(progress: number) => void>();
+
+const emitModelLoadProgress = (progress: number): void => {
+  const clamped = Math.max(0, Math.min(1, Number.isFinite(progress) ? progress : 0));
+  modelLoadProgress = clamped;
+  modelLoadProgressListeners.forEach((listener) => {
+    try {
+      listener(clamped);
+    } catch {
+      // ignore listener errors
+    }
+  });
+};
+
+const subscribeModelLoadProgress = (listener: (progress: number) => void): (() => void) => {
+  modelLoadProgressListeners.add(listener);
+  try {
+    listener(modelLoadProgress);
+  } catch {
+    // ignore listener errors
+  }
+  return () => {
+    modelLoadProgressListeners.delete(listener);
+  };
+};
+
+const getNumericProgressField = (source: Record<string, unknown>, key: string): number | null => {
+  const value = source[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+};
+
+const parseModelLoadProgressEvent = (event: unknown): number | null => {
+  if (!isRecord(event)) return null;
+  const loaded = getNumericProgressField(event, 'loaded');
+  const total = getNumericProgressField(event, 'total');
+  if (loaded !== null && total !== null && total > 0) {
+    return Math.max(0, Math.min(1, loaded / total));
+  }
+  const progress = getNumericProgressField(event, 'progress');
+  if (progress !== null) {
+    const normalized = progress > 1 ? progress / 100 : progress;
+    return Math.max(0, Math.min(1, normalized));
+  }
+  return null;
+};
 
 export const isEmbedModelLoaded = () => modelLoaded;
-export const warmupRagModel = async (): Promise<void> => {
-  await getEmbedPipeline();
+export const warmupRagModel = async (onProgress?: (progress: number) => void): Promise<void> => {
+  const unsubscribe = onProgress ? subscribeModelLoadProgress(onProgress) : null;
+  try {
+    if (modelLoaded) emitModelLoadProgress(1);
+    await getEmbedPipeline();
+    emitModelLoadProgress(1);
+  } finally {
+    unsubscribe?.();
+  }
 };
 
 const normalizeHost = (host: string): string => host.endsWith('/') ? host : `${host}/`;
@@ -877,6 +930,7 @@ const getEmbedPipeline = async () => {
       }
 
       const hosts = getRagModelHosts();
+      emitModelLoadProgress(0);
       emitRagModelDebugEvent({
         type: 'model-load-start',
         detail: `hosts=${hosts.join(', ')} | browserCache=${browserCacheAvailable ? 'on' : 'off'} | ios=${isIOSRuntime ? 'yes' : 'no'} | timeout=${pipelineLoadTimeoutMs}ms`,
@@ -888,7 +942,15 @@ const getEmbedPipeline = async () => {
           env.remoteHost = normalizeHost(host);
           await ensureModelHostHealth(host);
 
-          const loadPipe = () => pipeline('feature-extraction', MODEL_NAME, { revision: HF_REMOTE_REVISION });
+          const loadPipe = () => pipeline('feature-extraction', MODEL_NAME, {
+            revision: HF_REMOTE_REVISION,
+            progress_callback: (event: unknown) => {
+              const progress = parseModelLoadProgressEvent(event);
+              if (progress !== null) {
+                emitModelLoadProgress(progress);
+              }
+            },
+          });
           emitRagModelDebugEvent({ type: 'pipeline-load-start', host, detail: MODEL_NAME });
           let pipe: any;
           try {
@@ -918,6 +980,7 @@ const getEmbedPipeline = async () => {
 
           emitRagModelDebugEvent({ type: 'pipeline-load-success', host, detail: MODEL_NAME });
           modelLoaded = true;
+          emitModelLoadProgress(1);
           emitRagModelDebugEvent({ type: 'model-load-success', host, detail: MODEL_NAME });
           return pipe;
         } catch (err) {
@@ -941,10 +1004,13 @@ const getEmbedPipeline = async () => {
         type: 'model-load-failed',
         detail: `hosts=${hosts.join(', ')} | last=${formatRagDebugDetail(lastError)}`,
       });
+      emitModelLoadProgress(0);
       throw new Error(`[RAG] Unable to load embedding model from all hosts (${hosts.join(', ')}). Last error: ${reason}`);
     })().catch((err) => {
       // 加载失败时重置单例，允许下次重试
       embedPipelinePromise = null;
+      modelLoaded = false;
+      emitModelLoadProgress(0);
       emitRagModelDebugEvent({
         type: 'model-load-failed',
         detail: formatRagDebugDetail(err),
