@@ -119,7 +119,8 @@ const MODEL_HEALTHCHECK_FILES = ['config.json', 'tokenizer_config.json'];
 const TRANSFORMERS_CACHE_NAME = 'transformers-cache';
 const RAG_DEBUG_EVENT_LIMIT = 100;
 const MODEL_HOST_CHECK_TIMEOUT_MS = 15000;
-const MODEL_PIPELINE_LOAD_TIMEOUT_MS = 60000;
+const MODEL_PIPELINE_LOAD_TIMEOUT_MS = 120000;
+const MODEL_PIPELINE_LOAD_TIMEOUT_IOS_MS = 240000;
 
 const RAG_DB_NAME = 'app_rag_embeddings_v1';
 const RAG_DB_VERSION = 1;
@@ -141,6 +142,14 @@ const isBrowserCacheAvailable = (): boolean => {
   } catch {
     return false;
   }
+};
+
+const isLikelyIOSRuntime = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const platform = navigator.platform || '';
+  const touchPoints = navigator.maxTouchPoints || 0;
+  return /iPad|iPhone|iPod/i.test(ua) || (platform === 'MacIntel' && touchPoints > 1);
 };
 
 const promiseWithTimeout = async <T>(
@@ -847,6 +856,7 @@ const getEmbedPipeline = async () => {
   if (!embedPipelinePromise) {
     embedPipelinePromise = (async () => {
       const { pipeline, env } = await import('@xenova/transformers');
+      const isIOSRuntime = isLikelyIOSRuntime();
       // Vite 预打包会 shim fs 模块，导致库误判为 Node 环境
       // 强制关闭文件系统访问，使用浏览器 fetch 加载
       env.useFS = false;
@@ -855,13 +865,21 @@ const getEmbedPipeline = async () => {
       env.allowRemoteModels = true;
       env.remotePathTemplate = HF_REMOTE_PATH_TEMPLATE;
       // 使用浏览器 Cache API 缓存以加速后续加载
-      const browserCacheAvailable = isBrowserCacheAvailable();
+      const browserCacheAvailable = isBrowserCacheAvailable() && !isIOSRuntime;
       env.useBrowserCache = browserCacheAvailable;
+      const pipelineLoadTimeoutMs = isIOSRuntime
+        ? MODEL_PIPELINE_LOAD_TIMEOUT_IOS_MS
+        : MODEL_PIPELINE_LOAD_TIMEOUT_MS;
+      const onnxWasm = (env as any)?.backends?.onnx?.wasm;
+      if (isIOSRuntime && onnxWasm && typeof onnxWasm === 'object') {
+        if ('numThreads' in onnxWasm) onnxWasm.numThreads = 1;
+        if ('proxy' in onnxWasm) onnxWasm.proxy = false;
+      }
 
       const hosts = getRagModelHosts();
       emitRagModelDebugEvent({
         type: 'model-load-start',
-        detail: `hosts=${hosts.join(', ')} | browserCache=${browserCacheAvailable ? 'on' : 'off'}`,
+        detail: `hosts=${hosts.join(', ')} | browserCache=${browserCacheAvailable ? 'on' : 'off'} | ios=${isIOSRuntime ? 'yes' : 'no'} | timeout=${pipelineLoadTimeoutMs}ms`,
       });
       let lastError: unknown = null;
 
@@ -876,8 +894,8 @@ const getEmbedPipeline = async () => {
           try {
             pipe = await promiseWithTimeout(
               loadPipe(),
-              MODEL_PIPELINE_LOAD_TIMEOUT_MS,
-              `[RAG] Pipeline load timeout (${MODEL_PIPELINE_LOAD_TIMEOUT_MS}ms) on ${host}`,
+              pipelineLoadTimeoutMs,
+              `[RAG] Pipeline load timeout (${pipelineLoadTimeoutMs}ms) on ${host}`,
             );
           } catch (err) {
             // 典型场景：曾缓存了 HTML 页面（<!DOCTYPE ...>），会导致 JSON.parse 失败。
@@ -893,8 +911,8 @@ const getEmbedPipeline = async () => {
             });
             pipe = await promiseWithTimeout(
               loadPipe(),
-              MODEL_PIPELINE_LOAD_TIMEOUT_MS,
-              `[RAG] Pipeline retry timeout (${MODEL_PIPELINE_LOAD_TIMEOUT_MS}ms) on ${host}`,
+              pipelineLoadTimeoutMs,
+              `[RAG] Pipeline retry timeout (${pipelineLoadTimeoutMs}ms) on ${host}`,
             );
           }
 

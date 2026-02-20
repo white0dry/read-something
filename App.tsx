@@ -55,6 +55,7 @@ const KEEP_ALIVE_SILENT_AUDIO_URL = 'https://files.catbox.moe/qx14i5.mp3';
 const FIXED_MESSAGE_TIME_GAP_MINUTES = 60;
 const RAG_WARMUP_RETRY_BASE_MS = 1500;
 const RAG_WARMUP_RETRY_MAX_MS = 15000;
+const RAG_LOCAL_WARMUP_MAX_RETRIES = 3;
 const RAG_PRESETS_STORAGE_KEY = 'app_rag_presets';
 const ACTIVE_RAG_PRESET_ID_STORAGE_KEY = 'app_active_rag_preset_id';
 const DEFAULT_RAG_PRESET_ID = '__default_rag_preset__';
@@ -452,6 +453,10 @@ const App: React.FC = () => {
   const [notification, setNotification] = useState<Notification>({ show: false, message: '', type: 'success' });
   const [ragWarmupByBookId, setRagWarmupByBookId] = useState<Record<string, RagWarmupState>>({});
   const [ragErrorToast, setRagErrorToast] = useState<{ show: boolean; message: string }>({ show: false, message: '' });
+  const [systemSafeAreaInsets, setSystemSafeAreaInsets] = useState<{ top: number; bottom: number }>({
+    top: 0,
+    bottom: 0,
+  });
   const [dailyReadingMsByDate, setDailyReadingMsByDate] = useState<Record<string, number>>(() => {
     try {
       const saved = localStorage.getItem(DAILY_READING_MS_STORAGE_KEY);
@@ -791,13 +796,54 @@ const App: React.FC = () => {
     document.body.classList.toggle('dark-mode', isDarkMode);
   }, [isDarkMode]);
   useEffect(() => {
+    if (!document.body) return;
+
+    const probe = document.createElement('div');
+    probe.setAttribute('aria-hidden', 'true');
+    probe.style.position = 'fixed';
+    probe.style.top = '0';
+    probe.style.left = '0';
+    probe.style.width = '0';
+    probe.style.height = '0';
+    probe.style.paddingTop = 'env(safe-area-inset-top)';
+    probe.style.paddingBottom = 'env(safe-area-inset-bottom)';
+    probe.style.pointerEvents = 'none';
+    probe.style.visibility = 'hidden';
+    probe.style.zIndex = '-1';
+    document.body.appendChild(probe);
+
+    const syncSafeAreaInsets = () => {
+      const style = window.getComputedStyle(probe);
+      const top = Math.max(0, Math.round(parseFloat(style.paddingTop || '0') || 0));
+      const bottom = Math.max(0, Math.round(parseFloat(style.paddingBottom || '0') || 0));
+      setSystemSafeAreaInsets((prev) => {
+        if (prev.top === top && prev.bottom === bottom) return prev;
+        return { top, bottom };
+      });
+      document.documentElement.style.setProperty('--app-safe-area-top-px', `${top}px`);
+      document.documentElement.style.setProperty('--app-safe-area-bottom-px', `${bottom}px`);
+    };
+
+    syncSafeAreaInsets();
+    window.addEventListener('resize', syncSafeAreaInsets);
+    window.addEventListener('orientationchange', syncSafeAreaInsets);
+    window.visualViewport?.addEventListener('resize', syncSafeAreaInsets);
+
+    return () => {
+      window.removeEventListener('resize', syncSafeAreaInsets);
+      window.removeEventListener('orientationchange', syncSafeAreaInsets);
+      window.visualViewport?.removeEventListener('resize', syncSafeAreaInsets);
+      probe.remove();
+    };
+  }, []);
+  useEffect(() => {
     const syncAppScreenHeight = () => {
       const visualHeight = window.visualViewport?.height ?? 0;
       const innerHeight = window.innerHeight || 0;
       const clientHeight = document.documentElement.clientHeight || 0;
       const nextHeight = Math.max(visualHeight, innerHeight, clientHeight);
 
-      document.documentElement.style.setProperty('--app-screen-height', `${nextHeight}px`);
+      document.documentElement.style.setProperty('--app-screen-height', `${Math.round(nextHeight)}px`);
     };
 
     syncAppScreenHeight();
@@ -1610,6 +1656,18 @@ const App: React.FC = () => {
           }
 
           retryCount += 1;
+          if (retryCount >= RAG_LOCAL_WARMUP_MAX_RETRIES) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.warn(
+              `[RAG] Local model warmup failed after ${retryCount} attempts for book ${book.id}:`,
+              error,
+            );
+            showRagErrorToast(`RAG模型加载失败（已重试${RAG_LOCAL_WARMUP_MAX_RETRIES}次）: ${msg}`);
+            ragApiFailedBookIdsRef.current.add(book.id);
+            clearWarmupState(0);
+            return;
+          }
+
           const retryDelayMs = Math.min(
             RAG_WARMUP_RETRY_MAX_MS,
             RAG_WARMUP_RETRY_BASE_MS * Math.max(1, 2 ** (retryCount - 1)),
@@ -1818,6 +1876,7 @@ const App: React.FC = () => {
     });
     delete ragWarmupTokenByBookRef.current[bookId];
     delete ragWarmupLockByBookRef.current[bookId];
+    ragApiFailedBookIdsRef.current.delete(bookId);
     if (ragGlobalWarmupBookIdRef.current === bookId) {
       ragGlobalWarmupBookIdRef.current = null;
     }
@@ -1832,11 +1891,14 @@ const App: React.FC = () => {
 
   const manualSafeAreaTop = Math.max(0, appSettings.safeAreaTop || 0);
   const manualSafeAreaBottom = Math.max(0, appSettings.safeAreaBottom || 0);
+  const resolvedSafeAreaTop = manualSafeAreaTop + Math.max(0, systemSafeAreaInsets.top || 0);
+  const resolvedSafeAreaBottom = manualSafeAreaBottom + Math.max(0, systemSafeAreaInsets.bottom || 0);
+  const appViewportHeight = 'calc(var(--app-screen-height) + var(--app-safe-area-bottom-px))';
   const appWrapperClass = `relative flex flex-col h-full font-sans overflow-hidden transition-colors duration-300 ${isDarkMode ? 'dark-mode bg-[#2d3748] text-slate-200' : 'bg-[#e0e5ec] text-slate-600'}`;
   const appWrapperStyle: React.CSSProperties = {
-    minHeight: 'var(--app-screen-height)',
-    height: 'var(--app-screen-height)',
-    paddingTop: `${manualSafeAreaTop}px`
+    minHeight: appViewportHeight,
+    height: appViewportHeight,
+    paddingTop: `${resolvedSafeAreaTop}px`,
   };
   const activeRagWarmupEntries = Object.entries(ragWarmupByBookId).filter(
     (entry): entry is [string, RagWarmupState] => {
@@ -1863,7 +1925,7 @@ const App: React.FC = () => {
       {/* Global Notification */}
       <div
         className={`fixed left-1/2 -translate-x-1/2 z-[110] transition-all duration-500 ease-out transform ${notification.show ? 'translate-y-0 opacity-100' : '-translate-y-20 opacity-0 pointer-events-none'}`}
-        style={{ top: `${manualSafeAreaTop + 24}px` }}
+        style={{ top: `${resolvedSafeAreaTop + 24}px` }}
       >
         <div className={`w-[min(94vw,760px)] px-8 py-4 rounded-[28px] flex items-center gap-4 border backdrop-blur-md ${isDarkMode ? 'bg-[#2d3748] text-slate-200 border-slate-700/70 shadow-[8px_8px_16px_#232b39,-8px_-8px_16px_#374357]' : 'bg-[#e0e5ec] text-slate-600 border-white/20 shadow-[8px_8px_16px_rgba(0,0,0,0.1),-8px_-8px_16px_rgba(255,255,255,0.8)]'}`}>
           {notification.type === 'success' ? <CheckCircle2 size={28} className="text-emerald-500 flex-shrink-0" /> : <AlertCircle size={28} className="text-rose-500 flex-shrink-0" />}
@@ -1874,7 +1936,7 @@ const App: React.FC = () => {
       {primaryRagWarmupState && (
         <div
           className="fixed left-1/2 -translate-x-1/2 z-[110] pointer-events-none transition-all duration-300"
-          style={{ top: `${manualSafeAreaTop + (notification.show ? 122 : 24)}px` }}
+          style={{ top: `${resolvedSafeAreaTop + (notification.show ? 122 : 24)}px` }}
         >
           <div className={`w-[min(94vw,760px)] px-8 py-4 rounded-[28px] flex items-center gap-4 border backdrop-blur-md ${isDarkMode ? 'bg-[#2d3748]/95 text-slate-200 border-slate-700/70 shadow-[8px_8px_16px_#232b39,-8px_-8px_16px_#374357]' : 'bg-[#e0e5ec]/95 text-slate-600 border-white/20 shadow-[8px_8px_16px_rgba(0,0,0,0.1),-8px_-8px_16px_rgba(255,255,255,0.8)]'}`}>
             <Loader2 size={28} className="animate-spin text-rose-400 flex-shrink-0" />
@@ -1888,7 +1950,7 @@ const App: React.FC = () => {
       {ragErrorToast.show && (
         <div
           className="fixed left-1/2 -translate-x-1/2 z-[110] pointer-events-none transition-all duration-300"
-          style={{ top: `${manualSafeAreaTop + (notification.show ? 122 : 24) + (primaryRagWarmupState ? 72 : 0)}px` }}
+          style={{ top: `${resolvedSafeAreaTop + (notification.show ? 122 : 24) + (primaryRagWarmupState ? 72 : 0)}px` }}
         >
           <div className={`w-[min(94vw,760px)] px-8 py-4 rounded-[28px] flex items-center gap-4 border backdrop-blur-md ${isDarkMode ? 'bg-[#2d3748]/95 text-slate-200 border-slate-700/70 shadow-[8px_8px_16px_#232b39,-8px_-8px_16px_#374357]' : 'bg-[#e0e5ec]/95 text-slate-600 border-white/20 shadow-[8px_8px_16px_rgba(0,0,0,0.1),-8px_-8px_16px_rgba(255,255,255,0.8)]'}`}>
             <AlertCircle size={28} className="text-rose-400 flex-shrink-0" />
@@ -1904,8 +1966,8 @@ const App: React.FC = () => {
   // If in Reader mode
   if (currentView === AppView.READER) {
     const readerWrapperStyle: React.CSSProperties = {
-      minHeight: 'var(--app-screen-height)',
-      height: 'var(--app-screen-height)',
+      minHeight: appViewportHeight,
+      height: appViewportHeight,
     };
     return (
       <div 
@@ -1920,8 +1982,8 @@ const App: React.FC = () => {
             ragIndexingState={activeBook ? (ragWarmupByBookId[activeBook.id] || null) : null}
             appSettings={appSettings}
             setAppSettings={setAppSettings}
-            safeAreaTop={manualSafeAreaTop}
-            safeAreaBottom={manualSafeAreaBottom}
+            safeAreaTop={resolvedSafeAreaTop}
+            safeAreaBottom={resolvedSafeAreaBottom}
             apiConfig={apiConfig}
             apiPresets={apiPresets}
             personas={personas}
@@ -2081,7 +2143,7 @@ const App: React.FC = () => {
       {/* Bottom Navigation */}
       <nav 
         className="absolute left-0 right-0 z-40 px-6 pointer-events-none"
-        style={{ bottom: `${manualSafeAreaBottom + 8}px` }}
+        style={{ bottom: `${resolvedSafeAreaBottom + 8}px` }}
       >
         <div className={`flex w-full justify-around items-center py-3 px-2 rounded-2xl pointer-events-auto ${isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357]' : 'neu-flat'}`}>
           <button 
