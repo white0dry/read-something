@@ -464,6 +464,10 @@ const isEditableElement = (target: Element | null): boolean => {
   return false;
 };
 
+const IOS_KEYBOARD_OPEN_THRESHOLD_PX = 90;
+const IOS_KEYBOARD_RELEASE_THRESHOLD_PX = 36;
+const IOS_KEYBOARD_RELEASE_DELAY_MS = 180;
+
 const App: React.FC = () => {
   const VIEW_TRANSITION_MS = 260;
   const [currentView, setCurrentView] = useState<AppView>(AppView.LIBRARY);
@@ -573,6 +577,7 @@ const App: React.FC = () => {
   const ragResumeScanInProgressRef = useRef(false);
   const ragResumeLastScanAtRef = useRef(0);
   const nonKeyboardViewportHeightRef = useRef(0);
+  const keyboardReleaseTimerRef = useRef<number | null>(null);
 
   // --- PERSISTENT STATE ---
 
@@ -827,6 +832,12 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!isLikelyIOSRuntime()) return;
 
+    const clearKeyboardReleaseTimer = () => {
+      if (keyboardReleaseTimerRef.current === null) return;
+      window.clearTimeout(keyboardReleaseTimerRef.current);
+      keyboardReleaseTimerRef.current = null;
+    };
+
     const syncKeyboardVisibility = () => {
       const visualHeight = window.visualViewport?.height ?? 0;
       const innerHeight = window.innerHeight || 0;
@@ -851,10 +862,54 @@ const App: React.FC = () => {
       const keyboardByViewport =
         visualHeight > 0 &&
         baselineHeight > 0 &&
-        baselineHeight - visualHeight > 90;
-      const keyboardVisible = hasEditableFocus && (keyboardByViewport || isLikelyIOSRuntime());
+        baselineHeight - visualHeight > IOS_KEYBOARD_OPEN_THRESHOLD_PX;
+      const viewportDelta = visualHeight > 0 && baselineHeight > 0 ? baselineHeight - visualHeight : 0;
+      const keyboardLikelyClosing =
+        visualHeight > 0 &&
+        baselineHeight > 0 &&
+        viewportDelta > IOS_KEYBOARD_RELEASE_THRESHOLD_PX;
 
-      setIsSoftKeyboardVisible((prev) => (prev === keyboardVisible ? prev : keyboardVisible));
+      if (hasEditableFocus && (keyboardByViewport || isLikelyIOSRuntime())) {
+        clearKeyboardReleaseTimer();
+        setIsSoftKeyboardVisible((prev) => (prev ? prev : true));
+        return;
+      }
+
+      if (keyboardLikelyClosing) {
+        clearKeyboardReleaseTimer();
+        setIsSoftKeyboardVisible((prev) => (prev ? prev : true));
+        return;
+      }
+
+      if (isSoftKeyboardVisible) {
+        if (keyboardReleaseTimerRef.current === null) {
+          keyboardReleaseTimerRef.current = window.setTimeout(() => {
+            keyboardReleaseTimerRef.current = null;
+            const visualNow = window.visualViewport?.height ?? 0;
+            const innerNow = window.innerHeight || 0;
+            const clientNow = document.documentElement.clientHeight || 0;
+            const baselineNow = Math.max(
+              nonKeyboardViewportHeightRef.current,
+              innerNow,
+              clientNow,
+              visualNow,
+            );
+            const deltaNow =
+              visualNow > 0 && baselineNow > 0
+                ? baselineNow - visualNow
+                : 0;
+            const hasEditableNow = isEditableElement(document.activeElement);
+            const stillVisible =
+              hasEditableNow ||
+              (visualNow > 0 && deltaNow > IOS_KEYBOARD_RELEASE_THRESHOLD_PX);
+            setIsSoftKeyboardVisible((prev) => (prev === stillVisible ? prev : stillVisible));
+          }, IOS_KEYBOARD_RELEASE_DELAY_MS);
+        }
+        return;
+      }
+
+      clearKeyboardReleaseTimer();
+      setIsSoftKeyboardVisible(false);
     };
 
     syncKeyboardVisibility();
@@ -865,6 +920,7 @@ const App: React.FC = () => {
     window.visualViewport?.addEventListener('resize', syncKeyboardVisibility);
 
     return () => {
+      clearKeyboardReleaseTimer();
       window.removeEventListener('focusin', syncKeyboardVisibility);
       window.removeEventListener('focusout', syncKeyboardVisibility);
       window.removeEventListener('resize', syncKeyboardVisibility);
