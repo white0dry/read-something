@@ -150,20 +150,20 @@ const READER_TEXT_ALIGN_OPTIONS: Array<{ value: ReaderTextAlign; label: string; 
 const DEFAULT_READER_FONT_OPTIONS: ReaderFontOption[] = [
   {
     id: DEFAULT_READER_FONT_ID,
-    label: '\u9ed8\u8ba4\u886c\u7ebf',
-    family: '"Noto Serif SC", Georgia, "Times New Roman", serif',
+    label: '默认衬线',
+    family: '"Songti SC", "STSong", "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "SimSun", serif',
     sourceType: 'default',
   },
   {
     id: 'reader-font-sans-default',
-    label: '\u9ed8\u8ba4\u65e0\u886c\u7ebf',
-    family: '"Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif',
+    label: '默认无衬线',
+    family: '"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", Arial, sans-serif',
     sourceType: 'default',
   },
   {
     id: 'reader-font-mono-default',
-    label: '\u9ed8\u8ba4\u7b49\u5bbd',
-    family: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    label: '默认等宽',
+    family: '"Sarasa Mono SC", "Noto Sans Mono CJK SC", "Source Han Mono SC", "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
     sourceType: 'default',
   },
 ];

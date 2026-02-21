@@ -157,7 +157,7 @@ const CharacterSettings: React.FC<CharacterSettingsProps> = ({
                         options={wbCategories} 
                         selected={char.boundWorldBookCategories || []}
                         onChange={(cats) => updateCharacter(char.id, 'boundWorldBookCategories', cats)}
-                        placeholder="选择知识库分类..."
+                        placeholder="选择世界书分类..."
                         inputClass={inputClass}
                         cardClass={cardClass}
                         isDarkMode={isDarkMode}
@@ -182,7 +182,7 @@ const CharacterSettings: React.FC<CharacterSettingsProps> = ({
 
                        {/* Row 2: Categories (Updated Colors) */}
                        <div className="flex flex-wrap gap-2 items-center">
-                          <span className="text-[10px] text-slate-500 font-bold uppercase w-12 text-right">知识库</span>
+                          <span className="text-[10px] text-slate-500 font-bold uppercase w-12 text-right">世界书</span>
                           {char.boundWorldBookCategories?.length > 0 ? char.boundWorldBookCategories.map((cat, i) => (
                             <span key={i} className={`text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1 ${
                               isDarkMode 

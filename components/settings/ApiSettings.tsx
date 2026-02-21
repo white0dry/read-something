@@ -246,6 +246,8 @@ const safeSaveModelCache = (store: ModelCacheStore) => {
 };
 
 const DEFAULT_RAG_PRESET_ID = '__default_rag_preset__';
+const DEFAULT_LOCAL_RAG_PROVIDER_LABEL = 'Hugging Face';
+const DEFAULT_LOCAL_RAG_MODEL_NAME = 'Xenova/multilingual-e5-small';
 
 const ApiSettings: React.FC<ApiSettingsProps> = ({
   config,
@@ -725,8 +727,7 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
             {/* Default preset card (non-editable, non-deletable) */}
             {(() => {
               const isActive = activeRagPresetId === DEFAULT_RAG_PRESET_ID;
-              const providerInfo = PROVIDERS.find(p => p.key === config.provider);
-              const ProviderIcon = providerInfo?.icon || Server;
+              const ProviderIcon = Server;
               return (
                 <div
                   className={`${cardClass} neu-card-pressable p-4 rounded-2xl flex items-center justify-between group cursor-pointer transition-[border-color] duration-200 ${isActive ? activeBorderClass : baseBorderClass}`}
@@ -741,9 +742,9 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
                         <span className={`text-[9px] px-1.5 py-0.5 rounded-md flex-shrink-0 transition-opacity duration-200 ${isActive ? 'bg-emerald-400/20 text-emerald-500 opacity-100' : 'opacity-0'}`}>ACTIVE</span>
                       </div>
                       <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-2">
-                        <span className="flex-shrink-0">{providerInfo?.label}</span>
+                        <span className="flex-shrink-0">{DEFAULT_LOCAL_RAG_PROVIDER_LABEL}</span>
                         <span>•</span>
-                        <span className="font-mono opacity-70 truncate max-w-[100px]">{config.model || '未指定'}</span>
+                        <span className="font-mono opacity-70 truncate max-w-[170px]">{DEFAULT_LOCAL_RAG_MODEL_NAME}</span>
                       </div>
                     </div>
                   </div>

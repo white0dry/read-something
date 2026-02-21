@@ -863,9 +863,9 @@ const validateApiConfig = (apiConfig: ApiConfig): string | null => {
   const endpoint = (apiConfig.endpoint || '').trim();
   const apiKey = (apiConfig.apiKey || '').trim();
   const model = (apiConfig.model || '').trim();
-  if (!apiKey) return '璇峰厛璁剧疆 API Key';
-  if (!model) return '璇峰厛璁剧疆妯″瀷鍚嶇О';
-  if (apiConfig.provider !== 'GEMINI' && !endpoint) return '璇峰厛璁剧疆 API 鍦板潃';
+  if (!apiKey) return '请先设置 API Key';
+  if (!model) return '请先设置模型名称';
+  if (apiConfig.provider !== 'GEMINI' && !endpoint) return '请先设置 API 地址';
   return null;
 };
 
@@ -917,7 +917,7 @@ export const runConversationGeneration = async (
       status: 'skip',
       reason: 'no-pending',
       silent: mode === 'proactive',
-      message: '褰撳墠娌℃湁寰呭彂閫佺殑鐢ㄦ埛娑堟伅',
+      message: '当前没有待发送的用户消息',
     };
   }
 
