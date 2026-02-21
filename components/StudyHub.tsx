@@ -229,9 +229,19 @@ const StudyHub: React.FC<StudyHubProps> = ({
       return { bg: defaultBg, css: `radial-gradient(circle, ${c} 1px, transparent 1px)`, size: '24px 24px', isCustomImage: false, isDefault: false, hideMarginLine: true };
     }
     if (val === '__builtin:kraft') {
-      const bg = isDarkMode ? '#2a2418' : '#e8dcc8';
-      const c = isDarkMode ? 'rgba(80,70,50,0.15)' : 'rgba(180,160,130,0.1)';
-      return { bg, css: `repeating-linear-gradient(45deg, transparent, transparent 20px, ${c} 20px, ${c} 21px)`, isCustomImage: false, isDefault: false, hideMarginLine: true };
+      return {
+        bg: '#f4e4bc',
+        css: 'radial-gradient(circle at center, transparent 50%, rgba(139, 69, 19, 0.15) 85%, rgba(139, 69, 19, 0.4) 100%), linear-gradient(135deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.2) 40%, rgba(255, 255, 255, 0) 100%)',
+        isCustomImage: false,
+        isDefault: false,
+        hideMarginLine: true,
+        border: '1px solid rgba(139, 69, 19, 0.3)',
+        shadow: 'inset 0 0 60px rgba(139, 69, 19, 0.5), inset 0 0 20px rgba(101, 67, 33, 0.6), inset 0 0 5px rgba(60, 40, 20, 0.8), 5px 10px 20px rgba(0, 0, 0, 0.5)',
+        textColor: '#4a3621',
+        fontFamily: '"Georgia", "Times New Roman", "Noto Serif SC", "Source Han Serif CN", serif',
+        lineHeight: 1.8,
+        radius: '4px',
+      };
     }
     if (val === '__builtin:green') {
       const bg = isDarkMode ? '#1a2a1a' : '#e8f0e0';
@@ -1470,8 +1480,10 @@ const StudyHub: React.FC<StudyHubProps> = ({
       css: `repeating-linear-gradient(transparent, transparent 31px, ${isDarkMode ? 'rgba(100,116,139,0.12)' : 'rgba(180,160,130,0.2)'} 31px, ${isDarkMode ? 'rgba(100,116,139,0.12)' : 'rgba(180,160,130,0.2)'} 32px), repeating-linear-gradient(90deg, transparent, transparent 31px, ${isDarkMode ? 'rgba(100,116,139,0.12)' : 'rgba(180,160,130,0.2)'} 31px, ${isDarkMode ? 'rgba(100,116,139,0.12)' : 'rgba(180,160,130,0.2)'} 32px)` },
     { id: 'dots', name: '圆点', value: '__builtin:dots', bg: isDarkMode ? '#1e2533' : '#fefcf3',
       css: `radial-gradient(circle, ${isDarkMode ? 'rgba(100,116,139,0.25)' : 'rgba(180,160,130,0.35)'} 1px, transparent 1px)`, size: '24px 24px' },
-    { id: 'kraft', name: '牛皮纸', value: '__builtin:kraft', bg: isDarkMode ? '#2a2418' : '#e8dcc8',
-      css: `repeating-linear-gradient(45deg, transparent, transparent 20px, ${isDarkMode ? 'rgba(80,70,50,0.15)' : 'rgba(180,160,130,0.1)'} 20px, ${isDarkMode ? 'rgba(80,70,50,0.15)' : 'rgba(180,160,130,0.1)'} 21px)` },
+    { id: 'kraft', name: '牛皮纸', value: '__builtin:kraft', bg: '#f4e4bc',
+      css: 'radial-gradient(circle at center, transparent 50%, rgba(139, 69, 19, 0.15) 85%, rgba(139, 69, 19, 0.4) 100%), linear-gradient(135deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.2) 40%, rgba(255, 255, 255, 0) 100%)',
+      border: '1px solid rgba(139, 69, 19, 0.3)',
+      shadow: 'inset 0 0 24px rgba(139, 69, 19, 0.35), inset 0 0 10px rgba(101, 67, 33, 0.35), inset 0 0 4px rgba(60, 40, 20, 0.45), 0 4px 8px rgba(0, 0, 0, 0.25)' },
     { id: 'green', name: '护眼绿', value: '__builtin:green', bg: isDarkMode ? '#1a2a1a' : '#e8f0e0',
       css: `repeating-linear-gradient(transparent, transparent 31px, ${isDarkMode ? 'rgba(80,120,80,0.15)' : 'rgba(120,160,100,0.2)'} 31px, ${isDarkMode ? 'rgba(80,120,80,0.15)' : 'rgba(120,160,100,0.2)'} 32px)` },
     { id: 'blank', name: '空白', value: '__builtin:blank', bg: isDarkMode ? '#1e2533' : '#fefcf3', css: 'none' },
@@ -1510,7 +1522,13 @@ const StudyHub: React.FC<StudyHubProps> = ({
                       className={`rounded-xl overflow-hidden border-2 transition-all ${isActive ? 'border-rose-400 scale-[0.97]' : 'border-transparent'}`}
                     >
                       <div className="w-full h-16 rounded-t-lg"
-                        style={{ backgroundColor: paper.bg, backgroundImage: paper.css === 'none' ? undefined : paper.css, ...(paper.size ? { backgroundSize: paper.size } : {}) }}
+                        style={{
+                          backgroundColor: paper.bg,
+                          backgroundImage: paper.css === 'none' ? undefined : paper.css,
+                          ...(paper.size ? { backgroundSize: paper.size } : {}),
+                          ...((paper as { border?: string }).border ? { border: (paper as { border?: string }).border } : {}),
+                          ...((paper as { shadow?: string }).shadow ? { boxShadow: (paper as { shadow?: string }).shadow } : {}),
+                        }}
                       />
                       <p className={`text-[10px] py-1 text-center ${isActive ? 'text-rose-400 font-bold' : subTextClass}`}>{paper.name}</p>
                     </button>
@@ -1754,9 +1772,21 @@ const StudyHub: React.FC<StudyHubProps> = ({
                   ...(paperStyle.css !== 'none' && { backgroundImage: paperStyle.css }),
                   ...(paperStyle.size && { backgroundSize: paperStyle.size }),
                   ...(paperStyle.position && { backgroundPosition: paperStyle.position }),
+                  ...(paperStyle.border && { border: paperStyle.border }),
+                  ...(paperStyle.shadow && { boxShadow: paperStyle.shadow }),
+                  ...(paperStyle.radius && { borderRadius: paperStyle.radius }),
                 }}
               >
-                <p className={`text-sm line-clamp-2 ${headingClass}`} style={{ fontFamily: '"Noto Serif SC", "Source Han Serif CN", serif' }}>{note.content || '空白笔记'}</p>
+                <p
+                  className={`text-sm line-clamp-2 ${headingClass}`}
+                  style={{
+                    fontFamily: paperStyle.fontFamily || '"Noto Serif SC", "Source Han Serif CN", serif',
+                    ...(paperStyle.textColor ? { color: paperStyle.textColor } : {}),
+                    lineHeight: paperStyle.lineHeight || 1.6,
+                  }}
+                >
+                  {note.content || '空白笔记'}
+                </p>
                 <div className="flex items-center justify-between mt-2">
                   <span className={`text-[10px] ${subTextClass}`}>
                     {new Date(note.updatedAt).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
@@ -1817,6 +1847,10 @@ const StudyHub: React.FC<StudyHubProps> = ({
           style={{
             backgroundColor: paperStyle.bg,
             ...(paperStyle.isCustomImage && paperStyle.css !== 'none' && { backgroundImage: paperStyle.css, backgroundSize: 'cover', backgroundPosition: 'center' }),
+            ...(!paperStyle.isCustomImage && paperStyle.css !== 'none' && { backgroundImage: paperStyle.css }),
+            ...(paperStyle.border && { border: paperStyle.border }),
+            ...(paperStyle.shadow && { boxShadow: paperStyle.shadow }),
+            ...(paperStyle.radius && { borderRadius: paperStyle.radius }),
           }}
         >
           <div className="relative">
@@ -1831,14 +1865,14 @@ const StudyHub: React.FC<StudyHubProps> = ({
               placeholder="随便写点什么吧"
               className={`w-full min-h-[300px] resize-none bg-transparent outline-none ${paperStyle.hideMarginLine ? 'pl-4' : 'pl-14'} pr-4 pt-4 pb-4 text-sm no-scrollbar`}
               style={{
-                lineHeight: `${lineHeight}px`,
+                lineHeight: paperStyle.lineHeight || `${lineHeight}px`,
                 ...(!paperStyle.isCustomImage && paperStyle.css !== 'none' && {
                   backgroundImage: paperStyle.css,
                   backgroundPosition: '0 0',
                   ...(paperStyle.size ? { backgroundSize: paperStyle.size } : {}),
                 }),
-                color: isDarkMode ? '#e2e8f0' : '#334155',
-                fontFamily: '"Noto Serif SC", "Source Han Serif CN", serif',
+                color: paperStyle.textColor || (isDarkMode ? '#e2e8f0' : '#334155'),
+                fontFamily: paperStyle.fontFamily || '"Noto Serif SC", "Source Han Serif CN", serif',
               }}
             />
           </div>
