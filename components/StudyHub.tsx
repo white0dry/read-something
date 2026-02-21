@@ -1760,7 +1760,12 @@ const StudyHub: React.FC<StudyHubProps> = ({
               </div>
             )}
 
-            {activeNotebook.notes.map((note) => (
+            {activeNotebook.notes.map((note) => {
+              const totalCommentCount = note.commentThreads.reduce(
+                (sum, thread) => sum + Math.max(0, thread.messages.length),
+                0
+              );
+              return (
               <div key={note.id} onClick={() => openNoteEditor(note)}
                 className={`p-4 rounded-2xl cursor-pointer transition-all active:scale-[0.98] border ${isDarkMode ? 'border-slate-700/30' : 'border-amber-200/40'}`}
                 style={{
@@ -1774,24 +1779,25 @@ const StudyHub: React.FC<StudyHubProps> = ({
               >
                 <p className={`text-sm line-clamp-2 ${headingClass}`} style={{ fontFamily: '"Noto Serif SC", "Source Han Serif CN", serif' }}>{note.content || '空白笔记'}</p>
                 <div className="flex items-center justify-between mt-2">
-                  <span className={`text-[10px] ${subTextClass}`}>
-                    {new Date(note.updatedAt).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    {note.commentThreads.length > 0 && (
-                      <span className={`text-[10px] flex items-center gap-0.5 ${subTextClass}`}>
-                        <MessageCircle size={10} /> {note.commentThreads.length}
-                      </span>
-                    )}
-                    <button onClick={(e) => { e.stopPropagation(); handleDeleteNote(note.id); }}
-                      className={`${subTextClass} hover:text-rose-400`}
-                    >
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
+	                  <span className={`text-[10px] ${subTextClass}`}>
+	                    {new Date(note.updatedAt).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+	                  </span>
+	                  <div className="flex items-center gap-2">
+	                    {totalCommentCount > 0 && (
+	                      <span className={`text-[10px] flex items-center gap-0.5 ${subTextClass}`}>
+	                        <MessageCircle size={10} /> {totalCommentCount}
+	                      </span>
+	                    )}
+	                    <button onClick={(e) => { e.stopPropagation(); handleDeleteNote(note.id); }}
+	                      className={`${subTextClass} hover:text-rose-400`}
+	                    >
+	                      <Trash2 size={12} />
+	                    </button>
+	                  </div>
+	                </div>
+	              </div>
+	            );
+            })}
           </div>
         </div>
       </>
