@@ -434,6 +434,36 @@ const isApiConfigReadyForChat = (apiConfig: ApiConfig) => {
   return true;
 };
 
+const isLikelyIOSRuntime = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const platform = navigator.platform || '';
+  const touchPoints = navigator.maxTouchPoints || 0;
+  return /iPad|iPhone|iPod/i.test(ua) || (platform === 'MacIntel' && touchPoints > 1);
+};
+
+const isEditableElement = (target: Element | null): boolean => {
+  if (!target || !(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toUpperCase();
+  if (target.isContentEditable) return true;
+  if (tagName === 'TEXTAREA') return !target.hasAttribute('readonly') && !target.hasAttribute('disabled');
+  if (tagName === 'INPUT') {
+    const input = target as HTMLInputElement;
+    const type = (input.type || 'text').toLowerCase();
+    const textLikeTypes = new Set([
+      'text',
+      'search',
+      'email',
+      'url',
+      'tel',
+      'password',
+      'number',
+    ]);
+    return textLikeTypes.has(type) && !input.readOnly && !input.disabled;
+  }
+  return false;
+};
+
 const App: React.FC = () => {
   const VIEW_TRANSITION_MS = 260;
   const [currentView, setCurrentView] = useState<AppView>(AppView.LIBRARY);
@@ -453,6 +483,7 @@ const App: React.FC = () => {
   const [notification, setNotification] = useState<Notification>({ show: false, message: '', type: 'success' });
   const [ragWarmupByBookId, setRagWarmupByBookId] = useState<Record<string, RagWarmupState>>({});
   const [ragErrorToast, setRagErrorToast] = useState<{ show: boolean; message: string }>({ show: false, message: '' });
+  const [isSoftKeyboardVisible, setIsSoftKeyboardVisible] = useState(false);
   const [systemSafeAreaBottom, setSystemSafeAreaBottom] = useState(0);
   const [dailyReadingMsByDate, setDailyReadingMsByDate] = useState<Record<string, number>>(() => {
     try {
@@ -541,6 +572,7 @@ const App: React.FC = () => {
   const ragApiFailedBookIdsRef = useRef<Set<string>>(new Set());
   const ragResumeScanInProgressRef = useRef(false);
   const ragResumeLastScanAtRef = useRef(0);
+  const nonKeyboardViewportHeightRef = useRef(0);
 
   // --- PERSISTENT STATE ---
 
@@ -793,6 +825,54 @@ const App: React.FC = () => {
     document.body.classList.toggle('dark-mode', isDarkMode);
   }, [isDarkMode]);
   useEffect(() => {
+    if (!isLikelyIOSRuntime()) return;
+
+    const syncKeyboardVisibility = () => {
+      const visualHeight = window.visualViewport?.height ?? 0;
+      const innerHeight = window.innerHeight || 0;
+      const clientHeight = document.documentElement.clientHeight || 0;
+      const measuredHeight = visualHeight > 0 ? visualHeight : Math.max(innerHeight, clientHeight);
+
+      if (!isSoftKeyboardVisible && measuredHeight > 0) {
+        nonKeyboardViewportHeightRef.current = Math.max(nonKeyboardViewportHeightRef.current, measuredHeight);
+      }
+      if (nonKeyboardViewportHeightRef.current <= 0) {
+        nonKeyboardViewportHeightRef.current = Math.max(measuredHeight, innerHeight, clientHeight);
+      }
+
+      const active = document.activeElement;
+      const hasEditableFocus = isEditableElement(active);
+      const baselineHeight = Math.max(
+        nonKeyboardViewportHeightRef.current,
+        innerHeight,
+        clientHeight,
+        visualHeight,
+      );
+      const keyboardByViewport =
+        visualHeight > 0 &&
+        baselineHeight > 0 &&
+        baselineHeight - visualHeight > 90;
+      const keyboardVisible = hasEditableFocus && (keyboardByViewport || isLikelyIOSRuntime());
+
+      setIsSoftKeyboardVisible((prev) => (prev === keyboardVisible ? prev : keyboardVisible));
+    };
+
+    syncKeyboardVisibility();
+    window.addEventListener('focusin', syncKeyboardVisibility);
+    window.addEventListener('focusout', syncKeyboardVisibility);
+    window.addEventListener('resize', syncKeyboardVisibility);
+    window.addEventListener('orientationchange', syncKeyboardVisibility);
+    window.visualViewport?.addEventListener('resize', syncKeyboardVisibility);
+
+    return () => {
+      window.removeEventListener('focusin', syncKeyboardVisibility);
+      window.removeEventListener('focusout', syncKeyboardVisibility);
+      window.removeEventListener('resize', syncKeyboardVisibility);
+      window.removeEventListener('orientationchange', syncKeyboardVisibility);
+      window.visualViewport?.removeEventListener('resize', syncKeyboardVisibility);
+    };
+  }, [isSoftKeyboardVisible]);
+  useEffect(() => {
     if (!document.body) return;
 
     const probe = document.createElement('div');
@@ -810,7 +890,9 @@ const App: React.FC = () => {
 
     const syncSafeAreaBottom = () => {
       const style = window.getComputedStyle(probe);
-      const bottom = Math.max(0, Math.round(parseFloat(style.paddingBottom || '0') || 0));
+      const rawBottom = Math.max(0, Math.round(parseFloat(style.paddingBottom || '0') || 0));
+      const cappedBottom = Math.min(rawBottom, 48);
+      const bottom = isSoftKeyboardVisible ? 0 : cappedBottom;
       setSystemSafeAreaBottom((prev) => (prev === bottom ? prev : bottom));
       document.documentElement.style.setProperty('--app-safe-area-bottom-px', `${bottom}px`);
     };
@@ -826,14 +908,19 @@ const App: React.FC = () => {
       window.visualViewport?.removeEventListener('resize', syncSafeAreaBottom);
       probe.remove();
     };
-  }, []);
+  }, [isSoftKeyboardVisible]);
   useEffect(() => {
     const syncAppScreenHeight = () => {
       const visualHeight = window.visualViewport?.height ?? 0;
       const innerHeight = window.innerHeight || 0;
       const clientHeight = document.documentElement.clientHeight || 0;
       const measuredHeight = visualHeight > 0 ? visualHeight : Math.max(innerHeight, clientHeight);
-      const safeBottomInset = Math.max(0, systemSafeAreaBottom || 0);
+      if (!isSoftKeyboardVisible && measuredHeight > 0) {
+        nonKeyboardViewportHeightRef.current = Math.max(nonKeyboardViewportHeightRef.current, measuredHeight);
+      }
+      const stableHeight = Math.max(nonKeyboardViewportHeightRef.current, innerHeight, clientHeight, measuredHeight);
+      const layoutHeight = isSoftKeyboardVisible ? stableHeight : measuredHeight;
+      const safeBottomInset = isSoftKeyboardVisible ? 0 : Math.max(0, systemSafeAreaBottom || 0);
       const screenDims = [window.screen?.height || 0, window.screen?.width || 0].filter((v) => v > 0);
       const isPortrait = window.matchMedia('(orientation: portrait)').matches;
       const screenHeight =
@@ -841,7 +928,7 @@ const App: React.FC = () => {
           ? 0
           : (isPortrait ? Math.max(...screenDims) : Math.min(...screenDims));
 
-      let totalHeight = measuredHeight + safeBottomInset;
+      let totalHeight = layoutHeight + safeBottomInset;
       if (screenHeight > 0) {
         totalHeight = Math.min(totalHeight, screenHeight);
       }
@@ -859,7 +946,7 @@ const App: React.FC = () => {
       window.removeEventListener('orientationchange', syncAppScreenHeight);
       window.visualViewport?.removeEventListener('resize', syncAppScreenHeight);
     };
-  }, [systemSafeAreaBottom]);
+  }, [systemSafeAreaBottom, isSoftKeyboardVisible]);
   useEffect(() => {
     try {
       if (localStorage.getItem(SAFE_AREA_DEFAULT_MIGRATION_KEY)) return;
@@ -2152,11 +2239,12 @@ const App: React.FC = () => {
       </div>
 
       {/* Bottom Navigation */}
-      <nav 
-        className="absolute left-0 right-0 z-40 px-6 pointer-events-none"
-        style={{ bottom: `${resolvedSafeAreaBottom + 8}px` }}
-      >
-        <div className={`flex w-full justify-around items-center py-3 px-2 rounded-2xl pointer-events-auto ${isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357]' : 'neu-flat'}`}>
+      {!isSoftKeyboardVisible && (
+        <nav
+          className="absolute left-0 right-0 z-40 px-6 pointer-events-none"
+          style={{ bottom: `${resolvedSafeAreaBottom + 8}px` }}
+        >
+          <div className={`flex w-full justify-around items-center py-3 px-2 rounded-2xl pointer-events-auto ${isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357]' : 'neu-flat'}`}>
           <button 
             onClick={() => transitionToView(AppView.LIBRARY)}
             disabled={isViewTransitioning}
@@ -2189,7 +2277,8 @@ const App: React.FC = () => {
             <SettingsIcon size={22} strokeWidth={currentView === AppView.SETTINGS ? 2.5 : 2} />
           </button>
         </div>
-      </nav>
+        </nav>
+      )}
     </div>
   );
 };
