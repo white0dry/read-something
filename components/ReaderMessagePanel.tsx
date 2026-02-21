@@ -47,7 +47,7 @@ import {
   sanitizeTextForAiPrompt,
 } from '../utils/readerAiEngine';
 import type { PromptTokenEstimate } from '../utils/readerAiEngine';
-import { estimateRagSafeOffset, retrieveRelevantChunks } from '../utils/ragEngine';
+import { estimateRagSafeOffset, getBookIndexedUpTo, retrieveRelevantChunks } from '../utils/ragEngine';
 import {
   DEFAULT_NEUMORPHISM_BUBBLE_CSS,
   LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS,
@@ -472,6 +472,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [inputText, setInputText] = useState('');
   const [activeGenerationMode, setActiveGenerationMode] = useState<GenerationMode | null>(null);
+  const [isManualPreflightLoading, setIsManualPreflightLoading] = useState(false);
   const [toast, setToast] = useState<{ text: string; type: 'error' | 'info' } | null>(null);
   const [hiddenBubbleIds, setHiddenBubbleIds] = useState<string[]>([]);
   const [panelBounds, setPanelBounds] = useState<PanelBounds>(() => {
@@ -531,6 +532,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const bubbleRevealSequenceRef = useRef(0);
   const messagesRef = useRef<ChatBubble[]>([]);
   const hiddenBubbleIdsRef = useRef<string[]>([]);
+  const manualPreflightLoadingRef = useRef(false);
   const pendingGenerationRef = useRef<{
     conversationKey: string;
     committedMessages: ChatBubble[];
@@ -611,6 +613,8 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 
   const isAiLoading = activeGenerationMode !== null;
   const isManualLoading = activeGenerationMode === 'manual';
+  const isManualBusy = isManualLoading || isManualPreflightLoading;
+  const isAiBusy = isAiLoading || isManualPreflightLoading;
   const selectedDeleteIdSet = useMemo(() => new Set(selectedDeleteIds), [selectedDeleteIds]);
   const hiddenBubbleIdSet = useMemo(() => new Set(hiddenBubbleIds), [hiddenBubbleIds]);
   const readerMoreAppearance = appSettings.readerMore.appearance;
@@ -2442,77 +2446,84 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   ]);
 
   const requestAiReply = async (sourceMessages: ChatBubble[]) => {
-    if (isManualLoading) return;
+    if (isManualBusy || manualPreflightLoadingRef.current) return;
     if (!isConversationProfileValid) {
       showConversationLockedToast();
       return;
     }
-    const readingContext = buildReadingContext();
-    const requestConversationKey = conversationKey;
-    setContextMenu(null);
+    manualPreflightLoadingRef.current = true;
+    setIsManualPreflightLoading(true);
+    try {
+      const readingContext = buildReadingContext();
+      const requestConversationKey = conversationKey;
+      setContextMenu(null);
 
-    // RAG: 检索相关书籍片段
-    let ragContext = '';
-    if (activeBook?.id) {
-      try {
-        const pendingUserText = sourceMessages
-          .filter((m) => m.sender === 'user' && !m.sentToAi)
-          .map((m) => m.content)
-          .join(' ');
-        const recentContextText = sourceMessages
-          .slice(-6)
-          .map((m) => m.content)
-          .join(' ');
-        const primaryQuery = sanitizeTextForAiPrompt(pendingUserText);
-        const fallbackQuery = sanitizeTextForAiPrompt(recentContextText);
-        const ragQuery = (primaryQuery || fallbackQuery).slice(-1200);
+      // RAG: 检索相关书籍片段
+      let ragContext = '';
+      if (activeBook?.id && activeBook.ragEnabled) {
+        try {
+          const indexedUpTo = await getBookIndexedUpTo(activeBook.id);
+          if (indexedUpTo > 0) {
+            const pendingUserText = sourceMessages
+              .filter((m) => m.sender === 'user' && !m.sentToAi)
+              .map((m) => m.content)
+              .join(' ');
+            const recentContextText = sourceMessages
+              .slice(-6)
+              .map((m) => m.content)
+              .join(' ');
+            const primaryQuery = sanitizeTextForAiPrompt(pendingUserText);
+            const fallbackQuery = sanitizeTextForAiPrompt(recentContextText);
+            const ragQuery = (primaryQuery || fallbackQuery).slice(-1200);
 
-        if (ragQuery) {
-          const readingPosition = getLatestReadingPosition();
-          const safeOffset = estimateRagSafeOffset(chapters, readingPosition, readingContext.excerptEnd || 0);
+            if (ragQuery) {
+              const readingPosition = getLatestReadingPosition();
+              const safeOffset = estimateRagSafeOffset(chapters, readingPosition, readingContext.excerptEnd || 0);
 
-          // 先拿全书候选，再按阅读进度做程序过滤，尽量减少“每次都同一段/全被过滤为空”。
-          const candidateChunks = await retrieveRelevantChunks(
-            ragQuery,
-            { [activeBook.id]: Number.MAX_SAFE_INTEGER },
-            { topK: 18, perBookTopK: 18 },
-            ragApiConfigResolver,
-          );
+              if (safeOffset > 0) {
+                // 先拿全书候选，再按阅读进度做程序过滤，尽量减少“每次都同一段/全被过滤为空”。
+                const candidateChunks = await retrieveRelevantChunks(
+                  ragQuery,
+                  { [activeBook.id]: Number.MAX_SAFE_INTEGER },
+                  { topK: 18, perBookTopK: 18 },
+                  ragApiConfigResolver,
+                );
 
-          const picked: typeof candidateChunks = [];
-          const seenChunkId = new Set<string>();
-          for (const chunk of candidateChunks) {
-            if (chunk.endOffset > safeOffset) continue;
-            if (seenChunkId.has(chunk.id)) continue;
-            seenChunkId.add(chunk.id);
-            picked.push(chunk);
-            if (picked.length >= 3) break;
-          }
+                const picked: typeof candidateChunks = [];
+                const seenChunkId = new Set<string>();
+                for (const chunk of candidateChunks) {
+                  if (chunk.endOffset > safeOffset) continue;
+                  if (seenChunkId.has(chunk.id)) continue;
+                  seenChunkId.add(chunk.id);
+                  picked.push(chunk);
+                  if (picked.length >= 3) break;
+                }
 
-          // 保底：如果全书候选被进度过滤后不足3段，再从“进度内”直接补齐。
-          if (picked.length < 3 && safeOffset > 0) {
-            const fallbackChunks = await retrieveRelevantChunks(
-              ragQuery,
-              { [activeBook.id]: safeOffset },
-              { topK: 3, perBookTopK: 3 },
-              ragApiConfigResolver,
-            );
-            for (const chunk of fallbackChunks) {
-              if (seenChunkId.has(chunk.id)) continue;
-              seenChunkId.add(chunk.id);
-              picked.push(chunk);
-              if (picked.length >= 3) break;
+                // 保底：如果全书候选被进度过滤后不足3段，再从“进度内”直接补齐。
+                if (picked.length < 3) {
+                  const fallbackChunks = await retrieveRelevantChunks(
+                    ragQuery,
+                    { [activeBook.id]: safeOffset },
+                    { topK: 3, perBookTopK: 3 },
+                    ragApiConfigResolver,
+                  );
+                  for (const chunk of fallbackChunks) {
+                    if (seenChunkId.has(chunk.id)) continue;
+                    seenChunkId.add(chunk.id);
+                    picked.push(chunk);
+                    if (picked.length >= 3) break;
+                  }
+                }
+
+                if (picked.length > 0) {
+                  ragContext = picked.slice(0, 3).map((c) => c.text).join('\n---\n');
+                }
+              }
             }
           }
+        } catch { /* RAG 静默失败 */ }
+      }
 
-          if (picked.length > 0) {
-            ragContext = picked.slice(0, 3).map((c) => c.text).join('\n---\n');
-          }
-        }
-      } catch { /* RAG 静默失败 */ }
-    }
-
-    try {
       const result = await runConversationGeneration({
         mode: 'manual',
         conversationKey: requestConversationKey,
@@ -2602,11 +2613,16 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       pendingGenerationRef.current = null;
       const message = error instanceof Error ? error.message : '发送失败';
       showToast(message, 'error');
+    } finally {
+      manualPreflightLoadingRef.current = false;
+      if (isMountedRef.current) {
+        setIsManualPreflightLoading(false);
+      }
     }
   };
 
   const handleQueueUserBubble = () => {
-    if (isManualLoading || isDeleteMode) return;
+    if (isManualBusy || isDeleteMode) return;
     if (!isConversationProfileValid) {
       showConversationLockedToast();
       return;
@@ -2759,7 +2775,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   };
 
   const handleRefreshReply = async () => {
-    if (isManualLoading) return;
+    if (isManualBusy) return;
     if (!isConversationProfileValid) {
       showConversationLockedToast();
       return;
@@ -2925,7 +2941,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           <div
             ref={messagesContainerRef}
             className={`rm-messages reader-scroll-panel reader-message-scroll flex-1 min-h-0 overflow-y-auto p-4 px-6 transition-transform duration-200 ${
-              isAiLoading ? '-translate-y-1' : 'translate-y-0'
+              isAiBusy ? '-translate-y-1' : 'translate-y-0'
             }`}
             style={{ overflowAnchor: 'none', zIndex: 1 }}
           >
@@ -3080,7 +3096,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
               </div>
             )}
 
-            {isAiLoading && (
+            {isAiBusy && (
               <div
                 className={`rm-typing mb-2 px-3 text-xs reader-typing-breath ${
                   isDarkMode ? 'text-slate-400' : 'text-slate-500'
@@ -3111,10 +3127,10 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                 onChange={(event) => setInputText(event.target.value)}
                 onKeyDown={onInputKeyDown}
                 placeholder=""
-                disabled={isManualLoading || isDeleteMode}
+                disabled={isManualBusy || isDeleteMode}
                 className={`rm-input flex-1 bg-transparent outline-none text-sm min-w-0 px-4 ${
                   isDarkMode ? 'text-slate-200 placeholder-slate-600' : 'text-slate-700'
-                } ${isManualLoading || isDeleteMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+                } ${isManualBusy || isDeleteMode ? 'opacity-60 cursor-not-allowed' : ''}`}
               />
 
               {editingMessageId ? (
@@ -3147,9 +3163,9 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                 <>
                   <button
                     onClick={() => void requestAiReply(messages)}
-                    disabled={isManualLoading || !canSendToAi}
+                    disabled={isManualBusy || !canSendToAi}
                     className={`rm-send-btn p-2 rounded-full transition-all ${
-                      !isManualLoading && canSendToAi
+                      !isManualBusy && canSendToAi
                         ? isDarkMode
                           ? 'bg-rose-400 text-white'
                           : 'neu-flat text-rose-400 active:scale-95'
@@ -3161,9 +3177,9 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
                   </button>
                   <button
                     onClick={() => void handleRefreshReply()}
-                    disabled={isManualLoading}
+                    disabled={isManualBusy}
                     className={`rm-retry-btn p-2 rounded-full transition-all ${
-                      isManualLoading
+                      isManualBusy
                         ? 'text-slate-400 opacity-50'
                         : isDarkMode
                           ? 'bg-[#334155] text-slate-200'

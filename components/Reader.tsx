@@ -140,8 +140,9 @@ const DEFAULT_HIGHLIGHT_COLOR = '#FFE066';
 const PRESET_HIGHLIGHT_COLORS = ['#FFE066', '#FFD6A5', '#FFADAD', '#C7F9CC', '#A0C4FF', '#D7B5FF'];
 const PRESET_TEXT_COLORS = ['#1E293B', '#334155', '#475569', '#0F172A', '#9F1239', '#164E63'];
 const PRESET_BACKGROUND_COLORS = ['#F0F2F5', '#FFF7E8', '#F2FCEB', '#EAF5FF', '#1A202C', '#0F172A'];
-const DEFAULT_READER_FONT_ID = 'reader-font-serif-default';
 const SYSTEM_READER_FONT_ID = 'reader-font-system-default';
+const SERIF_READER_FONT_ID = 'reader-font-serif-default';
+const DEFAULT_READER_FONT_ID = SYSTEM_READER_FONT_ID;
 const BOOKMARK_NAME_MAX_LENGTH = 40;
 const READER_TEXT_ALIGN_OPTIONS: Array<{ value: ReaderTextAlign; label: string; icon: React.ComponentType<{ size?: number }> }> = [
   { value: 'left', label: '\u5c45\u5de6', icon: AlignLeft },
@@ -156,7 +157,7 @@ const DEFAULT_READER_FONT_OPTIONS: ReaderFontOption[] = [
     sourceType: 'default',
   },
   {
-    id: DEFAULT_READER_FONT_ID,
+    id: SERIF_READER_FONT_ID,
     label: '思源宋体（衬线）',
     family: '"Noto Serif CJK", serif',
     sourceType: 'css',
