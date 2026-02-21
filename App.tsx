@@ -578,6 +578,8 @@ const App: React.FC = () => {
   const ragResumeLastScanAtRef = useRef(0);
   const nonKeyboardViewportHeightRef = useRef(0);
   const keyboardReleaseTimerRef = useRef<number | null>(null);
+  const bottomNavRestoreTimerRef = useRef<number | null>(null);
+  const [isBottomNavSuppressedByKeyboard, setIsBottomNavSuppressedByKeyboard] = useState(false);
 
   // --- PERSISTENT STATE ---
 
@@ -926,6 +928,30 @@ const App: React.FC = () => {
       window.removeEventListener('resize', syncKeyboardVisibility);
       window.removeEventListener('orientationchange', syncKeyboardVisibility);
       window.visualViewport?.removeEventListener('resize', syncKeyboardVisibility);
+    };
+  }, [isSoftKeyboardVisible]);
+  useEffect(() => {
+    if (bottomNavRestoreTimerRef.current !== null) {
+      window.clearTimeout(bottomNavRestoreTimerRef.current);
+      bottomNavRestoreTimerRef.current = null;
+    }
+
+    if (isSoftKeyboardVisible) {
+      setIsBottomNavSuppressedByKeyboard(true);
+      return;
+    }
+
+    // 等 iOS 视口完全回弹后再恢复底栏，避免“先出现再消失再出现”的闪动。
+    bottomNavRestoreTimerRef.current = window.setTimeout(() => {
+      bottomNavRestoreTimerRef.current = null;
+      setIsBottomNavSuppressedByKeyboard(false);
+    }, 160);
+
+    return () => {
+      if (bottomNavRestoreTimerRef.current !== null) {
+        window.clearTimeout(bottomNavRestoreTimerRef.current);
+        bottomNavRestoreTimerRef.current = null;
+      }
     };
   }, [isSoftKeyboardVisible]);
   useEffect(() => {
@@ -2295,12 +2321,13 @@ const App: React.FC = () => {
       </div>
 
       {/* Bottom Navigation */}
-      {!isSoftKeyboardVisible && (
-        <nav
-          className="absolute left-0 right-0 z-40 px-6 pointer-events-none"
-          style={{ bottom: `${resolvedSafeAreaBottom + 8}px` }}
-        >
-          <div className={`flex w-full justify-around items-center py-3 px-2 rounded-2xl pointer-events-auto ${isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357]' : 'neu-flat'}`}>
+      <nav
+        className={`absolute left-0 right-0 z-40 px-6 pointer-events-none transition-[opacity,transform] duration-200 ${
+          isBottomNavSuppressedByKeyboard ? 'opacity-0 translate-y-3' : 'opacity-100 translate-y-0'
+        }`}
+        style={{ bottom: `${resolvedSafeAreaBottom + 8}px` }}
+      >
+        <div className={`flex w-full justify-around items-center py-3 px-2 rounded-2xl ${isBottomNavSuppressedByKeyboard ? 'pointer-events-none' : 'pointer-events-auto'} ${isDarkMode ? 'bg-[#2d3748] shadow-[5px_5px_10px_#232b39,-5px_-5px_10px_#374357]' : 'neu-flat'}`}>
           <button 
             onClick={() => transitionToView(AppView.LIBRARY)}
             disabled={isViewTransitioning}
@@ -2333,8 +2360,7 @@ const App: React.FC = () => {
             <SettingsIcon size={22} strokeWidth={currentView === AppView.SETTINGS ? 2.5 : 2} />
           </button>
         </div>
-        </nav>
-      )}
+      </nav>
     </div>
   );
 };
