@@ -122,6 +122,7 @@ const SUMMARY_CHAT_PRIORITY = 2;
 const SUMMARY_BOOK_PRIORITY = 1;
 const SUMMARY_MANUAL_BOOST = 10;
 const MESSAGE_TIME_GAP_MS = 60 * 60 * 1000;
+const MESSAGE_RENDER_BATCH_SIZE = 100;
 const FIXED_MESSAGE_TIME_GAP_MINUTES = 60;
 const DEFAULT_READER_MORE_APPEARANCE: AppSettings['readerMore']['appearance'] = {
   bubbleFontSizeScale: 1,
@@ -512,6 +513,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const [summaryApiFetchState, setSummaryApiFetchState] = useState<FetchState>('IDLE');
   const [summaryApiFetchError, setSummaryApiFetchError] = useState('');
   const [archiveVersion, setArchiveVersion] = useState(0);
+  const [visibleMessageBatchCount, setVisibleMessageBatchCount] = useState(1);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isAiPanelOpenRef = useRef(isAiPanelOpen);
@@ -522,6 +524,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   const dragRafRef = useRef<number | null>(null);
   const pendingDragHeightRef = useRef<number | null>(null);
   const keepBottomRafRef = useRef<number | null>(null);
+  const loadMoreAnchorRef = useRef<{ scrollTop: number; scrollHeight: number } | null>(null);
   const scrollDistFromBottomRef = useRef<number | null>(null);
   const releaseScrollDistLockAfterLayoutRef = useRef(false);
   const isMountedRef = useRef(true);
@@ -645,6 +648,16 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     () => (hiddenBubbleIds.length === 0 ? messages : messages.filter((message) => !hiddenBubbleIdSet.has(message.id))),
     [messages, hiddenBubbleIds.length, hiddenBubbleIdSet]
   );
+  const visibleMessageRenderCount = Math.max(
+    MESSAGE_RENDER_BATCH_SIZE,
+    visibleMessageBatchCount * MESSAGE_RENDER_BATCH_SIZE
+  );
+  const renderedMessages = useMemo(() => {
+    if (visibleMessages.length <= visibleMessageRenderCount) return visibleMessages;
+    return visibleMessages.slice(visibleMessages.length - visibleMessageRenderCount);
+  }, [visibleMessages, visibleMessageRenderCount]);
+  const hiddenMessageCount = Math.max(0, visibleMessages.length - renderedMessages.length);
+  const hasMoreCollapsedMessages = hiddenMessageCount > 0;
   const messageTimeline = useMemo(() => {
     const items: Array<
       | { type: 'time'; id: string; timestamp: number }
@@ -653,7 +666,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     const showMessageTime = readerMoreAppearance.showMessageTime;
     const gapMs = Math.max(MESSAGE_TIME_GAP_MS, (readerMoreAppearance.timeGapMinutes || 60) * 60 * 1000);
     let prevTimestamp = 0;
-    visibleMessages.forEach((message) => {
+    renderedMessages.forEach((message) => {
       if (showMessageTime && prevTimestamp > 0 && message.timestamp - prevTimestamp >= gapMs) {
         items.push({
           type: 'time',
@@ -669,7 +682,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       prevTimestamp = message.timestamp;
     });
     return items;
-  }, [visibleMessages, readerMoreAppearance.showMessageTime, readerMoreAppearance.timeGapMinutes]);
+  }, [renderedMessages, readerMoreAppearance.showMessageTime, readerMoreAppearance.timeGapMinutes]);
   const resolvedPanelHeight = clamp(panelHeightPx, panelBounds.min, panelBounds.max);
   const safeBottomInset = Math.max(0, safeAreaBottom || 0);
   const resolvedPanelVisualHeight = resolvedPanelHeight + safeBottomInset;
@@ -1884,6 +1897,11 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   }, [conversationKey]);
 
   useEffect(() => {
+    setVisibleMessageBatchCount(1);
+    loadMoreAnchorRef.current = null;
+  }, [conversationKey]);
+
+  useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
 
@@ -2121,6 +2139,16 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
     }
   }, [resolvedPanelHeight]);
 
+  useLayoutEffect(() => {
+    const anchor = loadMoreAnchorRef.current;
+    if (!anchor) return;
+    loadMoreAnchorRef.current = null;
+    const scroller = messagesContainerRef.current;
+    if (!scroller) return;
+    const deltaHeight = scroller.scrollHeight - anchor.scrollHeight;
+    scroller.scrollTop = Math.max(0, anchor.scrollTop + deltaHeight);
+  }, [messageTimeline]);
+
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
@@ -2211,6 +2239,17 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
       setIsAiFabOpening(false);
       aiFabOpenTimerRef.current = null;
     }, AI_FAB_OPEN_DELAY_MS);
+  };
+
+  const handleLoadMoreMessages = () => {
+    const scroller = messagesContainerRef.current;
+    if (scroller) {
+      loadMoreAnchorRef.current = {
+        scrollTop: scroller.scrollTop,
+        scrollHeight: scroller.scrollHeight,
+      };
+    }
+    setVisibleMessageBatchCount((prev) => prev + 1);
   };
 
   const handlePanelGripPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -2894,6 +2933,22 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
             {messages.length === 0 && (
               <div className={`text-xs text-center pt-8 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
                 暂无聊天消息
+              </div>
+            )}
+
+            {hasMoreCollapsedMessages && (
+              <div className="flex justify-center">
+                <button
+                  type="button"
+                  onClick={handleLoadMoreMessages}
+                  className={`text-xs px-4 py-1.5 rounded-full transition-colors ${
+                    isDarkMode
+                      ? 'bg-[#1a202c] text-slate-300 hover:text-slate-100'
+                      : 'bg-white/70 text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  显示更多消息
+                </button>
               </div>
             )}
 
