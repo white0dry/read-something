@@ -141,6 +141,7 @@ const PRESET_HIGHLIGHT_COLORS = ['#FFE066', '#FFD6A5', '#FFADAD', '#C7F9CC', '#A
 const PRESET_TEXT_COLORS = ['#1E293B', '#334155', '#475569', '#0F172A', '#9F1239', '#164E63'];
 const PRESET_BACKGROUND_COLORS = ['#F0F2F5', '#FFF7E8', '#F2FCEB', '#EAF5FF', '#1A202C', '#0F172A'];
 const DEFAULT_READER_FONT_ID = 'reader-font-serif-default';
+const SYSTEM_READER_FONT_ID = 'reader-font-system-default';
 const BOOKMARK_NAME_MAX_LENGTH = 40;
 const READER_TEXT_ALIGN_OPTIONS: Array<{ value: ReaderTextAlign; label: string; icon: React.ComponentType<{ size?: number }> }> = [
   { value: 'left', label: '\u5c45\u5de6', icon: AlignLeft },
@@ -149,24 +150,34 @@ const READER_TEXT_ALIGN_OPTIONS: Array<{ value: ReaderTextAlign; label: string; 
 ];
 const DEFAULT_READER_FONT_OPTIONS: ReaderFontOption[] = [
   {
-    id: DEFAULT_READER_FONT_ID,
-    label: '默认衬线',
-    family: '"Songti SC", "STSong", "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "SimSun", serif',
+    id: SYSTEM_READER_FONT_ID,
+    label: '系统默认',
+    family: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
     sourceType: 'default',
+  },
+  {
+    id: DEFAULT_READER_FONT_ID,
+    label: '思源宋体（衬线）',
+    family: '"Noto Serif CJK", serif',
+    sourceType: 'css',
+    sourceUrl: 'https://fontsapi.zeoseven.com/285/main/result.css',
   },
   {
     id: 'reader-font-sans-default',
-    label: '默认无衬线',
-    family: '"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", Arial, sans-serif',
-    sourceType: 'default',
+    label: '思源黑体（无衬线）',
+    family: '"Noto Sans CJK", sans-serif',
+    sourceType: 'css',
+    sourceUrl: 'https://fontsapi.zeoseven.com/69/main/result.css',
   },
   {
     id: 'reader-font-mono-default',
-    label: '默认等宽',
-    family: '"Sarasa Mono SC", "Noto Sans Mono CJK SC", "Source Han Mono SC", "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
-    sourceType: 'default',
+    label: 'JetBrains Maple Mono（等宽）',
+    family: '"JetBrains Maple Mono", monospace',
+    sourceType: 'css',
+    sourceUrl: 'https://fontsapi.zeoseven.com/521/main/result.css',
   },
 ];
+const BUILTIN_READER_FONT_ID_SET = new Set(DEFAULT_READER_FONT_OPTIONS.map((option) => option.id));
 
 const isSameHexColor = (left: string, right: string) => left.trim().toUpperCase() === right.trim().toUpperCase();
 
@@ -1459,10 +1470,11 @@ const Reader: React.FC<ReaderProps> = ({
         const persistedFontOptions: ReaderFontOption[] = persistedFontOptionsRaw.reduce<ReaderFontOption[]>((acc, item) => {
           if (!item || typeof item !== 'object') return acc;
           const id = typeof item.id === 'string' ? item.id.trim() : '';
+          if (!id || BUILTIN_READER_FONT_ID_SET.has(id)) return acc;
           const label = typeof item.label === 'string' ? sanitizeFontFamily(item.label) : '';
           const familyName = typeof item.family === 'string' ? normalizeStoredFontFamily(item.family) : '';
           const sourceUrl = typeof item.sourceUrl === 'string' ? item.sourceUrl.trim() : '';
-          if (!id || !label || !familyName || !sourceUrl || !isValidFontSourceType(item.sourceType)) return acc;
+          if (!label || !familyName || !sourceUrl || !isValidFontSourceType(item.sourceType)) return acc;
           acc.push({
             id,
             label,
@@ -1506,8 +1518,11 @@ const Reader: React.FC<ReaderProps> = ({
         setReaderFontOptions(mergedFontOptions);
         setSelectedReaderFontId(selectedFontId);
 
-        if (persistedFontOptions.length > 0) {
-          await Promise.allSettled(persistedFontOptions.map(option => ensureReaderFontResource(option)));
+        const fontsToEnsure = mergedFontOptions.filter(
+          (option) => option.sourceType !== 'default' && typeof option.sourceUrl === 'string' && option.sourceUrl.trim().length > 0
+        );
+        if (fontsToEnsure.length > 0) {
+          await Promise.allSettled(fontsToEnsure.map(option => ensureReaderFontResource(option)));
         }
       } catch (error) {
         console.error('Failed to hydrate global reader appearance:', error);
@@ -1743,7 +1758,13 @@ const Reader: React.FC<ReaderProps> = ({
     if (!isReaderAppearanceHydrated) return;
 
     const persistedFontOptions: ReaderFontState[] = readerFontOptions
-      .filter(option => option.sourceType !== 'default' && typeof option.sourceUrl === 'string' && option.sourceUrl.trim().length > 0)
+      .filter(
+        (option) =>
+          option.sourceType !== 'default' &&
+          !BUILTIN_READER_FONT_ID_SET.has(option.id) &&
+          typeof option.sourceUrl === 'string' &&
+          option.sourceUrl.trim().length > 0
+      )
       .map(option => ({
         id: option.id,
         label: option.label,
@@ -2703,6 +2724,7 @@ const Reader: React.FC<ReaderProps> = ({
   };
   const selectedReaderFontFamily =
     readerFontOptions.find(option => option.id === selectedReaderFontId)?.family ||
+    DEFAULT_READER_FONT_OPTIONS.find(option => option.id === DEFAULT_READER_FONT_ID)?.family ||
     DEFAULT_READER_FONT_OPTIONS[0].family;
   const readerScrollStyle = {
     touchAction: isHighlightMode ? 'none' : 'pan-y',
