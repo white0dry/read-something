@@ -557,6 +557,8 @@ const StudyHub: React.FC<StudyHubProps> = ({
     const wasNotLoaded = !isEmbedModelLoaded();
     if (wasNotLoaded) showNotification('RAG 语义模型首次加载中…');
 
+    let hadAnySuccess = false;
+    let hadAnyFailure = false;
     try {
       const topK = options?.topK || 3;
       const perBook = options?.perBook || false;
@@ -577,93 +579,128 @@ const StudyHub: React.FC<StudyHubProps> = ({
       }
 
       const ragContextByBookId: Record<string, string> = {};
+      const retrieveSafeChunksForBook = async (bookId: string, safeOffset: number, targetTopK: number) => {
+        if (safeOffset <= 0 || targetTopK <= 0) return [] as Awaited<ReturnType<typeof retrieveRelevantChunks>>;
+
+        // 第一轮：全书范围检索，然后按阅读进度过滤
+        const fullScope: Record<string, number> = { [bookId]: Number.MAX_SAFE_INTEGER };
+        const candidates = await retrieveRelevantChunks(normalizedQuery, fullScope, {
+          topK: targetTopK * 6,
+          perBookTopK: targetTopK * 6,
+        }, ragApiConfigResolver);
+
+        const safeChunks = candidates
+          .filter((chunk) => chunk.endOffset <= safeOffset)
+          .slice(0, targetTopK);
+        const selected = [...safeChunks];
+
+        // 第二轮回退：直接在安全范围内检索
+        if (selected.length < targetTopK) {
+          const safeScope: Record<string, number> = { [bookId]: safeOffset };
+          const fallbackChunks = await retrieveRelevantChunks(normalizedQuery, safeScope, {
+            topK: targetTopK,
+            perBookTopK: targetTopK,
+          }, ragApiConfigResolver);
+          const seen = new Set(selected.map((c) => c.id));
+          for (const chunk of fallbackChunks) {
+            if (seen.has(chunk.id)) continue;
+            seen.add(chunk.id);
+            selected.push(chunk);
+            if (selected.length >= targetTopK) break;
+          }
+        }
+
+        return selected.slice(0, targetTopK);
+      };
 
       if (perBook) {
         // ── 逐书独立检索模式：每本书独立获得 topK 个片段 ──
         // 不在 query 中注入书名——perBook 已限定在单本书的 embeddings 中检索，
         // 注入书名反而会让不同 query 的 embedding 过于相似（公共前缀主导向量）。
         for (const { bookId, safeOffset } of bookInfos) {
-          // 第一轮：全书范围检索，然后按阅读进度过滤
-          const fullScope: Record<string, number> = { [bookId]: Number.MAX_SAFE_INTEGER };
-          const candidates = await retrieveRelevantChunks(normalizedQuery, fullScope, {
-            topK: topK * 6,
-            perBookTopK: topK * 6,
-          }, ragApiConfigResolver);
-
-          const safeChunks = candidates
-            .filter((chunk) => chunk.endOffset <= safeOffset)
-            .slice(0, topK);
-          const selected = [...safeChunks];
-
-          // 第二轮回退：直接在安全范围内检索
-          if (selected.length < topK) {
-            const safeScope: Record<string, number> = { [bookId]: safeOffset };
-            const fallbackChunks = await retrieveRelevantChunks(normalizedQuery, safeScope, {
-              topK,
-              perBookTopK: topK,
-            }, ragApiConfigResolver);
-            const seen = new Set(selected.map((c) => c.id));
-            for (const chunk of fallbackChunks) {
-              if (seen.has(chunk.id)) continue;
-              seen.add(chunk.id);
-              selected.push(chunk);
-              if (selected.length >= topK) break;
+          try {
+            const selected = await retrieveSafeChunksForBook(bookId, safeOffset, topK);
+            if (selected.length > 0) {
+              ragContextByBookId[bookId] = selected.map((c) => c.text).join('\n---\n');
+              hadAnySuccess = true;
             }
-          }
-
-          if (selected.length > 0) {
-            ragContextByBookId[bookId] = selected.slice(0, topK).map((c) => c.text).join('\n---\n');
+          } catch (error) {
+            hadAnyFailure = true;
+            console.warn(`[RAG] Retrieval failed for book ${bookId}, skipping:`, error);
           }
         }
       } else {
         // ── 全局检索模式（笔记评论等使用）：所有书合起来取 topK ──
-        const offsetByBookId: Record<string, number> = {};
-        const fullBookScopeByBookId: Record<string, number> = {};
-        for (const { bookId, safeOffset } of bookInfos) {
-          offsetByBookId[bookId] = safeOffset;
-          fullBookScopeByBookId[bookId] = Number.MAX_SAFE_INTEGER;
-        }
+        try {
+          const offsetByBookId: Record<string, number> = {};
+          const fullBookScopeByBookId: Record<string, number> = {};
+          for (const { bookId, safeOffset } of bookInfos) {
+            offsetByBookId[bookId] = safeOffset;
+            fullBookScopeByBookId[bookId] = Number.MAX_SAFE_INTEGER;
+          }
 
-        const candidateTopK = Math.max(topK * 6, Math.max(1, bookIds.length) * 8);
-        const candidatePerBookTopK = bookIds.length <= 1 ? candidateTopK : 8;
-        const candidates = await retrieveRelevantChunks(normalizedQuery, fullBookScopeByBookId, {
-          topK: candidateTopK,
-          perBookTopK: candidatePerBookTopK,
-        }, ragApiConfigResolver);
-
-        const safeChunks = candidates
-          .filter((chunk) => chunk.endOffset <= (offsetByBookId[chunk.bookId] || 0))
-          .slice(0, topK);
-        const selectedChunks = [...safeChunks];
-
-        if (selectedChunks.length < topK) {
-          const fallbackPerBookTopK = bookIds.length <= 1 ? topK : 2;
-          const fallbackChunks = await retrieveRelevantChunks(normalizedQuery, offsetByBookId, {
-            topK,
-            perBookTopK: fallbackPerBookTopK,
+          const candidateTopK = Math.max(topK * 6, Math.max(1, bookIds.length) * 8);
+          const candidatePerBookTopK = bookIds.length <= 1 ? candidateTopK : 8;
+          const candidates = await retrieveRelevantChunks(normalizedQuery, fullBookScopeByBookId, {
+            topK: candidateTopK,
+            perBookTopK: candidatePerBookTopK,
           }, ragApiConfigResolver);
-          const seenChunkIds = new Set(selectedChunks.map((chunk) => chunk.id));
-          for (const chunk of fallbackChunks) {
-            if (seenChunkIds.has(chunk.id)) continue;
-            seenChunkIds.add(chunk.id);
-            selectedChunks.push(chunk);
-            if (selectedChunks.length >= topK) break;
-          }
-        }
 
-        if (selectedChunks.length > 0) {
-          const groupedChunks: Record<string, string[]> = {};
-          for (const chunk of selectedChunks.slice(0, topK)) {
-            if (!groupedChunks[chunk.bookId]) groupedChunks[chunk.bookId] = [];
-            groupedChunks[chunk.bookId].push(chunk.text);
+          const safeChunks = candidates
+            .filter((chunk) => chunk.endOffset <= (offsetByBookId[chunk.bookId] || 0))
+            .slice(0, topK);
+          const selectedChunks = [...safeChunks];
+
+          if (selectedChunks.length < topK) {
+            const fallbackPerBookTopK = bookIds.length <= 1 ? topK : 2;
+            const fallbackChunks = await retrieveRelevantChunks(normalizedQuery, offsetByBookId, {
+              topK,
+              perBookTopK: fallbackPerBookTopK,
+            }, ragApiConfigResolver);
+            const seenChunkIds = new Set(selectedChunks.map((chunk) => chunk.id));
+            for (const chunk of fallbackChunks) {
+              if (seenChunkIds.has(chunk.id)) continue;
+              seenChunkIds.add(chunk.id);
+              selectedChunks.push(chunk);
+              if (selectedChunks.length >= topK) break;
+            }
           }
-          Object.entries(groupedChunks).forEach(([bookId, texts]) => {
-            ragContextByBookId[bookId] = texts.join('\n---\n');
-          });
+
+          if (selectedChunks.length > 0) {
+            const groupedChunks: Record<string, string[]> = {};
+            for (const chunk of selectedChunks.slice(0, topK)) {
+              if (!groupedChunks[chunk.bookId]) groupedChunks[chunk.bookId] = [];
+              groupedChunks[chunk.bookId].push(chunk.text);
+            }
+            Object.entries(groupedChunks).forEach(([bookId, texts]) => {
+              ragContextByBookId[bookId] = texts.join('\n---\n');
+              hadAnySuccess = true;
+            });
+          }
+        } catch (error) {
+          hadAnyFailure = true;
+          console.warn('[RAG] Global retrieval failed, fallback to per-book retrieval:', error);
+          const fallbackPerBookTopK = bookIds.length <= 1 ? topK : 2;
+          for (const { bookId, safeOffset } of bookInfos) {
+            try {
+              const selected = await retrieveSafeChunksForBook(bookId, safeOffset, fallbackPerBookTopK);
+              if (selected.length > 0) {
+                ragContextByBookId[bookId] = selected.map((c) => c.text).join('\n---\n');
+                hadAnySuccess = true;
+              }
+            } catch (bookError) {
+              hadAnyFailure = true;
+              console.warn(`[RAG] Retrieval failed for book ${bookId}, skipping:`, bookError);
+            }
+          }
         }
       }
 
-      if (wasNotLoaded && isEmbedModelLoaded()) showNotification('RAG 语义模型加载成功');
+      if (wasNotLoaded && isEmbedModelLoaded()) {
+        showNotification('RAG 语义模型加载成功');
+      } else if (wasNotLoaded && !hadAnySuccess && hadAnyFailure) {
+        showNotification('RAG 语义模型加载失败', 'error');
+      }
       return ragContextByBookId;
     } catch (err) {
       console.warn('[RAG] Retrieval failed, continuing without:', err);
