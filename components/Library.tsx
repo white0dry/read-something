@@ -7,7 +7,7 @@ import ModalPortal from './ModalPortal';
 import ResolvedImage from './ResolvedImage';
 import { deleteImageByRef, saveImageFile } from '../utils/imageStorage';
 import { getBookContent, getBookTextLength } from '../utils/bookContentStorage';
-import { BOOK_IMPORT_ACCEPT, parseImportedBookFile, SUPPORTED_BOOK_IMPORT_SUFFIXES } from '../utils/bookImportParser';
+import type { ParsedBookImportResult } from '../utils/bookImportParser';
 import { isBuiltInBook, isTutorialUnread } from '../utils/builtInTutorialBook';
 
 interface LibraryProps {
@@ -49,6 +49,8 @@ const DefaultBookCover = () => (
 type SortField = 'title' | 'author' | 'progress' | 'id' | 'length';
 type SortDirection = 'asc' | 'desc';
 type ViewMode = 'grid' | 'list';
+const SUPPORTED_BOOK_IMPORT_SUFFIXES = ['txt', 'docx', 'docm', 'dotx', 'dotm', 'pdf', 'epub', 'mobi'] as const;
+const BOOK_IMPORT_ACCEPT = SUPPORTED_BOOK_IMPORT_SUFFIXES.map((suffix) => `.${suffix}`).join(',');
 const SUPPORTED_IMPORT_SUFFIX_SET = new Set(SUPPORTED_BOOK_IMPORT_SUFFIXES.map((suffix) => suffix.toLowerCase()));
 
 const getSupportedSuffixFromName = (name: string) => {
@@ -682,6 +684,11 @@ const Library: React.FC<LibraryProps> = ({
     return sanitizeTocTitles(parseAiTitleList(aiRaw));
   };
 
+  const parseImportedBookFileAsync = async (file: File): Promise<ParsedBookImportResult> => {
+    const parserModule = await import('../utils/bookImportParser');
+    return parserModule.parseImportedBookFile(file);
+  };
+
   const resolveTocAssistedChapters = async (
     fullText: string,
     options?: { notifyMissingApi?: boolean }
@@ -709,8 +716,8 @@ const Library: React.FC<LibraryProps> = ({
   };
 
   const maybeAssistEpubSplit = async (
-    parsed: Awaited<ReturnType<typeof parseImportedBookFile>>
-  ): Promise<Awaited<ReturnType<typeof parseImportedBookFile>>> => {
+    parsed: ParsedBookImportResult
+  ): Promise<ParsedBookImportResult> => {
     if (parsed.format !== 'epub') return parsed;
     if ((parsed.chapters?.length || 0) > 1) return parsed;
     if (!parsed.fullText || parsed.fullText.length < 6000) return parsed;
@@ -1132,7 +1139,7 @@ const Library: React.FC<LibraryProps> = ({
   };
 
   const applyParsedBookImportResult = (
-    parsed: Awaited<ReturnType<typeof parseImportedBookFile>>,
+    parsed: ParsedBookImportResult,
     setTarget: typeof setEditingBook | typeof setImportingBook,
     isEdit: boolean
   ) => {
@@ -1169,7 +1176,7 @@ const Library: React.FC<LibraryProps> = ({
 
     try {
       showNotification?.('导入中……');
-      const parsed = await parseImportedBookFile(file);
+      const parsed = await parseImportedBookFileAsync(file);
       const assistedParsed = await maybeAssistEpubSplit(parsed);
       applyParsedBookImportResult(assistedParsed, setTarget, isEditModalOpen);
     } catch (error) {
@@ -1213,7 +1220,7 @@ const Library: React.FC<LibraryProps> = ({
         type: blob.type || contentType || 'application/octet-stream',
       });
 
-      const parsed = await parseImportedBookFile(remoteFile);
+      const parsed = await parseImportedBookFileAsync(remoteFile);
       const assistedParsed = await maybeAssistEpubSplit(parsed);
       applyParsedBookImportResult(assistedParsed, setTarget, isEditModalOpen);
       setTxtFileUrlMode(false);

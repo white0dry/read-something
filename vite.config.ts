@@ -45,6 +45,17 @@ export default defineConfig(({ mode }) => {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
         'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
       },
+      build: {
+        rollupOptions: {
+          output: {
+            manualChunks(id) {
+              if (id.includes('/utils/builtInTutorialBook.ts')) return 'app-tutorial';
+              if (id.includes('node_modules/@xenova/transformers')) return 'vendor-transformers';
+              if (id.includes('node_modules/onnxruntime-web')) return 'vendor-onnxruntime';
+            },
+          },
+        },
+      },
       resolve: {
         alias: {
           '@lingo-reader/shared': path.resolve(__dirname, 'utils/lingoReaderSharedCompat.ts'),

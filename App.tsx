@@ -1,10 +1,5 @@
-﻿import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+﻿import React, { useState, useEffect, useRef, useCallback, useMemo, Suspense, lazy } from 'react';
 import { BookOpen, PieChart, Settings as SettingsIcon, LayoutGrid, Sparkles, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
-import Library from './components/Library';
-import Reader from './components/Reader';
-import Stats from './components/Stats';
-import StudyHub from './components/StudyHub';
-import Settings from './components/Settings';
 import { AppView, Book, Chapter, ApiConfig, ApiPreset, ApiProvider, AppSettings, ReaderSessionSnapshot, RagPreset, TtsConfig, TtsPreset } from './types';
 import { Persona, Character, WorldBookEntry } from './components/settings/types';
 import { deleteImageByRef, migrateDataUrlToImageRef } from './utils/imageStorage';
@@ -20,6 +15,12 @@ import {
   DEFAULT_READER_BUBBLE_CSS_PRESETS,
   normalizeReaderBubbleCssPresets,
 } from './utils/readerBubbleCssPresets';
+
+const Library = lazy(() => import('./components/Library'));
+const Reader = lazy(() => import('./components/Reader'));
+const Stats = lazy(() => import('./components/Stats'));
+const StudyHub = lazy(() => import('./components/StudyHub'));
+const Settings = lazy(() => import('./components/Settings'));
 
 interface Notification {
   show: boolean;
@@ -2230,6 +2231,11 @@ const App: React.FC = () => {
       )}
     </>
   );
+  const lazyViewFallback = (
+    <div className={`flex-1 flex items-center justify-center ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+      <Loader2 size={24} className="animate-spin" />
+    </div>
+  );
 
   // If in Reader mode
   if (currentView === AppView.READER) {
@@ -2244,31 +2250,33 @@ const App: React.FC = () => {
         style={readerWrapperStyle}
       >
         <div className={`flex-1 flex flex-col overflow-hidden ${viewAnimationClass}`}>
-          <Reader
-            onBack={handleBackToLibrary}
-            isDarkMode={isDarkMode}
-            activeBook={activeBook}
-            ragIndexingState={activeBook ? (ragWarmupByBookId[activeBook.id] || null) : null}
-            appSettings={appSettings}
-            setAppSettings={setAppSettings}
-            safeAreaTop={resolvedSafeAreaTop}
-            safeAreaBottom={resolvedSafeAreaBottom}
-            apiConfig={apiConfig}
-            apiPresets={apiPresets}
-            personas={personas}
-            activePersonaId={activePersonaId}
-            onSelectPersona={setActivePersonaId}
-            characters={characters}
-            activeCharacterId={activeCharacterId}
-            onSelectCharacter={setActiveCharacterId}
-            worldBookEntries={worldBookEntries}
-            ragApiConfigResolver={resolveRagApiConfig}
-            ttsConfig={ttsConfig}
-            ttsPresets={ttsPresets}
-            setTtsConfig={setTtsConfig}
-            pendingHighlightJump={pendingHighlightJump}
-            onClearPendingHighlightJump={() => setPendingHighlightJump(null)}
-          />
+          <Suspense fallback={lazyViewFallback}>
+            <Reader
+              onBack={handleBackToLibrary}
+              isDarkMode={isDarkMode}
+              activeBook={activeBook}
+              ragIndexingState={activeBook ? (ragWarmupByBookId[activeBook.id] || null) : null}
+              appSettings={appSettings}
+              setAppSettings={setAppSettings}
+              safeAreaTop={resolvedSafeAreaTop}
+              safeAreaBottom={resolvedSafeAreaBottom}
+              apiConfig={apiConfig}
+              apiPresets={apiPresets}
+              personas={personas}
+              activePersonaId={activePersonaId}
+              onSelectPersona={setActivePersonaId}
+              characters={characters}
+              activeCharacterId={activeCharacterId}
+              onSelectCharacter={setActiveCharacterId}
+              worldBookEntries={worldBookEntries}
+              ragApiConfigResolver={resolveRagApiConfig}
+              ttsConfig={ttsConfig}
+              ttsPresets={ttsPresets}
+              setTtsConfig={setTtsConfig}
+              pendingHighlightJump={pendingHighlightJump}
+              onClearPendingHighlightJump={() => setPendingHighlightJump(null)}
+            />
+          </Suspense>
         </div>
         {/* Global toasts (shared across all views) */}
         {globalToastsJsx}
@@ -2325,101 +2333,111 @@ const App: React.FC = () => {
       {/* Main Content Area */}
       <div className={`flex-1 flex flex-col overflow-hidden relative ${viewAnimationClass}`}>
         {currentView === AppView.LIBRARY && (
-          <Library
-            books={books}
-            onOpenBook={handleOpenBook} 
-            onAddBook={handleAddBook}
-            onRequestImportBook={handleRequestImportBook}
-            onUpdateBook={handleUpdateBook} 
-            onDeleteBook={handleDeleteBook}
-            showNotification={showNotification}
-            isDarkMode={isDarkMode} 
-            userSignature={userSignature}
-            onUpdateSignature={setUserSignature}
-            personas={personas}
-            activePersonaId={activePersonaId}
-            onSelectPersona={setActivePersonaId}
-            characters={characters}
-            activeCharacterId={activeCharacterId}
-            onSelectCharacter={setActiveCharacterId}
-            apiConfig={apiConfig}
-            ragPresets={effectiveRagPresets}
-            activeRagPresetId={activeRagPresetId}
-          />
+          <Suspense fallback={lazyViewFallback}>
+            <Library
+              books={books}
+              onOpenBook={handleOpenBook} 
+              onAddBook={handleAddBook}
+              onRequestImportBook={handleRequestImportBook}
+              onUpdateBook={handleUpdateBook} 
+              onDeleteBook={handleDeleteBook}
+              showNotification={showNotification}
+              isDarkMode={isDarkMode} 
+              userSignature={userSignature}
+              onUpdateSignature={setUserSignature}
+              personas={personas}
+              activePersonaId={activePersonaId}
+              onSelectPersona={setActivePersonaId}
+              characters={characters}
+              activeCharacterId={activeCharacterId}
+              onSelectCharacter={setActiveCharacterId}
+              apiConfig={apiConfig}
+              ragPresets={effectiveRagPresets}
+              activeRagPresetId={activeRagPresetId}
+            />
+          </Suspense>
         )}
         {currentView === AppView.STATS && (
-          <Stats
-            isDarkMode={isDarkMode}
-            dailyReadingMsByDate={dailyReadingMsByDate}
-            themeColor={appSettings.themeColor}
-            completedBookCount={completedBookIds.length}
-            completedBookIds={completedBookIds}
-            completedAtByBookId={completedAtByBookId}
-            readingMsByBookId={readingMsByBookId}
-            activeCharacterNickname={activeCharacterNickname}
-            books={books}
-            apiConfig={apiConfig}
-            personas={personas}
-            activePersonaId={activePersonaId}
-            characters={characters}
-            activeCharacterId={activeCharacterId}
-            worldBookEntries={worldBookEntries}
-          />
+          <Suspense fallback={lazyViewFallback}>
+            <Stats
+              isDarkMode={isDarkMode}
+              dailyReadingMsByDate={dailyReadingMsByDate}
+              themeColor={appSettings.themeColor}
+              completedBookCount={completedBookIds.length}
+              completedBookIds={completedBookIds}
+              completedAtByBookId={completedAtByBookId}
+              readingMsByBookId={readingMsByBookId}
+              activeCharacterNickname={activeCharacterNickname}
+              books={books}
+              apiConfig={apiConfig}
+              personas={personas}
+              activePersonaId={activePersonaId}
+              characters={characters}
+              activeCharacterId={activeCharacterId}
+              worldBookEntries={worldBookEntries}
+            />
+          </Suspense>
         )}
-        <div className={`flex-1 flex flex-col overflow-hidden ${currentView === AppView.STUDY_HUB ? '' : 'hidden'}`}>
-          <StudyHub
-            isDarkMode={isDarkMode}
-            books={books}
-            personas={personas}
-            activePersonaId={activePersonaId}
-            characters={characters}
-            activeCharacterId={activeCharacterId}
-            worldBookEntries={worldBookEntries}
-            apiConfig={apiConfig}
-            readingExcerptCharCount={appSettings.readerMore.feature.readingExcerptCharCount}
-            readingContextIgnorePanelClip={appSettings.readerMore.feature.readingContextIgnorePanelClip}
-            showNotification={showNotification}
-            ragApiConfigResolver={resolveRagApiConfig}
-            onJumpToBookHighlight={handleJumpToBookHighlight}
-          />
-        </div>
+        {currentView === AppView.STUDY_HUB && (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <Suspense fallback={lazyViewFallback}>
+              <StudyHub
+                isDarkMode={isDarkMode}
+                books={books}
+                personas={personas}
+                activePersonaId={activePersonaId}
+                characters={characters}
+                activeCharacterId={activeCharacterId}
+                worldBookEntries={worldBookEntries}
+                apiConfig={apiConfig}
+                readingExcerptCharCount={appSettings.readerMore.feature.readingExcerptCharCount}
+                readingContextIgnorePanelClip={appSettings.readerMore.feature.readingContextIgnorePanelClip}
+                showNotification={showNotification}
+                ragApiConfigResolver={resolveRagApiConfig}
+                onJumpToBookHighlight={handleJumpToBookHighlight}
+              />
+            </Suspense>
+          </div>
+        )}
         {currentView === AppView.SETTINGS && (
-          <Settings
-            isDarkMode={isDarkMode}
-            onToggleDarkMode={() => setIsDarkMode(!isDarkMode)}
+          <Suspense fallback={lazyViewFallback}>
+            <Settings
+              isDarkMode={isDarkMode}
+              onToggleDarkMode={() => setIsDarkMode(!isDarkMode)}
 
-            // API
-            apiConfig={apiConfig}
-            setApiConfig={setApiConfig}
-            apiPresets={apiPresets}
-            setApiPresets={setApiPresets}
+              // API
+              apiConfig={apiConfig}
+              setApiConfig={setApiConfig}
+              apiPresets={apiPresets}
+              setApiPresets={setApiPresets}
 
-            // Global App Settings
-            appSettings={appSettings}
-            setAppSettings={setAppSettings}
+              // Global App Settings
+              appSettings={appSettings}
+              setAppSettings={setAppSettings}
 
-            // Data
-            personas={personas}
-            setPersonas={setPersonas}
-            characters={characters}
-            setCharacters={setCharacters}
-            worldBookEntries={worldBookEntries}
-            setWorldBookEntries={setWorldBookEntries}
-            wbCategories={wbCategories}
-            setWbCategories={setWbCategories}
+              // Data
+              personas={personas}
+              setPersonas={setPersonas}
+              characters={characters}
+              setCharacters={setCharacters}
+              worldBookEntries={worldBookEntries}
+              setWorldBookEntries={setWorldBookEntries}
+              wbCategories={wbCategories}
+              setWbCategories={setWbCategories}
 
-            // RAG Presets
-            ragPresets={ragPresets}
-            setRagPresets={setRagPresets}
-            activeRagPresetId={activeRagPresetId}
-            setActiveRagPresetId={setActiveRagPresetId}
+              // RAG Presets
+              ragPresets={ragPresets}
+              setRagPresets={setRagPresets}
+              activeRagPresetId={activeRagPresetId}
+              setActiveRagPresetId={setActiveRagPresetId}
 
-            // TTS
-            ttsConfig={ttsConfig}
-            setTtsConfig={setTtsConfig}
-            ttsPresets={ttsPresets}
-            setTtsPresets={setTtsPresets}
-          />
+              // TTS
+              ttsConfig={ttsConfig}
+              setTtsConfig={setTtsConfig}
+              ttsPresets={ttsPresets}
+              setTtsPresets={setTtsPresets}
+            />
+          </Suspense>
         )}
       </div>
 
