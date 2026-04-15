@@ -87,6 +87,7 @@ interface ReaderMessagePanelProps {
   getLatestReadingPosition: () => ReaderPositionState | null;
   isMoreSettingsOpen: boolean;
   onCloseMoreSettings: () => void;
+  onOpenReaderTypography?: () => void;
   ragApiConfigResolver?: RagApiConfigResolver;
   ttsConfig: TtsConfig | null;
   ttsPresets: TtsPreset[];
@@ -490,6 +491,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   getLatestReadingPosition,
   isMoreSettingsOpen,
   onCloseMoreSettings,
+  onOpenReaderTypography,
   ragApiConfigResolver,
   ttsConfig,
   ttsPresets,
@@ -3540,6 +3542,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         favoriteQuotes={currentConversationFavorites}
         onDeleteFavoriteQuote={handleDeleteFavoriteQuoteFromPanel}
         onExportConversation={handleExportConversation}
+        onOpenReaderTypography={onOpenReaderTypography}
       />
 
       {contextMenu && !isDeleteMode && (
@@ -3607,4 +3610,3 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 };
 
 export default ReaderMessagePanel;
-

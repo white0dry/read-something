@@ -5,11 +5,11 @@ import {
   Loader2, BookMarked, CheckCircle2, NotebookPen, CircleCheckBig,
   BookPlus, UserCircle, Edit2, Link, FileUp, ChevronDown, Feather, Scroll,
   Heading1, Heading2, Heading3, Pilcrow, Bold, Italic, ListOrdered, List as ListIcon,
-  Save, Eraser, Highlighter, Copy, ExternalLink,
+  Save, Eraser, Highlighter, Copy, ExternalLink, Volume2,
 } from 'lucide-react';
 import {
   Book, ApiConfig, RagApiConfigResolver, Notebook, StudyNote, StudyNoteCommentThread,
-  StudyNoteCommentMessage, QuizSession, QuizConfig, QuizQuestion, ReaderCssPreset,
+  StudyNoteCommentMessage, QuizSession, QuizConfig, QuizQuestion, ReaderCssPreset, ReaderVocabularyEntry,
 } from '../types';
 import { Persona, Character, WorldBookEntry } from './settings/types';
 import ResolvedImage from './ResolvedImage';
@@ -47,7 +47,7 @@ interface StudyHubProps {
   onJumpToBookHighlight?: (bookId: string, chapterIndex: number | null, charOffset: number) => void;
 }
 
-type HubTab = 'notes' | 'quiz' | 'highlights';
+type HubTab = 'notes' | 'quiz' | 'highlights' | 'vocab';
 type NotesView = 'list' | 'detail' | 'editor';
 type QuizView = 'history' | 'config' | 'play' | 'result';
 type NoteBlockStyleTag = 'p' | 'h1' | 'h2' | 'h3';
@@ -67,6 +67,12 @@ type NoteToolbarState = {
   italic: boolean;
   orderedList: boolean;
   bulletList: boolean;
+};
+
+type StudyHubVocabularyGroup = {
+  bookId: string;
+  bookTitle: string;
+  items: ReaderVocabularyEntry[];
 };
 
 const uid = () => `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -395,6 +401,12 @@ const StudyHub: React.FC<StudyHubProps> = ({
   const [hubHighlightBookFilter, setHubHighlightBookFilter] = useState<string[]>([]);
   const [expandedHighlightIds, setExpandedHighlightIds] = useState<Set<string>>(new Set());
 
+  // ─── Vocabulary state ───
+  const [vocabularyLoading, setVocabularyLoading] = useState(false);
+  const [allBookVocabulary, setAllBookVocabulary] = useState<StudyHubVocabularyGroup[]>([]);
+  const [vocabularySearchTerm, setVocabularySearchTerm] = useState('');
+  const [vocabularyBookFilter, setVocabularyBookFilter] = useState<string[]>([]);
+
   // ─── Notes state ───
   const [notesView, setNotesView] = useState<NotesView>('list');
   const [notesViewAnimClass, setNotesViewAnimClass] = useState('');
@@ -559,6 +571,47 @@ const StudyHub: React.FC<StudyHubProps> = ({
       }
     };
     void loadAllHighlights();
+    return () => { cancelled = true; };
+  }, [activeTab, books]);
+
+  // ─── Load vocabulary when switching to vocabulary tab ───
+  useEffect(() => {
+    if (activeTab !== 'vocab') return;
+    let cancelled = false;
+    const loadAllVocabulary = async () => {
+      setVocabularyLoading(true);
+      try {
+        const results: StudyHubVocabularyGroup[] = [];
+        for (const book of books) {
+          const content = await getBookContent(book.id);
+          const rawEntries = content?.readerState?.vocabularyEntries;
+          if (!Array.isArray(rawEntries) || rawEntries.length === 0) continue;
+          const normalizedEntries = rawEntries
+            .map((entry, index) => {
+              if (!entry || typeof entry !== 'object') return null;
+              const term = typeof entry.term === 'string' ? entry.term.trim() : '';
+              if (!term) return null;
+              const normalizedTerm = typeof entry.normalizedTerm === 'string' && entry.normalizedTerm.trim().length > 0
+                ? entry.normalizedTerm.trim()
+                : term.toLocaleLowerCase();
+              return {
+                id: typeof entry.id === 'string' && entry.id.trim().length > 0 ? entry.id : `${book.id}_vocab_${index}`,
+                term,
+                normalizedTerm,
+              } satisfies ReaderVocabularyEntry;
+            })
+            .filter((entry): entry is ReaderVocabularyEntry => entry !== null);
+          if (normalizedEntries.length === 0) continue;
+          results.push({ bookId: book.id, bookTitle: book.title, items: normalizedEntries });
+        }
+        if (!cancelled) setAllBookVocabulary(results);
+      } catch (error) {
+        console.error('Failed to load vocabulary:', error);
+      } finally {
+        if (!cancelled) setVocabularyLoading(false);
+      }
+    };
+    void loadAllVocabulary();
     return () => { cancelled = true; };
   }, [activeTab, books]);
 
@@ -2539,6 +2592,24 @@ const StudyHub: React.FC<StudyHubProps> = ({
     } catch { /* ignore */ }
   };
 
+  const handlePronounceVocabulary = (term: string) => {
+    const text = term.trim();
+    if (!text) return;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      showNotification('当前浏览器不支持发音', 'error');
+      return;
+    }
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = /[\u4e00-\u9fff]/.test(text) ? 'zh-CN' : 'en-US';
+      utterance.rate = 0.95;
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      showNotification('发音失败', 'error');
+    }
+  };
+
   const handleDeleteStudyHubHighlight = async (bookId: string, item: ResolvedHighlightItem) => {
     try {
       const content = await getBookContent(bookId);
@@ -2566,6 +2637,29 @@ const StudyHub: React.FC<StudyHubProps> = ({
     }
   };
 
+  const handleDeleteVocabularyEntry = async (bookId: string, vocabEntryId: string) => {
+    try {
+      const content = await getBookContent(bookId);
+      if (!content?.readerState) return;
+      const existing = Array.isArray(content.readerState.vocabularyEntries)
+        ? content.readerState.vocabularyEntries
+        : [];
+      const nextEntries = existing.filter((item) => item.id !== vocabEntryId);
+      await saveBookReaderState(bookId, { ...content.readerState, vocabularyEntries: nextEntries });
+      setAllBookVocabulary((prev) =>
+        prev
+          .map((entry) => entry.bookId === bookId
+            ? { ...entry, items: entry.items.filter((item) => item.id !== vocabEntryId) }
+            : entry
+          )
+          .filter((entry) => entry.items.length > 0)
+      );
+      showNotification('生词已删除', 'success');
+    } catch {
+      showNotification('删除失败', 'error');
+    }
+  };
+
   const filteredHighlightGroups = useMemo(
     () =>
       allBookHighlights
@@ -2580,6 +2674,25 @@ const StudyHub: React.FC<StudyHubProps> = ({
     [allBookHighlights, hubHighlightBookFilter, hubHighlightColorFilter]
   );
 
+  const filteredVocabularyGroups = useMemo(() => {
+    const keyword = vocabularySearchTerm.trim().toLocaleLowerCase();
+    return allBookVocabulary
+      .filter((entry) => vocabularyBookFilter.length === 0 || vocabularyBookFilter.includes(entry.bookId))
+      .map((entry) => ({
+        ...entry,
+        items: entry.items.filter((item) => {
+          if (!keyword) return true;
+          return item.term.toLocaleLowerCase().includes(keyword);
+        }),
+      }))
+      .filter((entry) => entry.items.length > 0);
+  }, [allBookVocabulary, vocabularyBookFilter, vocabularySearchTerm]);
+
+  const totalVocabularyCount = useMemo(
+    () => allBookVocabulary.reduce((acc, entry) => acc + entry.items.length, 0),
+    [allBookVocabulary]
+  );
+
   const usedHighlightColors = useMemo(() => {
     const colors = new Set<string>();
     for (const entry of allBookHighlights) {
@@ -2591,11 +2704,12 @@ const StudyHub: React.FC<StudyHubProps> = ({
   }, [allBookHighlights]);
 
   const renderTabBar = () => {
-    const tabIndex = activeTab === 'notes' ? 0 : activeTab === 'highlights' ? 1 : 2;
+    const tabOrder: HubTab[] = ['notes', 'highlights', 'vocab', 'quiz'];
+    const tabIndex = Math.max(0, tabOrder.indexOf(activeTab));
     return (
-    <div className={`relative grid grid-cols-3 rounded-xl p-1 mx-6 overflow-hidden ${pressedClass}`}>
+    <div className={`relative grid grid-cols-4 rounded-xl p-1 mx-6 overflow-hidden ${pressedClass}`}>
       <div
-        className={`pointer-events-none absolute top-1 bottom-1 left-1 w-[calc((100%-0.5rem)/3)] rounded-lg transition-transform duration-300 ${isDarkMode ? 'bg-[#2d3748] shadow-[6px_6px_12px_#232b39]' : 'bg-[var(--neu-bg)] shadow-[6px_6px_12px_var(--neu-shadow-dark)]'}`}
+        className={`pointer-events-none absolute top-1 bottom-1 left-1 w-[calc((100%-0.5rem)/4)] rounded-lg transition-transform duration-300 ${isDarkMode ? 'bg-[#2d3748] shadow-[6px_6px_12px_#232b39]' : 'bg-[var(--neu-bg)] shadow-[6px_6px_12px_var(--neu-shadow-dark)]'}`}
         style={{ transform: `translateX(${tabIndex * 100}%)` }}
       />
       <button
@@ -2613,6 +2727,14 @@ const StudyHub: React.FC<StudyHubProps> = ({
         }`}
       >
         <Highlighter size={14} /> 摘录
+      </button>
+      <button
+        onClick={() => switchHubTab('vocab')}
+        className={`relative z-10 flex items-center justify-center gap-1 py-2.5 rounded-lg text-sm font-bold transition-colors ${
+          activeTab === 'vocab' ? (isDarkMode ? 'text-white' : 'text-rose-400') : 'text-slate-500'
+        }`}
+      >
+        <BookMarked size={14} /> 生词
       </button>
       <button
         onClick={() => switchHubTab('quiz')}
@@ -4293,6 +4415,116 @@ const StudyHub: React.FC<StudyHubProps> = ({
                   </div>
                 );
               })}
+          </div>
+        </div>
+      )}
+
+      {renderedTab === 'vocab' && (
+        <div className={`flex-1 flex flex-col overflow-hidden ${hubTabAnimClass}`}>
+          <div className="flex items-center justify-between px-6 pt-4 pb-2">
+            <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider">生词本</h2>
+            <span className={`text-xs ${subTextClass}`}>共 {totalVocabularyCount} 词</span>
+          </div>
+
+          <div className="px-6 pt-1 pb-3">
+            <div className={`h-10 rounded-xl px-3 flex items-center gap-2 ${inputClass}`}>
+              <Search size={15} className="opacity-60" />
+              <input
+                value={vocabularySearchTerm}
+                onChange={(e) => setVocabularySearchTerm(e.target.value)}
+                placeholder="搜索生词"
+                className="flex-1 bg-transparent outline-none text-sm placeholder:text-slate-400"
+              />
+              {!!vocabularySearchTerm && (
+                <button
+                  type="button"
+                  onClick={() => setVocabularySearchTerm('')}
+                  className="w-6 h-6 rounded-md flex items-center justify-center text-slate-400 hover:text-rose-400"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {allBookVocabulary.length > 1 && (() => {
+            const entries = allBookVocabulary.map((entry) => ({
+              bookId: entry.bookId,
+              bookTitle: entry.bookTitle,
+              items: entry.items.map((item) => ({ id: item.id })),
+            }));
+            const toggleBook = (bookId: string) => {
+              setVocabularyBookFilter((prev) =>
+                prev.includes(bookId) ? prev.filter((id) => id !== bookId) : [...prev, bookId]
+              );
+            };
+            return (
+              <div className="px-6 pb-3">
+                <HighlightBookMultiSelect
+                  entries={entries}
+                  selected={vocabularyBookFilter}
+                  onToggle={toggleBook}
+                  onClear={() => setVocabularyBookFilter([])}
+                  inputClass={inputClass}
+                  cardClass={cardClass}
+                  isDarkMode={isDarkMode}
+                />
+              </div>
+            );
+          })()}
+
+          <div className="flex-1 overflow-y-auto px-6 pb-24 no-scrollbar">
+            {vocabularyLoading && allBookVocabulary.length === 0 && (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 size={20} className="animate-spin text-slate-400" />
+              </div>
+            )}
+            {!vocabularyLoading && allBookVocabulary.length === 0 && (
+              <div className="text-center text-slate-400 text-sm py-8">
+                还没有生词，阅读时选中后点顶部 + 即可加入
+              </div>
+            )}
+            {allBookVocabulary.length > 0 && filteredVocabularyGroups.length === 0 && (
+              <div className="text-center text-slate-400 text-sm py-8">
+                当前筛选条件下暂无生词
+              </div>
+            )}
+            {filteredVocabularyGroups.map((entry) => (
+              <div key={entry.bookId} className="mb-6">
+                <h3 className={`text-xs font-bold uppercase tracking-wider mb-2 ${
+                  isDarkMode ? 'text-slate-400' : 'text-slate-500'
+                }`}>
+                  {entry.bookTitle} ({entry.items.length})
+                </h3>
+                <div className="space-y-2.5">
+                  {entry.items.map((item) => (
+                    <div key={item.id} className={`rounded-xl p-3 ${cardClass}`}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className={`text-base font-semibold break-words ${headingClass}`}>{item.term}</div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handlePronounceVocabulary(item.term)}
+                            className={`w-7 h-7 rounded-lg flex items-center justify-center ${btnClass}`}
+                          >
+                            <Volume2 size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteVocabularyEntry(entry.bookId, item.id)}
+                            className={`w-7 h-7 rounded-lg flex items-center justify-center ${enabledDangerIconButtonClass}`}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}

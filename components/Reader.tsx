@@ -14,10 +14,10 @@ import {
   MoreHorizontal,
   Pause,
   Play,
+  Plus,
   RotateCcw,
   Save,
   Trash2,
-  Type,
 } from 'lucide-react';
 import {
   AppSettings,
@@ -33,6 +33,7 @@ import {
   ReaderHighlightRange,
   ReaderPositionState,
   ReaderSessionSnapshot,
+  ReaderVocabularyEntry,
   TtsConfig,
   TtsPlaybackState,
 } from '../types';
@@ -101,6 +102,7 @@ interface RgbValue {
 type TextHighlightRange = ReaderHighlightRange;
 type TextAiUnderlineRange = ReaderAiUnderlineRange;
 type ReaderBookmark = ReaderBookmarkState;
+type ReaderVocabulary = ReaderVocabularyEntry;
 
 interface ParagraphMeta {
   text: string;
@@ -171,6 +173,8 @@ const SYSTEM_READER_FONT_ID = 'reader-font-system-default';
 const SERIF_READER_FONT_ID = 'reader-font-serif-default';
 const DEFAULT_READER_FONT_ID = SYSTEM_READER_FONT_ID;
 const BOOKMARK_NAME_MAX_LENGTH = 40;
+const VOCAB_TERM_MAX_LENGTH = 80;
+const VOCAB_TOAST_MS = 1800;
 const RESTORE_LAYOUT_MIN_STABLE_TEXT_ONLY_MS = 420;
 const RESTORE_LAYOUT_MIN_STABLE_WITH_MEDIA_MS = 900;
 const RESTORE_TARGET_STABLE_PASSES_TEXT_ONLY = 2;
@@ -413,6 +417,46 @@ const normalizeReaderBookmarks = (value: ReaderBookState['bookmarks']): ReaderBo
     .map((item) => normalizeReaderBookmark(item))
     .filter((item): item is ReaderBookmark => Boolean(item));
   return sortReaderBookmarks(normalized);
+};
+
+const createReaderVocabularyId = () => `reader-vocab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+const sanitizeVocabularyTerm = (raw: string) =>
+  raw
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s"'“”‘’`~!@#$%^&*()_+\-=\[\]{};:,.<>/?|\\]+/, '')
+    .replace(/[\s"'“”‘’`~!@#$%^&*()_+\-=\[\]{};:,.<>/?|\\]+$/, '')
+    .trim()
+    .slice(0, VOCAB_TERM_MAX_LENGTH);
+
+const normalizeVocabularyKey = (raw: string) => sanitizeVocabularyTerm(raw).toLowerCase();
+
+const normalizeReaderVocabularyEntry = (value: unknown): ReaderVocabulary | null => {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Partial<ReaderVocabulary>;
+  const term = sanitizeVocabularyTerm(typeof source.term === 'string' ? source.term : '');
+  if (!term) return null;
+  const normalizedTerm = normalizeVocabularyKey(source.normalizedTerm || term);
+  const id = typeof source.id === 'string' && source.id.trim() ? source.id.trim() : createReaderVocabularyId();
+  return {
+    id,
+    term,
+    normalizedTerm,
+  };
+};
+
+const normalizeReaderVocabularyEntries = (value: ReaderBookState['vocabularyEntries']): ReaderVocabulary[] => {
+  if (!Array.isArray(value)) return [];
+  const deduped: ReaderVocabulary[] = [];
+  const seen = new Set<string>();
+  value.forEach((item) => {
+    const normalized = normalizeReaderVocabularyEntry(item);
+    if (!normalized) return;
+    if (seen.has(normalized.normalizedTerm)) return;
+    seen.add(normalized.normalizedTerm);
+    deduped.push(normalized);
+  });
+  return deduped;
 };
 
 const getTotalTextLength = (chapters: Chapter[], fallbackText: string) => {
@@ -759,6 +803,8 @@ const Reader: React.FC<ReaderProps> = ({
   const [highlightRangesByChapter, setHighlightRangesByChapter] = useState<Record<string, TextHighlightRange[]>>({});
   const [aiUnderlineRangesByChapter, setAiUnderlineRangesByChapter] = useState<Record<string, TextAiUnderlineRange[]>>({});
   const [bookmarks, setBookmarks] = useState<ReaderBookmark[]>([]);
+  const [vocabularyEntries, setVocabularyEntries] = useState<ReaderVocabulary[]>([]);
+  const [vocabularyToast, setVocabularyToast] = useState<string | null>(null);
   const [selectedBookmarkId, setSelectedBookmarkId] = useState<string | null>(null);
   const [tocPanelTab, setTocPanelTab] = useState<TocPanelTab>('toc');
   const [highlightColorFilter, setHighlightColorFilter] = useState<string | null>(null);
@@ -807,6 +853,8 @@ const Reader: React.FC<ReaderProps> = ({
   const ttsControllerRef = useRef<TtsPlaybackController | null>(null);
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsErrorToastTimerRef = useRef<number | null>(null);
+  const vocabularyToastTimerRef = useRef<number | null>(null);
+  const lastReaderSelectionRef = useRef('');
   const ttsAutoStartModeRef = useRef<'chapter_start' | 'viewport'>('chapter_start');
   const ttsAutoStartTaskIdRef = useRef(0);
 
@@ -1515,7 +1563,8 @@ const Reader: React.FC<ReaderProps> = ({
 
     const now = Date.now();
     const isSameDirection = boundaryArmedDirectionRef.current === direction;
-    const isFresh = now - boundaryArmedAtRef.current <= 900;
+    // Give users more time to complete the second gesture at chapter boundaries.
+    const isFresh = now - boundaryArmedAtRef.current <= 1800;
     if (!isSameDirection || !isFresh) {
       primeBoundaryArm(direction);
       return false;
@@ -1631,13 +1680,99 @@ const Reader: React.FC<ReaderProps> = ({
     openFloatingPanel('highlighter');
   };
 
-  const toggleTypographyPanel = () => {
-    if (isTypographyPanelOpen) {
-      closeFloatingPanel();
-      return;
-    }
+  const openTypographyPanel = () => {
     openFloatingPanel('typography');
   };
+
+  const showVocabularyToastMessage = (message: string) => {
+    setVocabularyToast(message);
+    if (vocabularyToastTimerRef.current) {
+      window.clearTimeout(vocabularyToastTimerRef.current);
+    }
+    vocabularyToastTimerRef.current = window.setTimeout(() => {
+      setVocabularyToast(null);
+      vocabularyToastTimerRef.current = null;
+    }, VOCAB_TOAST_MS);
+  };
+
+  const isSelectionInsideReaderArticle = (selection: Selection | null) => {
+    if (!selection || selection.rangeCount === 0) return false;
+    const article = readerArticleRef.current;
+    if (!article) return false;
+    const range = selection.getRangeAt(0);
+    const container = range.commonAncestorContainer;
+    if (container.nodeType === Node.ELEMENT_NODE) {
+      return article.contains(container as Element);
+    }
+    return article.contains(container.parentElement);
+  };
+
+  const getSelectedVocabularyTerm = () => {
+    const selection = window.getSelection();
+    if (isSelectionInsideReaderArticle(selection)) {
+      const selected = sanitizeVocabularyTerm(selection?.toString() || '');
+      if (selected) {
+        lastReaderSelectionRef.current = selected;
+        return selected;
+      }
+    }
+    return sanitizeVocabularyTerm(lastReaderSelectionRef.current || '');
+  };
+
+  const handleAddVocabularyFromSelection = () => {
+    if (!activeBook?.id) return;
+    const term = getSelectedVocabularyTerm();
+    if (!term) {
+      showVocabularyToastMessage('请先选中一个单词或词组');
+      return;
+    }
+    if (term.length > VOCAB_TERM_MAX_LENGTH) {
+      showVocabularyToastMessage('选中文本太长，请只选词或短句');
+      return;
+    }
+
+    const normalizedTerm = normalizeVocabularyKey(term);
+    if (!normalizedTerm) {
+      showVocabularyToastMessage('选中的内容不适合加入生词本');
+      return;
+    }
+
+    let wasDuplicate = false;
+    setVocabularyEntries((prev) => {
+      const existing = prev.find((item) => item.normalizedTerm === normalizedTerm);
+      if (existing) {
+        wasDuplicate = true;
+        return [
+          { ...existing, term },
+          ...prev.filter((item) => item.id !== existing.id),
+        ];
+      }
+      return [
+        {
+          id: createReaderVocabularyId(),
+          term,
+          normalizedTerm,
+        },
+        ...prev,
+      ];
+    });
+    showVocabularyToastMessage(wasDuplicate ? '生词已更新到列表顶部' : '已添加到生词本');
+  };
+
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      if (isHighlightMode) return;
+      const selection = window.getSelection();
+      if (!isSelectionInsideReaderArticle(selection)) return;
+      const selected = sanitizeVocabularyTerm(selection?.toString() || '');
+      if (!selected) return;
+      lastReaderSelectionRef.current = selected;
+    };
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', handleSelectionChange);
+    };
+  }, [isHighlightMode, activeBook?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1650,6 +1785,8 @@ const Reader: React.FC<ReaderProps> = ({
         setHighlightRangesByChapter({});
         setAiUnderlineRangesByChapter({});
         setBookmarks([]);
+        setVocabularyEntries([]);
+        lastReaderSelectionRef.current = '';
         setSelectedBookmarkId(null);
         setTocPanelTab('toc');
         hideBookmarkModalImmediately();
@@ -1682,6 +1819,7 @@ const Reader: React.FC<ReaderProps> = ({
         const persistedRanges = readerState?.highlightsByChapter;
         const persistedPosition = normalizeReaderPosition(readerState?.readingPosition);
         const persistedBookmarks = normalizeReaderBookmarks(readerState?.bookmarks);
+        const persistedVocabularyEntries = normalizeReaderVocabularyEntries(readerState?.vocabularyEntries);
         const persistedTtsResume = readerState?.ttsResumePosition;
 
         if (cancelled) return;
@@ -1690,6 +1828,7 @@ const Reader: React.FC<ReaderProps> = ({
         setHighlightRangesByChapter(persistedRanges || {});
         setTtsResumePosition(persistedTtsResume);
         setBookmarks(persistedBookmarks);
+        setVocabularyEntries(persistedVocabularyEntries);
         hideBookmarkModalImmediately();
         if (persistedColor && isValidHexColor(persistedColor.toUpperCase())) {
           const normalized = persistedColor.toUpperCase();
@@ -1775,6 +1914,8 @@ const Reader: React.FC<ReaderProps> = ({
           setHighlightRangesByChapter({});
           setAiUnderlineRangesByChapter({});
           setBookmarks([]);
+          setVocabularyEntries([]);
+          lastReaderSelectionRef.current = '';
           setSelectedBookmarkId(null);
           setTocPanelTab('toc');
           hideBookmarkModalImmediately();
@@ -2001,6 +2142,10 @@ const Reader: React.FC<ReaderProps> = ({
       }
       if (highlighterClickTimerRef.current) {
         window.clearTimeout(highlighterClickTimerRef.current);
+      }
+      if (vocabularyToastTimerRef.current) {
+        window.clearTimeout(vocabularyToastTimerRef.current);
+        vocabularyToastTimerRef.current = null;
       }
       if (pendingRestoreRetryTimerRef.current) {
         window.clearTimeout(pendingRestoreRetryTimerRef.current);
@@ -2468,6 +2613,7 @@ const Reader: React.FC<ReaderProps> = ({
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
         bookmarks: sortedBookmarks,
+        vocabularyEntries,
         readingPosition: { ...readingPosition, updatedAt: Date.now() },
         visibleRatio,
         activeChapterRenderedText: readerTextForHighlighting,
@@ -2478,7 +2624,7 @@ const Reader: React.FC<ReaderProps> = ({
 
     window.addEventListener('pagehide', handlePageHide);
     return () => window.removeEventListener('pagehide', handlePageHide);
-  }, [activeBook?.id, highlightColor, highlightRangesByChapter, sortedBookmarks, readerTextForHighlighting, appSettings.readerMore.feature.readingContextIgnorePanelClip]);
+  }, [activeBook?.id, highlightColor, highlightRangesByChapter, sortedBookmarks, vocabularyEntries, readerTextForHighlighting, appSettings.readerMore.feature.readingContextIgnorePanelClip]);
 
   const highlightStorageKey = useMemo(() => {
     return selectedChapterIndex === null ? 'full' : `chapter-${selectedChapterIndex}`;
@@ -2546,6 +2692,7 @@ const Reader: React.FC<ReaderProps> = ({
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
         bookmarks: sortedBookmarks,
+        vocabularyEntries,
         readingPosition,
         visibleRatio,
         activeChapterRenderedText: readerTextForHighlighting,
@@ -2569,6 +2716,7 @@ const Reader: React.FC<ReaderProps> = ({
     highlightColor,
     highlightRangesByChapter,
     sortedBookmarks,
+    vocabularyEntries,
     isRestorePositionPending,
     areChapterImagesSettled,
     readerTextForHighlighting,
@@ -2832,8 +2980,10 @@ const Reader: React.FC<ReaderProps> = ({
   const handleReaderWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
     const { nearTop, nearBottom, noScrollableContent } = canTriggerBoundarySwitch(target);
-    const WHEEL_SWITCH_THRESHOLD_SCROLLABLE = 220;
-    const WHEEL_SWITCH_THRESHOLD_SHORT = 120;
+    const WHEEL_SWITCH_THRESHOLD_SCROLLABLE_NEXT = 220;
+    const WHEEL_SWITCH_THRESHOLD_SHORT_NEXT = 120;
+    const WHEEL_SWITCH_THRESHOLD_SCROLLABLE_PREV = 140;
+    const WHEEL_SWITCH_THRESHOLD_SHORT_PREV = 80;
 
     if (e.deltaY > 0) {
       if (nearBottom || noScrollableContent) {
@@ -2842,7 +2992,7 @@ const Reader: React.FC<ReaderProps> = ({
           return;
         }
 
-        const threshold = noScrollableContent ? WHEEL_SWITCH_THRESHOLD_SHORT : WHEEL_SWITCH_THRESHOLD_SCROLLABLE;
+        const threshold = noScrollableContent ? WHEEL_SWITCH_THRESHOLD_SHORT_NEXT : WHEEL_SWITCH_THRESHOLD_SCROLLABLE_NEXT;
         boundaryIntentDownRef.current += Math.abs(e.deltaY);
         boundaryIntentUpRef.current = 0;
         if (boundaryIntentDownRef.current >= threshold) {
@@ -2864,7 +3014,7 @@ const Reader: React.FC<ReaderProps> = ({
           return;
         }
 
-        const threshold = noScrollableContent ? WHEEL_SWITCH_THRESHOLD_SHORT : WHEEL_SWITCH_THRESHOLD_SCROLLABLE;
+        const threshold = noScrollableContent ? WHEEL_SWITCH_THRESHOLD_SHORT_PREV : WHEEL_SWITCH_THRESHOLD_SCROLLABLE_PREV;
         boundaryIntentUpRef.current += Math.abs(e.deltaY);
         boundaryIntentDownRef.current = 0;
         if (boundaryIntentUpRef.current >= threshold) {
@@ -2901,8 +3051,10 @@ const Reader: React.FC<ReaderProps> = ({
     if (Math.abs(deltaY) < 6) return;
 
     const { nearTop, nearBottom, noScrollableContent } = canTriggerBoundarySwitch(target);
-    const TOUCH_SWITCH_THRESHOLD_SCROLLABLE = 96;
-    const TOUCH_SWITCH_THRESHOLD_SHORT = 72;
+    const TOUCH_SWITCH_THRESHOLD_SCROLLABLE_NEXT = 96;
+    const TOUCH_SWITCH_THRESHOLD_SHORT_NEXT = 72;
+    const TOUCH_SWITCH_THRESHOLD_SCROLLABLE_PREV = 56;
+    const TOUCH_SWITCH_THRESHOLD_SHORT_PREV = 40;
 
     if (deltaY > 0 && (nearBottom || noScrollableContent)) {
       if (!canConsumeBoundaryIntent('next', noScrollableContent)) {
@@ -2910,7 +3062,7 @@ const Reader: React.FC<ReaderProps> = ({
         return;
       }
 
-      const threshold = noScrollableContent ? TOUCH_SWITCH_THRESHOLD_SHORT : TOUCH_SWITCH_THRESHOLD_SCROLLABLE;
+      const threshold = noScrollableContent ? TOUCH_SWITCH_THRESHOLD_SHORT_NEXT : TOUCH_SWITCH_THRESHOLD_SCROLLABLE_NEXT;
       boundaryIntentDownRef.current += Math.abs(deltaY);
       boundaryIntentUpRef.current = 0;
       if (boundaryIntentDownRef.current >= threshold) {
@@ -2928,7 +3080,7 @@ const Reader: React.FC<ReaderProps> = ({
         return;
       }
 
-      const threshold = noScrollableContent ? TOUCH_SWITCH_THRESHOLD_SHORT : TOUCH_SWITCH_THRESHOLD_SCROLLABLE;
+      const threshold = noScrollableContent ? TOUCH_SWITCH_THRESHOLD_SHORT_PREV : TOUCH_SWITCH_THRESHOLD_SCROLLABLE_PREV;
       boundaryIntentUpRef.current += Math.abs(deltaY);
       boundaryIntentDownRef.current = 0;
       if (boundaryIntentUpRef.current >= threshold) {
@@ -4172,6 +4324,7 @@ const Reader: React.FC<ReaderProps> = ({
         highlightColor,
         highlightsByChapter: highlightRangesByChapter,
         bookmarks: sortedBookmarks,
+        vocabularyEntries,
         readingPosition: sessionSnapshot.readingPosition,
         visibleRatio,
         activeChapterRenderedText: readerTextForHighlighting,
@@ -4351,6 +4504,23 @@ const Reader: React.FC<ReaderProps> = ({
           </div>
         </div>
       )}
+      {vocabularyToast && (
+        <div
+          className="fixed left-1/2 -translate-x-1/2 z-[109] pointer-events-none transition-all duration-300"
+          style={{ top: `${Math.max(0, safeAreaTop) + 86}px` }}
+        >
+          <div
+            className={`w-[min(92vw,520px)] px-5 py-3 rounded-[22px] flex items-center gap-3 border backdrop-blur-md ${
+              isDarkMode
+                ? 'bg-[#2d3748]/95 text-slate-200 border-slate-700/70 shadow-[8px_8px_16px_#232b39,-8px_-8px_16px_#374357]'
+                : 'bg-[#e0e5ec]/95 text-slate-600 border-white/20 shadow-[8px_8px_16px_rgba(0,0,0,0.1),-8px_-8px_16px_rgba(255,255,255,0.8)]'
+            }`}
+          >
+            <Plus size={18} className="text-rose-400 flex-shrink-0" />
+            <span className="font-semibold text-xs sm:text-sm leading-snug">{vocabularyToast}</span>
+          </div>
+        </div>
+      )}
 
       <div className={`flex items-center gap-3 p-4 z-10 transition-colors ${isDarkMode ? 'bg-[#2d3748]' : 'bg-[#e0e5ec]'}`}>
         <button onClick={handleBackClick} className="w-10 h-10 neu-btn rounded-full text-slate-500 hover:text-slate-700 shrink-0">
@@ -4384,12 +4554,12 @@ const Reader: React.FC<ReaderProps> = ({
             <Highlighter size={18} />
           </button>
           <button
-            onClick={toggleTypographyPanel}
-            className={`w-10 h-10 neu-btn reader-tool-toggle rounded-full ${isTypographyPanelOpen ? 'reader-tool-active' : ''}`}
+            onClick={handleAddVocabularyFromSelection}
+            className="w-10 h-10 neu-btn rounded-full text-slate-500 hover:text-rose-400"
             style={typographyToggleStyle}
-            title={'\u6587\u5b57\u6837\u5f0f'}
+            title={'\u6dfb\u52a0\u751f\u8bcd'}
           >
-            <Type size={18} />
+            <Plus size={18} />
           </button>
           <button
             onClick={() => setIsMoreSettingsOpen(true)}
@@ -5310,6 +5480,7 @@ const Reader: React.FC<ReaderProps> = ({
         onTtsResumeFromSaved={handleTtsResumeFromSaved}
         ttsExportChapterOptions={ttsExportChapterOptions}
         onTtsExportAudiobook={handleTtsExportAudiobook}
+        onOpenReaderTypography={openTypographyPanel}
       />
     </div>
   );

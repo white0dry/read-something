@@ -2332,6 +2332,7 @@ const App: React.FC = () => {
             onRequestImportBook={handleRequestImportBook}
             onUpdateBook={handleUpdateBook} 
             onDeleteBook={handleDeleteBook}
+            showNotification={showNotification}
             isDarkMode={isDarkMode} 
             userSignature={userSignature}
             onUpdateSignature={setUserSignature}
@@ -2466,4 +2467,3 @@ const App: React.FC = () => {
 };
 
 export default App;
-

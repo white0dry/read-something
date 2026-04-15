@@ -66,6 +66,12 @@ export interface ReaderBookmarkState {
   createdAt: number;
 }
 
+export interface ReaderVocabularyEntry {
+  id: string;
+  term: string;
+  normalizedTerm: string;
+}
+
 export interface ReaderSessionSnapshot {
   bookId: string;
   progress: number;
@@ -78,6 +84,7 @@ export interface ReaderBookState {
   highlightsByChapter?: Record<string, ReaderHighlightRange[]>;
   aiUnderlinesByChapter?: Record<string, ReaderAiUnderlineRange[]>;
   bookmarks?: ReaderBookmarkState[];
+  vocabularyEntries?: ReaderVocabularyEntry[];
   typographyStyle?: ReaderTypographyState;
   fontOptions?: ReaderFontState[];
   selectedFontId?: string;

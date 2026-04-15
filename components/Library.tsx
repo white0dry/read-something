@@ -17,6 +17,7 @@ interface LibraryProps {
   onRequestImportBook?: () => boolean;
   onUpdateBook: (book: Book) => void;
   onDeleteBook: (id: string) => void;
+  showNotification?: (message: string, type?: 'success' | 'error') => void;
   isDarkMode: boolean;
   userSignature: string;
   onUpdateSignature: (text: string) => void;
@@ -115,6 +116,7 @@ const Library: React.FC<LibraryProps> = ({
   onRequestImportBook,
   onUpdateBook,
   onDeleteBook,
+  showNotification,
   isDarkMode,
   userSignature,
   onUpdateSignature,
@@ -221,6 +223,7 @@ const Library: React.FC<LibraryProps> = ({
 
   // State for AI Regex Generation
   const [isGeneratingRegex, setIsGeneratingRegex] = useState(false);
+  const [isAutoSplittingChapters, setIsAutoSplittingChapters] = useState(false);
   const [clockNow, setClockNow] = useState(() => Date.now());
 
   const menuRef = useRef<HTMLDivElement>(null);
@@ -417,6 +420,307 @@ const Library: React.FC<LibraryProps> = ({
       chapterIndex++;
     }
     return chapters;
+  };
+
+  const normalizeTocLine = (raw: string) => {
+    return raw
+      .replace(/^[\s\u3000]+|[\s\u3000]+$/g, '')
+      .replace(/[·•●⋯….\-_=]{2,}\s*\d+\s*$/g, '')
+      .replace(/\s+\d+\s*$/g, '')
+      .replace(/[ \t\u3000]+/g, ' ')
+      .trim();
+  };
+
+  const normalizeTitleForMatch = (line: string) =>
+    line.toLowerCase().replace(/[\s\u3000:：·•⋯….,，。!?！？'"“”‘’()（）\[\]【】\-—_]/g, '');
+
+  const isLikelyChapterTitle = (line: string) => {
+    if (!line) return false;
+    if (line.length < 2 || line.length > 120) return false;
+    if (/^(目录|contents?)$/i.test(line)) return false;
+    if (/^(第[\s　]*[0-9一二三四五六七八九十百千万零〇两]+[\s　]*[章节卷回部篇集幕].*)$/.test(line)) return true;
+    if (/^(chapter|chap\.?)\s*[0-9ivxlcdm]+[\s:：.\-_].*$/i.test(line)) return true;
+    if (/^(序章|前言|楔子|引子|后记|尾声|番外|附录|终章)$/.test(line)) return true;
+    return false;
+  };
+
+  const isLikelyNarrativeLine = (line: string) => {
+    const trimmed = (line || '').trim();
+    if (!trimmed || trimmed.length < 20) return false;
+    if (!/[。！？.!?]/.test(trimmed)) return false;
+    if (/^[\d\s\-.•·●_=]+$/.test(trimmed)) return false;
+    return true;
+  };
+
+  const sanitizeTocTitles = (titles: string[]) => {
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const raw of titles) {
+      const cleaned = normalizeTocLine(raw).replace(/^["'“”‘’]|["'“”‘’]$/g, '').trim();
+      if (!cleaned) continue;
+      const key = normalizeTitleForMatch(cleaned);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      normalized.push(cleaned);
+      if (normalized.length >= 400) break;
+    }
+    return normalized;
+  };
+
+  const extractTocTitlesFromText = (text: string): string[] => {
+    const normalizedText = (text || '').replace(/\r\n?/g, '\n');
+    const lines = normalizedText.split('\n');
+    if (lines.length === 0) return [];
+
+    const tocAnchor = lines.findIndex((line, idx) => idx < 1200 && /(目录|contents?)/i.test(line.trim()));
+    const start = tocAnchor >= 0 ? tocAnchor + 1 : 0;
+    const end = Math.min(lines.length, start + 700);
+
+    const titles: string[] = [];
+    let emptyRun = 0;
+    for (let i = start; i < end; i += 1) {
+      const cleaned = normalizeTocLine(lines[i] || '');
+      if (!cleaned) {
+        emptyRun += 1;
+        if (titles.length >= 3 && emptyRun >= 3) break;
+        continue;
+      }
+      emptyRun = 0;
+      if (!isLikelyChapterTitle(cleaned)) continue;
+      titles.push(cleaned);
+    }
+    return sanitizeTocTitles(titles);
+  };
+
+  const findTocBodyStartLine = (lines: string[], titleKeys: string[]) => {
+    const tocAnchor = lines.findIndex((line, idx) => idx < 1200 && /(目录|contents?)/i.test(line.trim()));
+    if (tocAnchor < 0) return 0;
+
+    const keySet = new Set(titleKeys.filter(Boolean));
+    const tocProbeEnd = Math.min(lines.length, tocAnchor + 2200);
+    let lastTocLine = tocAnchor;
+
+    for (let i = tocAnchor + 1; i < tocProbeEnd; i += 1) {
+      const key = normalizeTitleForMatch(normalizeTocLine(lines[i] || ''));
+      if (key && keySet.has(key)) {
+        lastTocLine = i;
+        continue;
+      }
+
+      if (i - lastTocLine > 120 && isLikelyNarrativeLine(lines[i] || '')) {
+        return Math.max(lastTocLine + 1, i - 2);
+      }
+    }
+
+    for (let i = lastTocLine + 1; i < Math.min(lines.length, lastTocLine + 900); i += 1) {
+      const current = lines[i] || '';
+      const next = lines[i + 1] || '';
+      const key = normalizeTitleForMatch(normalizeTocLine(current));
+      if (key && keySet.has(key) && isLikelyNarrativeLine(next)) {
+        return i;
+      }
+      if (isLikelyNarrativeLine(current)) {
+        return Math.max(lastTocLine + 1, i - 1);
+      }
+    }
+
+    return lastTocLine + 1;
+  };
+
+  const splitChaptersByTocTitles = (text: string, titles: string[]): Chapter[] => {
+    const normalizedTitles = sanitizeTocTitles(titles);
+    if (normalizedTitles.length < 2) return [];
+
+    const normalizedText = (text || '').replace(/\r\n?/g, '\n');
+    const lines = normalizedText.split('\n');
+    if (lines.length === 0) return [];
+
+    const lineOffsets: number[] = new Array(lines.length).fill(0);
+    let offsetCursor = 0;
+    for (let i = 0; i < lines.length; i += 1) {
+      lineOffsets[i] = offsetCursor;
+      offsetCursor += lines[i].length + (i < lines.length - 1 ? 1 : 0);
+    }
+
+    const titleKeys = normalizedTitles.map((title) => normalizeTitleForMatch(title));
+    const startLine = findTocBodyStartLine(lines, titleKeys);
+    const hits: Array<{ title: string; offset: number }> = [];
+    let scanLine = Math.max(0, startLine);
+
+    for (let t = 0; t < normalizedTitles.length; t += 1) {
+      const wanted = titleKeys[t];
+      if (!wanted) continue;
+      let foundLine = -1;
+      for (let i = scanLine; i < lines.length; i += 1) {
+        const lineKey = normalizeTitleForMatch(normalizeTocLine(lines[i] || ''));
+        if (!lineKey) continue;
+        if (lineKey === wanted || (lineKey.length > 8 && (lineKey.includes(wanted) || wanted.includes(lineKey)))) {
+          foundLine = i;
+          break;
+        }
+      }
+      if (foundLine < 0) continue;
+      hits.push({
+        title: normalizeTocLine(lines[foundLine] || normalizedTitles[t]),
+        offset: lineOffsets[foundLine],
+      });
+      scanLine = foundLine + 1;
+    }
+
+    if (hits.length < 2) return [];
+
+    const chapters: Chapter[] = [];
+    if (hits[0].offset > 0) {
+      const preface = normalizedText.slice(0, hits[0].offset).trim();
+      if (preface) chapters.push({ title: '序章 / 前言', content: preface });
+    }
+
+    for (let i = 0; i < hits.length; i += 1) {
+      const start = hits[i].offset;
+      const end = i < hits.length - 1 ? hits[i + 1].offset : normalizedText.length;
+      if (end <= start) continue;
+      const content = normalizedText.slice(start, end).trim();
+      if (!content) continue;
+      chapters.push({ title: hits[i].title || `第${i + 1}章`, content });
+    }
+
+    return chapters;
+  };
+
+  const parseAiTitleList = (raw: string): string[] => {
+    const cleaned = (raw || '')
+      .replace(/```(?:json|javascript|js|text)?\n?([\s\S]*?)```/gi, '$1')
+      .trim();
+    if (!cleaned) return [];
+
+    try {
+      const parsed = JSON.parse(cleaned);
+      const titleList = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray((parsed as { titles?: unknown[] }).titles)
+        ? (parsed as { titles: unknown[] }).titles
+        : [];
+      if (titleList.length > 0) {
+        return titleList.map((item) => String(item || '').trim()).filter(Boolean);
+      }
+    } catch {
+      // Fall through to line parsing.
+    }
+
+    return cleaned
+      .split('\n')
+      .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)、．])\s*/, '').trim())
+      .filter(Boolean);
+  };
+
+  const requestAiTocTitles = async (text: string): Promise<string[]> => {
+    if (!apiConfig.apiKey) return [];
+
+    const normalizedText = (text || '').replace(/\r\n?/g, '\n');
+    if (!normalizedText) return [];
+    const lines = normalizedText.split('\n');
+    const tocAnchor = lines.findIndex((line, idx) => idx < 1500 && /(目录|contents?)/i.test((line || '').trim()));
+    const sample =
+      tocAnchor >= 0
+        ? lines.slice(Math.max(0, tocAnchor - 10), Math.min(lines.length, tocAnchor + 1000)).join('\n').slice(0, 70000)
+        : normalizedText.slice(0, 70000);
+
+    const endpoint = apiConfig.endpoint.replace(/\/+$/, '');
+    const systemPrompt = `你是电子书目录提取助手。请从文本中提取章节标题，按顺序返回 JSON。
+输出要求：
+1. 只输出 JSON 数组，或 {"titles": [...]}；
+2. 每项是章节标题字符串；
+3. 不要输出解释、注释、markdown；
+4. 如果识别不到章节目录，返回 []。`;
+
+    let aiRaw = '';
+    if (apiConfig.provider === 'GEMINI') {
+      const ai = new GoogleGenAI({ apiKey: apiConfig.apiKey });
+      const response = await ai.models.generateContent({
+        model: apiConfig.model || 'gemini-3-pro-preview',
+        contents: `${systemPrompt}\n\n文本：\n${sample}`,
+      });
+      aiRaw = response.text || '';
+    } else if (apiConfig.provider === 'CLAUDE') {
+      const response = await fetch(`${endpoint}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiConfig.apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: apiConfig.model,
+          max_tokens: 1000,
+          messages: [{ role: 'user', content: `${systemPrompt}\n\n文本：\n${sample}` }],
+        }),
+      });
+      if (!response.ok) throw new Error(`Claude API Error: ${response.status}`);
+      const data = await response.json();
+      aiRaw = data.content?.[0]?.text || '';
+    } else {
+      const response = await fetch(`${endpoint}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiConfig.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: apiConfig.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `文本：\n${sample}` },
+          ],
+          temperature: 0.1,
+        }),
+      });
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      const data = await response.json();
+      aiRaw = data.choices?.[0]?.message?.content || '';
+    }
+
+    return sanitizeTocTitles(parseAiTitleList(aiRaw));
+  };
+
+  const resolveTocAssistedChapters = async (
+    fullText: string,
+    options?: { notifyMissingApi?: boolean }
+  ): Promise<Chapter[] | null> => {
+    const localTitles = extractTocTitlesFromText(fullText);
+    const localSplit = splitChaptersByTocTitles(fullText, localTitles);
+    if (localSplit.length >= 2) return localSplit;
+
+    if (!apiConfig.apiKey) {
+      if (options?.notifyMissingApi) {
+        showNotification?.('请设置api', 'error');
+      }
+      return null;
+    }
+
+    try {
+      const aiTitles = await requestAiTocTitles(fullText);
+      const aiSplit = splitChaptersByTocTitles(fullText, aiTitles);
+      if (aiSplit.length >= 2) return aiSplit;
+    } catch (error) {
+      console.warn('AI chapter assist failed, fallback to original chapters:', error);
+    }
+
+    return null;
+  };
+
+  const maybeAssistEpubSplit = async (
+    parsed: Awaited<ReturnType<typeof parseImportedBookFile>>
+  ): Promise<Awaited<ReturnType<typeof parseImportedBookFile>>> => {
+    if (parsed.format !== 'epub') return parsed;
+    if ((parsed.chapters?.length || 0) > 1) return parsed;
+    if (!parsed.fullText || parsed.fullText.length < 6000) return parsed;
+
+    showNotification?.('正在分析目录……');
+    const assistedChapters = await resolveTocAssistedChapters(parsed.fullText, { notifyMissingApi: true });
+    if (assistedChapters && assistedChapters.length >= 2) {
+      return { ...parsed, chapters: assistedChapters };
+    }
+    return parsed;
   };
 
   const hasStructuredChapterBlocks = (chapters: Chapter[] | undefined) => {
@@ -864,8 +1168,10 @@ const Library: React.FC<LibraryProps> = ({
     }
 
     try {
+      showNotification?.('导入中……');
       const parsed = await parseImportedBookFile(file);
-      applyParsedBookImportResult(parsed, setTarget, isEditModalOpen);
+      const assistedParsed = await maybeAssistEpubSplit(parsed);
+      applyParsedBookImportResult(assistedParsed, setTarget, isEditModalOpen);
     } catch (error) {
       console.error('Failed to parse imported file:', error);
       const message = error instanceof Error ? error.message : 'Unable to parse the selected file.';
@@ -882,6 +1188,7 @@ const Library: React.FC<LibraryProps> = ({
     if (!targetBook || !sourceUrl) return;
 
     try {
+      showNotification?.('导入中……');
       const response = await fetch(sourceUrl);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -907,7 +1214,8 @@ const Library: React.FC<LibraryProps> = ({
       });
 
       const parsed = await parseImportedBookFile(remoteFile);
-      applyParsedBookImportResult(parsed, setTarget, isEditModalOpen);
+      const assistedParsed = await maybeAssistEpubSplit(parsed);
+      applyParsedBookImportResult(assistedParsed, setTarget, isEditModalOpen);
       setTxtFileUrlMode(false);
       setTempTxtUrl('');
     } catch (error) {
@@ -937,6 +1245,48 @@ const Library: React.FC<LibraryProps> = ({
       const currentTags = targetBook.tags || [];
       // @ts-ignore
       setTarget({ ...targetBook, tags: currentTags.filter(t => t !== tagToRemove) });
+    }
+  };
+
+  const handleManualAutoSplitChapters = async () => {
+    const targetBook = isEditModalOpen ? editingBook : importingBook;
+    const setTarget = isEditModalOpen ? setEditingBook : setImportingBook;
+    const fullText = targetBook?.fullText || '';
+
+    if (!fullText.trim()) {
+      openErrorModal('请先导入书籍正文内容');
+      return;
+    }
+    if (isAutoSplittingChapters) return;
+
+    setIsAutoSplittingChapters(true);
+    showNotification?.('正在分析目录……');
+    try {
+      const assistedChapters = await resolveTocAssistedChapters(fullText, { notifyMissingApi: true });
+      if (!assistedChapters || assistedChapters.length < 2) {
+        if (apiConfig.apiKey) {
+          showNotification?.('未识别到可用目录，保持原章节', 'error');
+        }
+        return;
+      }
+
+      // @ts-ignore
+      setTarget((prev) => ({
+        ...prev,
+        chapters: assistedChapters,
+        chapterRegex: '',
+      }));
+      if (isEditModalOpen) {
+        setIsEditStructuredChapterMode(true);
+      } else {
+        setIsImportStructuredChapterMode(true);
+      }
+      showNotification?.(`分章完成，共 ${assistedChapters.length} 章`, 'success');
+    } catch (error) {
+      console.error('Manual chapter split failed:', error);
+      showNotification?.('自动分章节失败，请稍后重试', 'error');
+    } finally {
+      setIsAutoSplittingChapters(false);
     }
   };
 
@@ -1272,6 +1622,27 @@ const Library: React.FC<LibraryProps> = ({
         </div>
 
         <div className="space-y-1">
+          <div className="flex justify-end items-center gap-2 mb-1">
+            <button
+              onClick={handleAutoGenerateRegex}
+              disabled={isGeneratingRegex || structuredChapterMode}
+              className={`px-4 py-2 rounded-xl flex items-center justify-center gap-1 text-xs font-bold text-rose-400 transition-all active:scale-95 whitespace-nowrap disabled:opacity-50 ${btnClass}`}
+              title={structuredChapterMode ? '已启用结构化章节模式' : '输入示例标题后点击自动生成'}
+            >
+              <Sparkles size={14} className={isGeneratingRegex ? 'animate-spin' : ''} />
+              {isGeneratingRegex ? '生成中...' : '自动生成'}
+            </button>
+            <button
+              onClick={handleManualAutoSplitChapters}
+              disabled={isAutoSplittingChapters || !(book.fullText || '').trim()}
+              className={`px-4 py-2 rounded-xl flex items-center justify-center gap-1 text-xs font-bold text-rose-400 transition-all active:scale-95 whitespace-nowrap disabled:opacity-50 ${btnClass}`}
+              title={(book.fullText || '').trim() ? '按目录标题尝试自动分章节' : '请先导入正文内容'}
+            >
+              <List size={14} className={isAutoSplittingChapters ? 'animate-spin' : ''} />
+              {isAutoSplittingChapters ? '分章中...' : '一键分章节'}
+            </button>
+          </div>
+
           <div className="flex justify-between items-center mb-1">
             <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1 flex items-center gap-1">
               章节匹配正则
@@ -1297,15 +1668,6 @@ const Library: React.FC<LibraryProps> = ({
               placeholder={structuredChapterMode ? '已启用内建章节结构' : '例如: ^第\\s*[0-9]+\\s*章'}
               className={`flex-1 px-4 py-3 text-sm rounded-xl outline-none ${inputClass} ${structuredChapterMode ? 'opacity-60 cursor-not-allowed' : ''}`}
             />
-            <button
-              onClick={handleAutoGenerateRegex}
-              disabled={isGeneratingRegex || structuredChapterMode}
-              className={`px-4 rounded-xl flex items-center justify-center gap-1 text-xs font-bold text-rose-400 transition-all active:scale-95 whitespace-nowrap disabled:opacity-50 ${btnClass}`}
-              title={structuredChapterMode ? '已启用结构化章节模式' : '输入示例标题后点击自动生成'}
-            >
-              <Sparkles size={14} className={isGeneratingRegex ? 'animate-spin' : ''} />
-              {isGeneratingRegex ? '生成中...' : '自动生成'}
-            </button>
           </div>
           <p className="text-[10px] text-slate-400 px-2 leading-tight mt-1">
             {structuredChapterMode
@@ -2118,9 +2480,3 @@ const Library: React.FC<LibraryProps> = ({
 };
 
 export default Library;
-
-
-
-
-
-
