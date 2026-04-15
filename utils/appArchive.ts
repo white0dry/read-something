@@ -22,9 +22,15 @@ import {
   getTtsAudioStorageUsageBytes,
   restoreTtsAudioFromArchive,
 } from './ttsAudioStorage';
+import {
+  exportVocabularyLexiconForArchive,
+  getVocabularyLexiconUsageBytes,
+  restoreVocabularyLexiconFromArchive,
+} from './vocabularyLexiconStorage';
 
 export type StorageCategoryKey =
   | 'readingText'
+  | 'vocabulary'
   | 'studyHub'
   | 'chatHistory'
   | 'ttsAudio'
@@ -42,6 +48,7 @@ const LEGACY_CHAT_HISTORY_STORAGE_KEY = 'app_reader_chat_history_v1';
 
 export const STORAGE_CATEGORY_ORDER: StorageCategoryKey[] = [
   'readingText',
+  'vocabulary',
   'studyHub',
   'chatHistory',
   'ttsAudio',
@@ -54,6 +61,7 @@ export const STORAGE_CATEGORY_ORDER: StorageCategoryKey[] = [
 
 export const STORAGE_CATEGORY_LABELS: Record<StorageCategoryKey, string> = {
   readingText: '阅读文本信息',
+  vocabulary: '生词词库',
   studyHub: '共读集数据',
   chatHistory: '聊天记录',
   ttsAudio: 'TTS 朗读音频',
@@ -66,6 +74,7 @@ export const STORAGE_CATEGORY_LABELS: Record<StorageCategoryKey, string> = {
 
 export const STORAGE_CATEGORY_COLORS: Record<StorageCategoryKey, string> = {
   readingText: '#797D62',
+  vocabulary: '#6C8A6E',
   studyHub: '#997B66',
   chatHistory: '#9B9B7A',
   ttsAudio: '#7BA7BC',
@@ -120,6 +129,12 @@ const classifyLocalStorageKey = (key: string): StorageCategoryKey => {
     || key === 'app_tts_presets'
   ) {
     return 'appearancePresets';
+  }
+  if (
+    key === 'app_vocabulary_warn_dismissed_at'
+    || key === 'app_vocabulary_warn_last_seen'
+  ) {
+    return 'vocabulary';
   }
   if (
     key === 'app_daily_reading_ms'
@@ -239,6 +254,12 @@ export const analyzeAppStorageUsage = async (): Promise<StorageAnalysisResult> =
   categoryBytes.chatHistory += chatStoreUsage;
   const studyHubUsage = await getStudyHubStorageUsageBytes();
   categoryBytes.studyHub += Math.max(0, Number(studyHubUsage.totalBytes || 0));
+  try {
+    const vocabularyUsage = await getVocabularyLexiconUsageBytes();
+    categoryBytes.vocabulary += Math.max(0, vocabularyUsage);
+  } catch {
+    // Ignore vocabulary usage failures
+  }
 
   try {
     const ttsAudioUsage = await getTtsAudioStorageUsageBytes();
@@ -293,6 +314,7 @@ export interface AppArchivePayload {
       quizSessions: QuizSession[];
       favoriteQuotes: FavoriteQuote[];
     };
+    vocabularyLexicon?: unknown[];
     ttsAudio?: Record<string, { audio: string; meta: Record<string, unknown> }>;
   };
 }
@@ -317,6 +339,7 @@ export const createAppArchivePayload = async (): Promise<AppArchivePayload> => {
     quizSessions: Array.isArray(studyHubRaw?.quizSessions) ? studyHubRaw.quizSessions : [],
     favoriteQuotes: Array.isArray(studyHubRaw?.favoriteQuotes) ? studyHubRaw.favoriteQuotes : [],
   };
+  const vocabularyLexicon = await exportVocabularyLexiconForArchive();
   let ttsAudio: Record<string, { audio: string; meta: Record<string, unknown> }> = {};
   try {
     ttsAudio = await exportTtsAudioForArchive() as Record<string, { audio: string; meta: Record<string, unknown> }>;
@@ -338,6 +361,7 @@ export const createAppArchivePayload = async (): Promise<AppArchivePayload> => {
       chatStore,
       ragIndex,
       studyHub,
+      vocabularyLexicon,
       ttsAudio,
     },
   };
@@ -375,6 +399,9 @@ const normalizeArchivePayload = (raw: unknown): AppArchivePayload => {
   const chatStoreSource = isObjectRecord(indexedDbSource.chatStore) ? indexedDbSource.chatStore : {};
   const ragIndexSource = isObjectRecord(indexedDbSource.ragIndex) ? indexedDbSource.ragIndex : {};
   const studyHubSource = isObjectRecord(indexedDbSource.studyHub) ? indexedDbSource.studyHub : {};
+  const vocabularyLexiconSource = Array.isArray(indexedDbSource.vocabularyLexicon)
+    ? indexedDbSource.vocabularyLexicon
+    : [];
 
   const bookContents: Record<string, StoredBookContent> = {};
   Object.entries(bookContentsSource).forEach(([bookId, payload]) => {
@@ -445,6 +472,7 @@ const normalizeArchivePayload = (raw: unknown): AppArchivePayload => {
       chatStore,
       ragIndex,
       studyHub,
+      vocabularyLexicon: vocabularyLexiconSource,
       ttsAudio,
     },
   };
@@ -476,6 +504,11 @@ export const restoreAppArchivePayload = async (raw: unknown): Promise<AppArchive
     await restoreRagIndex(archive.indexedDb.ragIndex);
   }
   await restoreStudyHubFromArchive(archive.indexedDb.studyHub);
+  try {
+    await restoreVocabularyLexiconFromArchive(archive.indexedDb.vocabularyLexicon);
+  } catch {
+    // ignore vocabulary lexicon restore failures
+  }
   if (archive.indexedDb.ttsAudio && Object.keys(archive.indexedDb.ttsAudio).length > 0) {
     try {
       await restoreTtsAudioFromArchive(archive.indexedDb.ttsAudio);
@@ -514,5 +547,4 @@ export const formatBytes = (bytes: number) => {
   const fixed = unitIndex === 0 ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2;
   return `${value.toFixed(fixed)} ${units[unitIndex]}`;
 };
-
 

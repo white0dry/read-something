@@ -8,7 +8,6 @@ import ResolvedImage from './ResolvedImage';
 import { deleteImageByRef, saveImageFile } from '../utils/imageStorage';
 import { getBookContent, getBookTextLength } from '../utils/bookContentStorage';
 import type { ParsedBookImportResult } from '../utils/bookImportParser';
-import { isBuiltInBook, isTutorialUnread } from '../utils/builtInTutorialBook';
 
 interface LibraryProps {
   books: Book[];
@@ -21,6 +20,8 @@ interface LibraryProps {
   isDarkMode: boolean;
   userSignature: string;
   onUpdateSignature: (text: string) => void;
+  activeSignatureUpdateEnabled: boolean;
+  signatureUpdateProbability: number;
   personas: Persona[];
   activePersonaId: string | null;
   onSelectPersona: (id: string | null) => void;
@@ -52,6 +53,30 @@ type ViewMode = 'grid' | 'list';
 const SUPPORTED_BOOK_IMPORT_SUFFIXES = ['txt', 'docx', 'docm', 'dotx', 'dotm', 'pdf', 'epub', 'mobi'] as const;
 const BOOK_IMPORT_ACCEPT = SUPPORTED_BOOK_IMPORT_SUFFIXES.map((suffix) => `.${suffix}`).join(',');
 const SUPPORTED_IMPORT_SUFFIX_SET = new Set(SUPPORTED_BOOK_IMPORT_SUFFIXES.map((suffix) => suffix.toLowerCase()));
+const BUILT_IN_TUTORIAL_BOOK_ID = '__built_in_tutorial__';
+const TUTORIAL_UNREAD_KEY = '__built_in_tutorial_unread__';
+const SIGNATURE_AI_LAST_SUCCESS_DATE_KEY = 'lib_signature_ai_last_success_date';
+const SIGNATURE_AI_DRAW_STATE_KEY = 'lib_signature_ai_draw_state_v1';
+const SIGNATURE_AI_UPDATE_PROMPT_KEY = 'app_signature_ai_update_prompt_v1';
+const SIGNATURE_AI_MAX_CHARS = 120;
+const SIGNATURE_AUTO_DRAW_SLOTS = [
+  { hour: 9, minute: 0 },
+  { hour: 14, minute: 0 },
+  { hour: 21, minute: 0 },
+] as const;
+
+interface SignatureAutoDrawState {
+  dateKey: string;
+  attemptedSlotIndexes: number[];
+}
+const isBuiltInTutorialBook = (bookId: string) => bookId === BUILT_IN_TUTORIAL_BOOK_ID;
+const isTutorialUnread = (): boolean => {
+  try {
+    return localStorage.getItem(TUTORIAL_UNREAD_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
 
 const getSupportedSuffixFromName = (name: string) => {
   const match = name.toLowerCase().match(/\.([a-z0-9]+)$/);
@@ -111,6 +136,11 @@ const ensureFileNameWithSuffix = (sourceName: string, suffix: string) => {
   return getSupportedSuffixFromName(baseName) ? baseName : `${baseName}.${suffix}`;
 };
 
+const getLocalDateKey = (now = new Date()) => {
+  const pad = (value: number) => value.toString().padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+};
+
 const Library: React.FC<LibraryProps> = ({ 
   books,
   onOpenBook, 
@@ -122,6 +152,8 @@ const Library: React.FC<LibraryProps> = ({
   isDarkMode,
   userSignature,
   onUpdateSignature,
+  activeSignatureUpdateEnabled,
+  signatureUpdateProbability,
   personas,
   activePersonaId,
   onSelectPersona,
@@ -147,8 +179,10 @@ const Library: React.FC<LibraryProps> = ({
   }`;
 
   // State for signature editing
+  const [isSignatureNoteOpen, setIsSignatureNoteOpen] = useState(false);
   const [isEditingSig, setIsEditingSig] = useState(false);
   const [tempSig, setTempSig] = useState(userSignature);
+  const [isGeneratingAiSignature, setIsGeneratingAiSignature] = useState(false);
   
   // State for menus
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
@@ -228,6 +262,8 @@ const Library: React.FC<LibraryProps> = ({
   const [isAutoSplittingChapters, setIsAutoSplittingChapters] = useState(false);
   const [clockNow, setClockNow] = useState(() => Date.now());
 
+  const signatureAutoTriggerTimerRef = useRef<number | null>(null);
+
   const menuRef = useRef<HTMLDivElement>(null);
   const charMenuRef = useRef<HTMLDivElement>(null);
   const filterRef = useRef<HTMLDivElement>(null);
@@ -239,7 +275,105 @@ const Library: React.FC<LibraryProps> = ({
   const errorModalCloseTimerRef = useRef<number | null>(null);
 
   // Sync prop changes
-  useEffect(() => setTempSig(userSignature), [userSignature]);
+  useEffect(() => {
+    if (!isEditingSig) setTempSig(userSignature);
+  }, [userSignature, isEditingSig]);
+  const clearSignatureAutoTriggerTimer = () => {
+    if (signatureAutoTriggerTimerRef.current) {
+      window.clearTimeout(signatureAutoTriggerTimerRef.current);
+      signatureAutoTriggerTimerRef.current = null;
+    }
+  };
+
+  const normalizeSignatureDrawState = (raw: unknown, now = new Date()): SignatureAutoDrawState => {
+    const today = getLocalDateKey(now);
+    if (!raw || typeof raw !== 'object') {
+      return { dateKey: today, attemptedSlotIndexes: [] };
+    }
+    const source = raw as Partial<SignatureAutoDrawState>;
+    const dateKey = typeof source.dateKey === 'string' ? source.dateKey : '';
+    if (dateKey !== today) {
+      return { dateKey: today, attemptedSlotIndexes: [] };
+    }
+    const attemptedSlotIndexes = Array.isArray(source.attemptedSlotIndexes)
+      ? Array.from(
+          new Set(
+            source.attemptedSlotIndexes
+              .map((value) => Number(value))
+              .filter((value) => Number.isInteger(value) && value >= 0 && value < SIGNATURE_AUTO_DRAW_SLOTS.length)
+          )
+        )
+      : [];
+    return { dateKey: today, attemptedSlotIndexes };
+  };
+
+  const readSignatureDrawState = (now = new Date()): SignatureAutoDrawState => {
+    try {
+      const raw = localStorage.getItem(SIGNATURE_AI_DRAW_STATE_KEY);
+      return normalizeSignatureDrawState(raw ? JSON.parse(raw) : null, now);
+    } catch {
+      return normalizeSignatureDrawState(null, now);
+    }
+  };
+
+  const saveSignatureDrawState = (state: SignatureAutoDrawState) => {
+    try {
+      localStorage.setItem(SIGNATURE_AI_DRAW_STATE_KEY, JSON.stringify(state));
+    } catch {
+      // Ignore localStorage write failures.
+    }
+  };
+
+  const resolveDueSignatureDrawSlotIndex = (state: SignatureAutoDrawState, now = new Date()) => {
+    const attempted = new Set(state.attemptedSlotIndexes);
+    for (let index = 0; index < SIGNATURE_AUTO_DRAW_SLOTS.length; index += 1) {
+      if (attempted.has(index)) continue;
+      const slot = SIGNATURE_AUTO_DRAW_SLOTS[index];
+      const slotTime = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+        slot.hour,
+        slot.minute,
+        0,
+        0
+      );
+      if (now.getTime() >= slotTime.getTime()) {
+        return index;
+      }
+    }
+    return null;
+  };
+
+  const resolveNextSignatureDrawAt = (state: SignatureAutoDrawState, now = new Date()) => {
+    const attempted = new Set(state.attemptedSlotIndexes);
+    for (let index = 0; index < SIGNATURE_AUTO_DRAW_SLOTS.length; index += 1) {
+      if (attempted.has(index)) continue;
+      const slot = SIGNATURE_AUTO_DRAW_SLOTS[index];
+      const slotTime = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+        slot.hour,
+        slot.minute,
+        0,
+        0
+      );
+      if (now.getTime() < slotTime.getTime()) {
+        return slotTime.getTime();
+      }
+    }
+    const tomorrowFirstSlot = SIGNATURE_AUTO_DRAW_SLOTS[0];
+    return new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() + 1,
+      tomorrowFirstSlot.hour,
+      tomorrowFirstSlot.minute,
+      0,
+      0
+    ).getTime();
+  };
 
   // Sync RAG state when editingBook changes
   useEffect(() => {
@@ -276,6 +410,7 @@ const Library: React.FC<LibraryProps> = ({
       if (editModalCloseTimerRef.current) window.clearTimeout(editModalCloseTimerRef.current);
       if (importModalCloseTimerRef.current) window.clearTimeout(importModalCloseTimerRef.current);
       if (errorModalCloseTimerRef.current) window.clearTimeout(errorModalCloseTimerRef.current);
+      clearSignatureAutoTriggerTimer();
     };
   }, []);
 
@@ -838,17 +973,39 @@ const Library: React.FC<LibraryProps> = ({
     editCharCount,
   ]);
 
+  const openSignatureNote = () => {
+    setTempSig(userSignature);
+    setIsEditingSig(false);
+    setIsSignatureNoteOpen(true);
+  };
+
+  const closeSignatureNote = () => {
+    setIsSignatureNoteOpen(false);
+    setIsEditingSig(false);
+    setTempSig(userSignature);
+  };
 
   const handleSaveSig = () => {
-    onUpdateSignature(tempSig);
+    const next = Array.from(tempSig).slice(0, SIGNATURE_AI_MAX_CHARS).join('');
+    onUpdateSignature(next);
+    setTempSig(next);
     setIsEditingSig(false);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') handleSaveSig();
+  const handleCancelSigEdit = () => {
+    setTempSig(userSignature);
+    setIsEditingSig(false);
+  };
+
+  const handleSignatureEditKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      handleSaveSig();
+      return;
+    }
     if (e.key === 'Escape') {
-      setTempSig(userSignature);
-      setIsEditingSig(false);
+      e.preventDefault();
+      handleCancelSigEdit();
     }
   };
 
@@ -935,7 +1092,7 @@ const Library: React.FC<LibraryProps> = ({
   // Open Edit
   const openEditModal = (e: React.MouseEvent, book: Book) => {
     e.stopPropagation();
-    if (isBuiltInBook(book.id)) return;
+    if (isBuiltInTutorialBook(book.id)) return;
     clearSessionGeneratedImageRefs(true);
     if (editModalCloseTimerRef.current) {
       window.clearTimeout(editModalCloseTimerRef.current);
@@ -1436,6 +1593,203 @@ const Library: React.FC<LibraryProps> = ({
   const defaultCharImg = 'https://i.postimg.cc/ZY3jJTK4/56163534-p0.jpg';
   const charDisplayName = activeCharacter ? (activeCharacter.nickname || activeCharacter.name) : 'Char';
 
+  const sanitizeAiSignatureText = (raw: string) => {
+    let cleaned = (raw || '').trim();
+    if (!cleaned) return '';
+
+    cleaned = cleaned.replace(/```(?:json|text|markdown)?\s*([\s\S]*?)```/gi, '$1').trim();
+
+    if (cleaned.startsWith('{') || cleaned.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(cleaned);
+        if (typeof parsed === 'string') cleaned = parsed;
+        else if (Array.isArray(parsed)) cleaned = String(parsed.find((item) => typeof item === 'string') || '');
+        else if (parsed && typeof parsed === 'object') {
+          const obj = parsed as Record<string, unknown>;
+          cleaned = String(
+            obj.signature ?? obj.text ?? obj.content ?? obj.message ?? obj.result ?? ''
+          );
+        }
+      } catch {
+        // Keep raw text fallback.
+      }
+    }
+
+    cleaned = cleaned
+      .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)[0] || '';
+
+    cleaned = cleaned.replace(/^(今日签名|签名|文案|留言|一句话|推荐语)\s*[:：\-]\s*/i, '').trim();
+
+    const chars = Array.from(cleaned);
+    if (chars.length > SIGNATURE_AI_MAX_CHARS) {
+      cleaned = chars.slice(0, SIGNATURE_AI_MAX_CHARS).join('');
+    }
+    return cleaned;
+  };
+
+  const requestAiSignatureSuggestion = async (systemPrompt: string, userPrompt: string): Promise<string> => {
+    const endpoint = apiConfig.endpoint.replace(/\/+$/, '');
+    if (apiConfig.provider === 'GEMINI') {
+      const ai = new GoogleGenAI({ apiKey: apiConfig.apiKey });
+      const response = await ai.models.generateContent({
+        model: apiConfig.model || 'gemini-3-pro-preview',
+        contents: `${systemPrompt}\n\n${userPrompt}`,
+      });
+      return response.text || '';
+    }
+
+    if (apiConfig.provider === 'CLAUDE') {
+      const response = await fetch(`${endpoint}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiConfig.apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: apiConfig.model,
+          max_tokens: 180,
+          messages: [{ role: 'user', content: `${systemPrompt}\n\n${userPrompt}` }],
+        }),
+      });
+      if (!response.ok) throw new Error(`Claude API Error: ${response.status}`);
+      const data = await response.json();
+      return data.content?.[0]?.text || '';
+    }
+
+    const response = await fetch(`${endpoint}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiConfig.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: apiConfig.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.9,
+      }),
+    });
+    if (!response.ok) throw new Error(`API Error: ${response.status}`);
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || '';
+  };
+
+  const updateSignatureByAi = async () => {
+    if (isGeneratingAiSignature) return false;
+    if (!apiConfig.apiKey) {
+      return false;
+    }
+
+    setIsGeneratingAiSignature(true);
+    try {
+      const systemPrompt = `你是阅读应用里的签名文案助手。
+请写一句中文短句，适合作为主页签名。
+要求：
+1. 只能输出一句话，不要解释，不要 markdown；
+2. 语气自然、温柔、真诚，不鸡汤、不说教；
+3. 长度控制在 ${SIGNATURE_AI_MAX_CHARS} 字以内；
+4. 内容可来自读书感悟、心情、内心话、感慨、摘抄风格。`;
+      const userPrompt = `请生成今日签名。可参考：
+- 当前签名：${userSignature || '（空）'}
+- 用户昵称：${userDisplayName}
+- 角色昵称：${charDisplayName}`;
+
+      const raw = await requestAiSignatureSuggestion(systemPrompt, userPrompt);
+      const nextSignature = sanitizeAiSignatureText(raw);
+      if (!nextSignature) throw new Error('empty_signature');
+
+      onUpdateSignature(nextSignature);
+      try {
+        localStorage.setItem(SIGNATURE_AI_LAST_SUCCESS_DATE_KEY, getLocalDateKey());
+        localStorage.setItem(
+          SIGNATURE_AI_UPDATE_PROMPT_KEY,
+          JSON.stringify({
+            updatedAt: Date.now(),
+            content: nextSignature,
+            characterName: charDisplayName,
+          })
+        );
+      } catch {
+        // Ignore localStorage write failures.
+      }
+      showNotification?.('AI 便签已更新', 'success');
+      return true;
+    } catch (error) {
+      console.error('AI signature update failed:', error);
+      return false;
+    } finally {
+      setIsGeneratingAiSignature(false);
+    }
+  };
+
+  useEffect(() => {
+    clearSignatureAutoTriggerTimer();
+    if (isEditingSig || !apiConfig.apiKey || isGeneratingAiSignature || !activeSignatureUpdateEnabled) {
+      return;
+    }
+
+    const normalizedProbability = Math.max(0, Math.min(100, Math.round(signatureUpdateProbability)));
+
+    const scheduleNextRun = (delayMs: number) => {
+      clearSignatureAutoTriggerTimer();
+      signatureAutoTriggerTimerRef.current = window.setTimeout(() => {
+        void runSignatureAutoDrawScheduler();
+      }, Math.max(1000, delayMs));
+    };
+
+    const runSignatureAutoDrawScheduler = async () => {
+      if (document.visibilityState !== 'visible') {
+        scheduleNextRun(60 * 1000);
+        return;
+      }
+
+      const now = new Date();
+      const state = readSignatureDrawState(now);
+      const dueSlotIndex = resolveDueSignatureDrawSlotIndex(state, now);
+
+      if (dueSlotIndex !== null) {
+        const nextState: SignatureAutoDrawState = {
+          dateKey: state.dateKey,
+          attemptedSlotIndexes: Array.from(new Set([...state.attemptedSlotIndexes, dueSlotIndex])),
+        };
+        saveSignatureDrawState(nextState);
+
+        if (Math.random() * 100 < normalizedProbability) {
+          await updateSignatureByAi();
+        }
+
+        scheduleNextRun(1500);
+        return;
+      }
+
+      const nextAt = resolveNextSignatureDrawAt(state, now);
+      scheduleNextRun(nextAt - now.getTime());
+    };
+
+    void runSignatureAutoDrawScheduler();
+
+    return () => {
+      clearSignatureAutoTriggerTimer();
+    };
+  }, [
+    isEditingSig,
+    activeSignatureUpdateEnabled,
+    signatureUpdateProbability,
+    apiConfig.apiKey,
+    apiConfig.provider,
+    apiConfig.endpoint,
+    apiConfig.model,
+    userDisplayName,
+    charDisplayName,
+    isGeneratingAiSignature,
+  ]);
+
   const renderAvatar = (imageUrl: string | undefined, isDefaultUser: boolean, isDefaultChar: boolean, type: 'USER' | 'CHAR') => {
     if (imageUrl) {
       return <ResolvedImage src={imageUrl} alt="Avatar" className="w-full h-full object-cover" />;
@@ -1828,29 +2182,16 @@ const Library: React.FC<LibraryProps> = ({
             <h1 className={`text-2xl font-bold ${headingClass}`}>书架</h1>
             
             {/* Editable Signature */}
-            <div className="mt-1 h-8 flex items-center">
-              {isEditingSig ? (
-                 <div className="flex items-center gap-2 w-full max-w-[240px]">
-                   <input 
-                     autoFocus
-                     type="text" 
-                     value={tempSig}
-                     onChange={(e) => setTempSig(e.target.value)}
-                     onBlur={handleSaveSig}
-                     onKeyDown={handleKeyDown}
-                     className={`w-full min-w-0 text-sm px-2 py-1 rounded-lg outline-none ${inputClass}`}
-                   />
-                   <button onMouseDown={handleSaveSig} className="text-emerald-500 flex-shrink-0"><Check size={16} /></button>
-                 </div>
-              ) : (
-                 <div 
-                   onClick={() => setIsEditingSig(true)}
-                   className={`group flex items-center justify-between gap-2 cursor-pointer py-1 -ml-1 px-1 rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 w-full max-w-[240px]`}
-                 >
-                   <p className={`text-sm ${subTextClass} truncate mr-2`}>{userSignature || <span className="opacity-50 italic">点击编辑签名...</span>}</p>
-                   <Edit2 size={12} className="opacity-0 group-hover:opacity-50 text-slate-400 flex-shrink-0" />
-                 </div>
-              )}
+            <div className="mt-1 min-h-8 flex items-center">
+              <div
+                onClick={openSignatureNote}
+                className={`group flex items-center justify-between gap-2 cursor-pointer py-1 -ml-1 px-1 rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 w-full max-w-[240px]`}
+              >
+                <p className={`flex-1 min-w-0 mr-2 text-sm ${subTextClass} truncate`}>
+                  {userSignature || <span className="opacity-50 italic">点击查看签名...</span>}
+                </p>
+                <Edit2 size={12} className="opacity-0 group-hover:opacity-50 text-slate-400 flex-shrink-0" />
+              </div>
             </div>
           </div>
 
@@ -1995,7 +2336,7 @@ const Library: React.FC<LibraryProps> = ({
                 ) : (
                     <DefaultBookCover />
                 )}
-                {isBuiltInBook(recentBook.id) && isTutorialUnread() && (
+                {isBuiltInTutorialBook(recentBook.id) && isTutorialUnread() && (
                   <span className="absolute top-1.5 right-1.5 w-3 h-3 rounded-full shadow-md animate-pulse z-10" style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }} />
                 )}
               </div>
@@ -2017,7 +2358,7 @@ const Library: React.FC<LibraryProps> = ({
               </div>
               
               {/* Edit Button for Recent Book */}
-              {!isBuiltInBook(recentBook.id) && (
+              {!isBuiltInTutorialBook(recentBook.id) && (
               <button
                 onClick={(e) => openEditModal(e, recentBook)}
                 className={`absolute top-4 right-4 ${compactEditButtonClass}`}
@@ -2165,11 +2506,11 @@ const Library: React.FC<LibraryProps> = ({
                        </div>
                      )}
 
-                     {isBuiltInBook(book.id) && isTutorialUnread() && (
+                     {isBuiltInTutorialBook(book.id) && isTutorialUnread() && (
                        <span className="absolute top-2.5 right-2.5 w-3 h-3 rounded-full shadow-md animate-pulse" style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }} />
                      )}
 
-                     {!isBuiltInBook(book.id) && (
+                     {!isBuiltInTutorialBook(book.id) && (
                      <button
                         onClick={(e) => openEditModal(e, book)}
                         className="absolute top-2 right-2 w-7 h-7 bg-black/40 hover:bg-rose-500 text-white rounded-full flex items-center justify-center backdrop-blur-sm transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
@@ -2210,7 +2551,7 @@ const Library: React.FC<LibraryProps> = ({
                        ) : (
                           <div className="absolute inset-0"><DefaultBookCover /></div>
                        )}
-                       {isBuiltInBook(book.id) && isTutorialUnread() && (
+                       {isBuiltInTutorialBook(book.id) && isTutorialUnread() && (
                          <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full shadow-md animate-pulse z-10" style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }} />
                        )}
                     </div>
@@ -2252,7 +2593,7 @@ const Library: React.FC<LibraryProps> = ({
                     </div>
 
                     {/* Actions */}
-                    {!isBuiltInBook(book.id) && (
+                    {!isBuiltInTutorialBook(book.id) && (
                     <div className="flex flex-col justify-center">
                         <button
                             onClick={(e) => openEditModal(e, book)}
@@ -2267,6 +2608,97 @@ const Library: React.FC<LibraryProps> = ({
            </div>
         )}
       </div>
+
+      {/* Signature Note Modal */}
+      {isSignatureNoteOpen && (
+        <ModalPortal>
+          <div
+            className="fixed inset-0 z-[105] flex items-center justify-center p-6 pb-28 bg-black/35 backdrop-blur-sm app-fade-enter"
+            onClick={closeSignatureNote}
+          >
+            <div
+              className={`relative w-full max-w-sm rounded-2xl border shadow-2xl p-5 ${
+                isDarkMode ? 'bg-[#3a3628] border-amber-200/20 text-amber-50' : 'bg-[#fff6d8] border-amber-200 text-slate-700'
+              }`}
+              style={{
+                backgroundImage: isDarkMode
+                  ? 'repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0px, rgba(255,255,255,0.04) 1px, transparent 1px, transparent 28px)'
+                  : 'repeating-linear-gradient(0deg, rgba(180,140,60,0.10) 0px, rgba(180,140,60,0.10) 1px, transparent 1px, transparent 28px)',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className={`absolute -top-2 left-6 w-12 h-3 rounded-sm rotate-[-8deg] ${isDarkMode ? 'bg-amber-300/50' : 'bg-amber-200/90'} shadow`} />
+              <div className={`absolute -top-1 right-10 w-10 h-3 rounded-sm rotate-[6deg] ${isDarkMode ? 'bg-amber-300/45' : 'bg-amber-200/85'} shadow`} />
+
+              <div className="flex items-center justify-between mb-3">
+                <span />
+                <div className="flex items-center gap-1">
+                  {isEditingSig ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleCancelSigEdit}
+                        className={`w-7 h-7 rounded-full flex items-center justify-center ${isDarkMode ? 'hover:bg-white/10 text-amber-100/80' : 'hover:bg-amber-100 text-amber-700'}`}
+                        title="取消编辑"
+                      >
+                        <X size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSaveSig}
+                        className={`w-7 h-7 rounded-full flex items-center justify-center ${isDarkMode ? 'hover:bg-emerald-400/20 text-emerald-300' : 'hover:bg-emerald-100 text-emerald-600'}`}
+                        title="保存签名"
+                      >
+                        <Check size={14} />
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => { setTempSig(userSignature); setIsEditingSig(true); }}
+                      className={`w-7 h-7 rounded-full flex items-center justify-center ${isDarkMode ? 'hover:bg-white/10 text-amber-100/85' : 'hover:bg-amber-100 text-amber-700'}`}
+                      title="编辑签名"
+                    >
+                      <Edit2 size={14} />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={closeSignatureNote}
+                    className={`w-7 h-7 rounded-full flex items-center justify-center ${isDarkMode ? 'hover:bg-white/10 text-amber-100/80' : 'hover:bg-amber-100 text-amber-700'}`}
+                    title="关闭便签"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+
+              {isEditingSig ? (
+                <div>
+                  <textarea
+                    autoFocus
+                    value={tempSig}
+                    maxLength={SIGNATURE_AI_MAX_CHARS}
+                    onChange={(e) => setTempSig(e.target.value)}
+                    onKeyDown={handleSignatureEditKeyDown}
+                    className={`w-full min-h-[160px] p-1 text-sm leading-relaxed outline-none resize-none bg-transparent ${
+                      isDarkMode ? 'text-amber-50 placeholder-amber-100/45' : 'text-slate-700 placeholder-slate-500'
+                    }`}
+                    placeholder="写下你的签名..."
+                  />
+                  <div className={`mt-2 text-[11px] text-right ${isDarkMode ? 'text-amber-100/70' : 'text-amber-700/70'}`}>
+                    {Array.from(tempSig).length}/{SIGNATURE_AI_MAX_CHARS}
+                  </div>
+                </div>
+              ) : (
+                <div className={`rounded-xl p-3 min-h-[160px] whitespace-pre-wrap break-words text-sm leading-relaxed bg-transparent ${isDarkMode ? 'text-amber-50' : 'text-slate-700'}`}>
+                  {userSignature || <span className="opacity-50 italic">还没有签名，点右上角铅笔写一句吧。</span>}
+                </div>
+              )}
+            </div>
+          </div>
+        </ModalPortal>
+      )}
 
       {/* Edit Book Modal */}
       {isEditModalOpen && editingBook && (

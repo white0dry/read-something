@@ -430,3 +430,11 @@ A：完全免费。它使用的是微软 Edge 浏览器内置的免费 TTS 服�
 
 **Q：支持哪些音频格式？**
 A：默认输出 mp3。也支持 wav、aac、opus、flac（需要软件端指定 response_format）。
+
+---
+
+## 第三方声明
+
+第三方项目与词典/服务来源请查看：
+
+- [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)

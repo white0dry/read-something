@@ -140,6 +140,7 @@ const CharacterSettings: React.FC<CharacterSettingsProps> = ({
       content: e.content,
       category: categoryName,
       insertPosition: e.insertPosition,
+      sendToAi: true,
     }));
 
     const newChar: Character = {

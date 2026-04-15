@@ -5,11 +5,11 @@ import {
   Loader2, BookMarked, CheckCircle2, NotebookPen, CircleCheckBig,
   BookPlus, UserCircle, Edit2, Link, FileUp, ChevronDown, Feather, Scroll,
   Heading1, Heading2, Heading3, Pilcrow, Bold, Italic, ListOrdered, List as ListIcon,
-  Save, Eraser, Highlighter, Copy, ExternalLink, Volume2,
+  Save, Eraser, Highlighter, Copy, ExternalLink, Volume2, Lightbulb, Frown,
 } from 'lucide-react';
 import {
   Book, ApiConfig, RagApiConfigResolver, Notebook, StudyNote, StudyNoteCommentThread,
-  StudyNoteCommentMessage, QuizSession, QuizConfig, QuizQuestion, ReaderCssPreset, ReaderVocabularyEntry,
+  StudyNoteCommentMessage, QuizSession, QuizConfig, QuizQuestion, ReaderCssPreset, ReaderVocabularyEntry, VocabularyLexiconEntry,
 } from '../types';
 import { Persona, Character, WorldBookEntry } from './settings/types';
 import ResolvedImage from './ResolvedImage';
@@ -30,6 +30,12 @@ import { PRESET_HIGHLIGHT_COLORS, resolveHighlightItems } from '../utils/highlig
 import type { ResolvedHighlightItem } from '../utils/highlightUtils';
 import { estimateRagSafeOffset, retrieveRelevantChunks, isEmbedModelLoaded } from '../utils/ragEngine';
 import { DEFAULT_PAPER_CSS_PRESETS, DEFAULT_PAPER_CSS_PRESET_ID, normalizeLegacyPaperCss } from '../utils/paperCssPresets';
+import {
+  deleteLexiconEntry,
+  getAllLexiconEntries,
+  getDueLexiconEntries,
+  recordLexiconReviewResult,
+} from '../utils/vocabularyLexiconStorage';
 
 interface StudyHubProps {
   isDarkMode: boolean;
@@ -75,6 +81,28 @@ type StudyHubVocabularyGroup = {
   items: ReaderVocabularyEntry[];
 };
 
+type StudyHubVocabularyFlatItem = {
+  normalizedTerm: string;
+  term: string;
+  refs: Array<{ bookId: string; bookTitle: string; vocabId: string }>;
+};
+
+type VocabDrillMode = 'choice' | 'cloze' | 'listening' | 'spelling';
+
+type VocabDrillQuestion = {
+  id: string;
+  normalizedTerm: string;
+  term: string;
+  meaning: string;
+  mode: VocabDrillMode;
+  prompt: string;
+  options?: string[];
+  correctOptionIndex?: number;
+  blankSentence?: string;
+  answerText: string;
+  audioText?: string;
+};
+
 const uid = () => `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 const DEFAULT_NOTE_TOOLBAR_STATE: NoteToolbarState = {
   block: null,
@@ -82,6 +110,43 @@ const DEFAULT_NOTE_TOOLBAR_STATE: NoteToolbarState = {
   italic: false,
   orderedList: false,
   bulletList: false,
+};
+
+const normalizeTermKey = (raw: string): string =>
+  raw
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s"'“”‘’`~!@#$%^&*()_+\-=[\]{};:,.<>/?|\\]+/, '')
+    .replace(/[\s"'“”‘’`~!@#$%^&*()_+\-=[\]{};:,.<>/?|\\]+$/, '')
+    .trim()
+    .toLocaleLowerCase();
+
+const pickRandom = <T,>(source: T[]): T | null => {
+  if (!Array.isArray(source) || source.length === 0) return null;
+  return source[Math.floor(Math.random() * source.length)] || null;
+};
+
+const shuffleArray = <T,>(source: T[]): T[] => {
+  const next = [...source];
+  for (let i = next.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [next[i], next[j]] = [next[j], next[i]];
+  }
+  return next;
+};
+
+const uniqStrings = (source: string[], limit = 16): string[] => {
+  const seen = new Set<string>();
+  const next: string[] = [];
+  source.forEach((item) => {
+    if (next.length >= limit) return;
+    const text = typeof item === 'string' ? item.trim() : '';
+    if (!text) return;
+    const key = text.toLocaleLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    next.push(text);
+  });
+  return next;
 };
 
 const normalizeNotebookPaperCss = (notebook: Notebook): Notebook => {
@@ -406,6 +471,19 @@ const StudyHub: React.FC<StudyHubProps> = ({
   const [allBookVocabulary, setAllBookVocabulary] = useState<StudyHubVocabularyGroup[]>([]);
   const [vocabularySearchTerm, setVocabularySearchTerm] = useState('');
   const [vocabularyBookFilter, setVocabularyBookFilter] = useState<string[]>([]);
+  const [lexiconEntries, setLexiconEntries] = useState<VocabularyLexiconEntry[]>([]);
+  const [vocabDueCount, setVocabDueCount] = useState(0);
+  const [showVocabDrillModal, setShowVocabDrillModal] = useState(false);
+  const [vocabDrillMode, setVocabDrillMode] = useState<VocabDrillMode>('choice');
+  const [vocabDrillQueue, setVocabDrillQueue] = useState<VocabDrillQuestion[]>([]);
+  const [vocabDrillIndex, setVocabDrillIndex] = useState(0);
+  const [vocabDrillAttempts, setVocabDrillAttempts] = useState(0);
+  const [vocabDrillInput, setVocabDrillInput] = useState('');
+  const [vocabDrillRevealAnswer, setVocabDrillRevealAnswer] = useState(false);
+  const [vocabDrillAnswered, setVocabDrillAnswered] = useState(false);
+  const [vocabDrillResult, setVocabDrillResult] = useState<'pending' | 'correct' | 'fail'>('pending');
+  const [vocabDrillSummary, setVocabDrillSummary] = useState<{ correct: number; wrong: number } | null>(null);
+  const [vocabDrillWrongCount, setVocabDrillWrongCount] = useState(0);
 
   // ─── Notes state ───
   const [notesView, setNotesView] = useState<NotesView>('list');
@@ -581,6 +659,10 @@ const StudyHub: React.FC<StudyHubProps> = ({
     const loadAllVocabulary = async () => {
       setVocabularyLoading(true);
       try {
+        const [lexiconList, dueList] = await Promise.all([
+          getAllLexiconEntries().catch(() => [] as VocabularyLexiconEntry[]),
+          getDueLexiconEntries().catch(() => [] as VocabularyLexiconEntry[]),
+        ]);
         const results: StudyHubVocabularyGroup[] = [];
         for (const book of books) {
           const content = await getBookContent(book.id);
@@ -604,7 +686,11 @@ const StudyHub: React.FC<StudyHubProps> = ({
           if (normalizedEntries.length === 0) continue;
           results.push({ bookId: book.id, bookTitle: book.title, items: normalizedEntries });
         }
-        if (!cancelled) setAllBookVocabulary(results);
+        if (!cancelled) {
+          setAllBookVocabulary(results);
+          setLexiconEntries(lexiconList);
+          setVocabDueCount(dueList.length);
+        }
       } catch (error) {
         console.error('Failed to load vocabulary:', error);
       } finally {
@@ -2637,23 +2723,91 @@ const StudyHub: React.FC<StudyHubProps> = ({
     }
   };
 
-  const handleDeleteVocabularyEntry = async (bookId: string, vocabEntryId: string) => {
+  const refreshVocabDueCount = useCallback(async () => {
+    const dueList = await getDueLexiconEntries().catch(() => [] as VocabularyLexiconEntry[]);
+    setVocabDueCount(dueList.length);
+  }, []);
+
+  const lexiconByTerm = useMemo(() => {
+    const map = new Map<string, VocabularyLexiconEntry>();
+    lexiconEntries.forEach((entry) => {
+      const key = normalizeTermKey(entry.normalizedTerm || entry.term || '');
+      if (!key) return;
+      map.set(key, entry);
+    });
+    return map;
+  }, [lexiconEntries]);
+
+  const mergedVocabularyItems = useMemo(() => {
+    const map = new Map<string, StudyHubVocabularyFlatItem>();
+    allBookVocabulary.forEach((group) => {
+      group.items.forEach((item) => {
+        const key = normalizeTermKey(item.normalizedTerm || item.term || '');
+        if (!key) return;
+        const existing = map.get(key);
+        if (!existing) {
+          map.set(key, {
+            normalizedTerm: key,
+            term: item.term,
+            refs: [{ bookId: group.bookId, bookTitle: group.bookTitle, vocabId: item.id }],
+          });
+          return;
+        }
+        existing.refs.push({ bookId: group.bookId, bookTitle: group.bookTitle, vocabId: item.id });
+        if (item.term.length > existing.term.length) existing.term = item.term;
+      });
+    });
+    return Array.from(map.values());
+  }, [allBookVocabulary]);
+
+  const filteredVocabularyItems = useMemo(() => {
+    const keyword = vocabularySearchTerm.trim().toLocaleLowerCase();
+    return mergedVocabularyItems
+      .filter((item) => {
+        if (vocabularyBookFilter.length === 0) return true;
+        return item.refs.some((ref) => vocabularyBookFilter.includes(ref.bookId));
+      })
+      .filter((item) => {
+        if (!keyword) return true;
+        const lexicon = lexiconByTerm.get(item.normalizedTerm);
+        const meaningText = (lexicon?.meanings || []).join(' ').toLocaleLowerCase();
+        return item.term.toLocaleLowerCase().includes(keyword) || meaningText.includes(keyword);
+      });
+  }, [mergedVocabularyItems, vocabularyBookFilter, vocabularySearchTerm, lexiconByTerm]);
+
+  const handleDeleteVocabularyEntry = async (normalizedTerm: string) => {
+    const key = normalizeTermKey(normalizedTerm);
+    if (!key) return;
     try {
-      const content = await getBookContent(bookId);
-      if (!content?.readerState) return;
-      const existing = Array.isArray(content.readerState.vocabularyEntries)
-        ? content.readerState.vocabularyEntries
-        : [];
-      const nextEntries = existing.filter((item) => item.id !== vocabEntryId);
-      await saveBookReaderState(bookId, { ...content.readerState, vocabularyEntries: nextEntries });
+      const targetBookIds = new Set<string>();
+      allBookVocabulary.forEach((group) => {
+        if (group.items.some((item) => normalizeTermKey(item.normalizedTerm || item.term || '') === key)) {
+          targetBookIds.add(group.bookId);
+        }
+      });
+
+      await Promise.all(Array.from(targetBookIds).map(async (bookId) => {
+        const content = await getBookContent(bookId);
+        if (!content?.readerState) return;
+        const existing = Array.isArray(content.readerState.vocabularyEntries)
+          ? content.readerState.vocabularyEntries
+          : [];
+        const nextEntries = existing.filter((item) => normalizeTermKey(item.normalizedTerm || item.term || '') !== key);
+        await saveBookReaderState(bookId, { ...content.readerState, vocabularyEntries: nextEntries });
+      }));
+
+      await deleteLexiconEntry(key).catch(() => undefined);
+
       setAllBookVocabulary((prev) =>
         prev
-          .map((entry) => entry.bookId === bookId
-            ? { ...entry, items: entry.items.filter((item) => item.id !== vocabEntryId) }
-            : entry
-          )
+          .map((entry) => ({
+            ...entry,
+            items: entry.items.filter((item) => normalizeTermKey(item.normalizedTerm || item.term || '') !== key),
+          }))
           .filter((entry) => entry.items.length > 0)
       );
+      setLexiconEntries((prev) => prev.filter((entry) => normalizeTermKey(entry.normalizedTerm || entry.term || '') !== key));
+      void refreshVocabDueCount();
       showNotification('生词已删除', 'success');
     } catch {
       showNotification('删除失败', 'error');
@@ -2674,24 +2828,258 @@ const StudyHub: React.FC<StudyHubProps> = ({
     [allBookHighlights, hubHighlightBookFilter, hubHighlightColorFilter]
   );
 
-  const filteredVocabularyGroups = useMemo(() => {
-    const keyword = vocabularySearchTerm.trim().toLocaleLowerCase();
-    return allBookVocabulary
-      .filter((entry) => vocabularyBookFilter.length === 0 || vocabularyBookFilter.includes(entry.bookId))
-      .map((entry) => ({
-        ...entry,
-        items: entry.items.filter((item) => {
-          if (!keyword) return true;
-          return item.term.toLocaleLowerCase().includes(keyword);
-        }),
-      }))
-      .filter((entry) => entry.items.length > 0);
-  }, [allBookVocabulary, vocabularyBookFilter, vocabularySearchTerm]);
-
   const totalVocabularyCount = useMemo(
-    () => allBookVocabulary.reduce((acc, entry) => acc + entry.items.length, 0),
-    [allBookVocabulary]
+    () => mergedVocabularyItems.length,
+    [mergedVocabularyItems]
   );
+
+  const buildVocabularyDrillQuestions = useCallback((mode: VocabDrillMode): VocabDrillQuestion[] => {
+    const now = Date.now();
+    const pool = mergedVocabularyItems.map((item) => {
+      const lexicon = lexiconByTerm.get(item.normalizedTerm);
+      const meanings = uniqStrings(lexicon?.meanings || [], 8);
+      const examples = uniqStrings(lexicon?.examples || [], 4);
+      return {
+        normalizedTerm: item.normalizedTerm,
+        term: item.term,
+        meaning: meanings[0] || `${item.term}（未补充释义）`,
+        meanings,
+        example: examples[0] || `${item.term} is an important word in this chapter.`,
+        dueAt: Number(lexicon?.dueAt || 0),
+      };
+    });
+    if (pool.length === 0) return [];
+
+    const duePool = pool.filter((item) => !Number.isFinite(item.dueAt) || item.dueAt <= now);
+    const basePool = duePool.length > 0 ? duePool : pool;
+    const selected = shuffleArray(basePool).slice(0, Math.min(20, basePool.length));
+
+    const chooseOptions = (correct: string, allCandidates: string[], fallback: string[]): { options: string[]; correctIndex: number } => {
+      const candidatePool = uniqStrings(
+        allCandidates.filter((item) => item.toLocaleLowerCase() !== correct.toLocaleLowerCase()),
+        32,
+      );
+      const fallbackPool = uniqStrings(
+        fallback.filter((item) => item.toLocaleLowerCase() !== correct.toLocaleLowerCase()),
+        32,
+      );
+      const picked = shuffleArray(candidatePool).slice(0, 3);
+      for (const candidate of shuffleArray(fallbackPool)) {
+        if (picked.length >= 3) break;
+        if (picked.some((item) => item.toLocaleLowerCase() === candidate.toLocaleLowerCase())) continue;
+        picked.push(candidate);
+      }
+      const options = shuffleArray(uniqStrings([correct, ...picked], 4));
+      const correctIndex = options.findIndex((item) => item.toLocaleLowerCase() === correct.toLocaleLowerCase());
+      return { options, correctIndex: Math.max(0, correctIndex) };
+    };
+
+    return selected.map((entry) => {
+      if (mode === 'spelling') {
+        return {
+          id: uid(),
+          normalizedTerm: entry.normalizedTerm,
+          term: entry.term,
+          meaning: entry.meaning,
+          mode,
+          prompt: `请拼写：${entry.meaning}`,
+          answerText: entry.term,
+        } satisfies VocabDrillQuestion;
+      }
+
+      if (mode === 'listening') {
+        const optionSet = chooseOptions(
+          entry.meaning,
+          pool.map((item) => item.meaning),
+          pool.flatMap((item) => item.meanings),
+        );
+        return {
+          id: uid(),
+          normalizedTerm: entry.normalizedTerm,
+          term: entry.term,
+          meaning: entry.meaning,
+          mode,
+          prompt: '听发音后，选择正确释义',
+          options: optionSet.options,
+          correctOptionIndex: optionSet.correctIndex,
+          answerText: entry.meaning,
+          audioText: entry.term,
+        } satisfies VocabDrillQuestion;
+      }
+
+      if (mode === 'cloze') {
+        const escapedTerm = entry.term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const matcher = new RegExp(`\\b${escapedTerm}\\b`, 'i');
+        const rawSentence = entry.example || `${entry.term} is an important word in this chapter.`;
+        const blankSentence = matcher.test(rawSentence)
+          ? rawSentence.replace(matcher, '_____')
+          : `${rawSentence}  _____`;
+        const optionSet = chooseOptions(
+          entry.term,
+          pool.map((item) => item.term),
+          pool.map((item) => item.normalizedTerm),
+        );
+        return {
+          id: uid(),
+          normalizedTerm: entry.normalizedTerm,
+          term: entry.term,
+          meaning: entry.meaning,
+          mode,
+          prompt: '根据例句选择正确单词',
+          blankSentence,
+          options: optionSet.options,
+          correctOptionIndex: optionSet.correctIndex,
+          answerText: entry.term,
+        } satisfies VocabDrillQuestion;
+      }
+
+      const askMeaning = Math.random() > 0.5;
+      if (askMeaning) {
+        const optionSet = chooseOptions(
+          entry.meaning,
+          pool.map((item) => item.meaning),
+          pool.flatMap((item) => item.meanings),
+        );
+        return {
+          id: uid(),
+          normalizedTerm: entry.normalizedTerm,
+          term: entry.term,
+          meaning: entry.meaning,
+          mode,
+          prompt: `${entry.term} 的中文意思是？`,
+          options: optionSet.options,
+          correctOptionIndex: optionSet.correctIndex,
+          answerText: entry.meaning,
+        } satisfies VocabDrillQuestion;
+      }
+
+      const optionSet = chooseOptions(
+        entry.term,
+        pool.map((item) => item.term),
+        pool.map((item) => item.normalizedTerm),
+      );
+      return {
+        id: uid(),
+        normalizedTerm: entry.normalizedTerm,
+        term: entry.term,
+        meaning: entry.meaning,
+        mode,
+        prompt: `“${entry.meaning}” 对应的英文是？`,
+        options: optionSet.options,
+        correctOptionIndex: optionSet.correctIndex,
+        answerText: entry.term,
+      } satisfies VocabDrillQuestion;
+    });
+  }, [mergedVocabularyItems, lexiconByTerm]);
+
+  const resetVocabDrillStepState = useCallback(() => {
+    setVocabDrillAttempts(0);
+    setVocabDrillInput('');
+    setVocabDrillRevealAnswer(false);
+    setVocabDrillAnswered(false);
+    setVocabDrillResult('pending');
+  }, []);
+
+  const closeVocabDrillModal = useCallback(() => {
+    setShowVocabDrillModal(false);
+    setVocabDrillQueue([]);
+    setVocabDrillIndex(0);
+    setVocabDrillSummary(null);
+    setVocabDrillWrongCount(0);
+    resetVocabDrillStepState();
+  }, [resetVocabDrillStepState]);
+
+  const startVocabDrill = useCallback(() => {
+    const questions = buildVocabularyDrillQuestions(vocabDrillMode);
+    if (questions.length === 0) {
+      showNotification('没有可练习的生词', 'error');
+      return;
+    }
+    setVocabDrillQueue(questions);
+    setVocabDrillIndex(0);
+    setVocabDrillSummary({ correct: 0, wrong: 0 });
+    setVocabDrillWrongCount(0);
+    resetVocabDrillStepState();
+  }, [buildVocabularyDrillQuestions, vocabDrillMode, showNotification, resetVocabDrillStepState]);
+
+  const currentVocabQuestion = useMemo(
+    () => (vocabDrillIndex >= 0 && vocabDrillIndex < vocabDrillQueue.length ? vocabDrillQueue[vocabDrillIndex] : null),
+    [vocabDrillQueue, vocabDrillIndex],
+  );
+
+  const recordVocabReview = useCallback(async (normalizedTerm: string, result: 'good' | 'fail') => {
+    await recordLexiconReviewResult(normalizedTerm, result).catch(() => undefined);
+    void refreshVocabDueCount();
+  }, [refreshVocabDueCount]);
+
+  const goNextVocabQuestion = useCallback(() => {
+    if (vocabDrillQueue.length === 0) return;
+    if (vocabDrillIndex >= vocabDrillQueue.length - 1) {
+      setVocabDrillIndex(vocabDrillQueue.length);
+      resetVocabDrillStepState();
+      return;
+    }
+    setVocabDrillIndex((prev) => prev + 1);
+    resetVocabDrillStepState();
+  }, [vocabDrillQueue.length, vocabDrillIndex, resetVocabDrillStepState]);
+
+  const markCurrentVocabAsFail = useCallback(() => {
+    const current = currentVocabQuestion;
+    if (!current || vocabDrillResult !== 'pending') return;
+    setVocabDrillResult('fail');
+    setVocabDrillAnswered(true);
+    setVocabDrillRevealAnswer(true);
+    setVocabDrillSummary((prev) => prev ? { ...prev, wrong: prev.wrong + 1 } : prev);
+    void recordVocabReview(current.normalizedTerm, 'fail');
+  }, [currentVocabQuestion, vocabDrillResult, recordVocabReview]);
+
+  const handleVocabOptionAnswer = (optionIndex: number) => {
+    if (!currentVocabQuestion || vocabDrillAnswered) return;
+    const correctIndex = typeof currentVocabQuestion.correctOptionIndex === 'number'
+      ? currentVocabQuestion.correctOptionIndex
+      : -1;
+    if (optionIndex === correctIndex) {
+      setVocabDrillResult('correct');
+      setVocabDrillAnswered(true);
+      setVocabDrillSummary((prev) => prev ? { ...prev, correct: prev.correct + 1 } : prev);
+      void recordVocabReview(currentVocabQuestion.normalizedTerm, 'good');
+      return;
+    }
+    setVocabDrillWrongCount((prev) => prev + 1);
+    const nextAttempts = vocabDrillAttempts + 1;
+    setVocabDrillAttempts(nextAttempts);
+    if (nextAttempts >= 3) {
+      markCurrentVocabAsFail();
+    }
+  };
+
+  const handleVocabSpellingSubmit = () => {
+    if (!currentVocabQuestion || currentVocabQuestion.mode !== 'spelling' || vocabDrillAnswered) return;
+    const expected = normalizeTermKey(currentVocabQuestion.answerText);
+    const actual = normalizeTermKey(vocabDrillInput);
+    if (expected && expected === actual) {
+      setVocabDrillResult('correct');
+      setVocabDrillAnswered(true);
+      setVocabDrillSummary((prev) => prev ? { ...prev, correct: prev.correct + 1 } : prev);
+      void recordVocabReview(currentVocabQuestion.normalizedTerm, 'good');
+      return;
+    }
+    setVocabDrillWrongCount((prev) => prev + 1);
+    const nextAttempts = vocabDrillAttempts + 1;
+    setVocabDrillAttempts(nextAttempts);
+    if (nextAttempts >= 3) {
+      markCurrentVocabAsFail();
+    }
+  };
+
+  const handleRevealVocabAnswer = () => {
+    if (!currentVocabQuestion) return;
+    if (vocabDrillResult === 'pending') {
+      markCurrentVocabAsFail();
+      return;
+    }
+    setVocabDrillRevealAnswer(true);
+  };
 
   const usedHighlightColors = useMemo(() => {
     const colors = new Set<string>();
@@ -4423,7 +4811,17 @@ const StudyHub: React.FC<StudyHubProps> = ({
         <div className={`flex-1 flex flex-col overflow-hidden ${hubTabAnimClass}`}>
           <div className="flex items-center justify-between px-6 pt-4 pb-2">
             <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider">生词本</h2>
-            <span className={`text-xs ${subTextClass}`}>共 {totalVocabularyCount} 词</span>
+            <div className="flex items-center gap-2">
+              <span className={`text-xs ${subTextClass}`}>共 {totalVocabularyCount} 词</span>
+              <button
+                type="button"
+                onClick={() => setShowVocabDrillModal(true)}
+                className={`w-8 h-8 rounded-xl flex items-center justify-center text-amber-500 ${btnClass}`}
+                title="练习生词"
+              >
+                <Lightbulb size={15} />
+              </button>
+            </div>
           </div>
 
           <div className="px-6 pt-1 pb-3">
@@ -4484,49 +4882,252 @@ const StudyHub: React.FC<StudyHubProps> = ({
                 还没有生词，阅读时选中后点顶部 + 即可加入
               </div>
             )}
-            {allBookVocabulary.length > 0 && filteredVocabularyGroups.length === 0 && (
+            {allBookVocabulary.length > 0 && filteredVocabularyItems.length === 0 && (
               <div className="text-center text-slate-400 text-sm py-8">
                 当前筛选条件下暂无生词
               </div>
             )}
-            {filteredVocabularyGroups.map((entry) => (
-              <div key={entry.bookId} className="mb-6">
-                <h3 className={`text-xs font-bold uppercase tracking-wider mb-2 ${
-                  isDarkMode ? 'text-slate-400' : 'text-slate-500'
-                }`}>
-                  {entry.bookTitle} ({entry.items.length})
-                </h3>
-                <div className="space-y-2.5">
-                  {entry.items.map((item) => (
-                    <div key={item.id} className={`rounded-xl p-3 ${cardClass}`}>
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className={`text-base font-semibold break-words ${headingClass}`}>{item.term}</div>
-                        </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => handlePronounceVocabulary(item.term)}
-                            className={`w-7 h-7 rounded-lg flex items-center justify-center ${btnClass}`}
-                          >
-                            <Volume2 size={13} />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void handleDeleteVocabularyEntry(entry.bookId, item.id)}
-                            className={`w-7 h-7 rounded-lg flex items-center justify-center ${enabledDangerIconButtonClass}`}
-                          >
-                            <Trash2 size={13} />
-                          </button>
+            <div className="space-y-2.5">
+              {filteredVocabularyItems.map((item) => {
+                const lexicon = lexiconByTerm.get(item.normalizedTerm);
+                const meaning = (lexicon?.meanings || [])[0] || '';
+                const phonetic = lexicon?.phonetic || '';
+                return (
+                  <div key={item.normalizedTerm} className={`rounded-xl p-3 ${cardClass}`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className={`text-base font-semibold break-words ${headingClass}`}>{item.term}</div>
+                        {phonetic && (
+                          <div className={`text-xs mt-1 ${subTextClass}`}>{phonetic}</div>
+                        )}
+                        {meaning && (
+                          <div className={`text-xs mt-1.5 ${subTextClass}`}>{meaning}</div>
+                        )}
+                        <div className="flex flex-wrap gap-1.5 mt-2">
+                          {item.refs.slice(0, 3).map((ref) => (
+                            <span
+                              key={`${item.normalizedTerm}_${ref.bookId}`}
+                              className={`text-[10px] px-2 py-0.5 rounded-md ${isDarkMode ? 'bg-slate-700/80 text-slate-300' : 'bg-slate-200/80 text-slate-600'}`}
+                            >
+                              {ref.bookTitle}
+                            </span>
+                          ))}
+                          {item.refs.length > 3 && (
+                            <span className={`text-[10px] px-2 py-0.5 rounded-md ${isDarkMode ? 'bg-slate-700/80 text-slate-300' : 'bg-slate-200/80 text-slate-600'}`}>
+                              +{item.refs.length - 3}
+                            </span>
+                          )}
                         </div>
                       </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handlePronounceVocabulary(item.term)}
+                          className={`w-7 h-7 rounded-lg flex items-center justify-center ${btnClass}`}
+                        >
+                          <Volume2 size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteVocabularyEntry(item.normalizedTerm)}
+                          className={`w-7 h-7 rounded-lg flex items-center justify-center ${enabledDangerIconButtonClass}`}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
                     </div>
-                  ))}
-                </div>
-              </div>
-            ))}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
+      )}
+
+      {showVocabDrillModal && (
+        <ModalPortal>
+          <div
+            className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-500/25 backdrop-blur-sm"
+            onClick={closeVocabDrillModal}
+          >
+            <div
+              onClick={(event) => event.stopPropagation()}
+              className={`${isDarkMode ? 'bg-[#2d3748] border-slate-600' : 'neu-bg border-white/50'} w-full max-w-sm rounded-2xl px-5 py-5 border`}
+            >
+              {vocabDrillQueue.length === 0 && (
+                <>
+                  <h3 className={`text-lg font-bold text-center ${headingClass}`}>生词练习</h3>
+                  <p className={`text-xs mt-2 text-center ${subTextClass}`}>今天待复习：{vocabDueCount} 词</p>
+                  <div className="mt-4 space-y-2">
+                    {[
+                      { key: 'choice', label: '选择题' },
+                      { key: 'cloze', label: '填空题' },
+                      { key: 'listening', label: '听力题' },
+                      { key: 'spelling', label: '拼写题' },
+                    ].map((mode) => (
+                      <button
+                        key={mode.key}
+                        type="button"
+                        onClick={() => setVocabDrillMode(mode.key as VocabDrillMode)}
+                        className={`w-full h-10 rounded-xl text-sm font-medium transition-colors ${
+                          vocabDrillMode === mode.key
+                            ? 'bg-rose-400 text-white'
+                            : `${btnClass} ${headingClass}`
+                        }`}
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-5 grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={closeVocabDrillModal}
+                      className={`h-10 rounded-xl text-sm ${btnClass}`}
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      onClick={startVocabDrill}
+                      className="h-10 rounded-xl text-sm bg-rose-400 text-white hover:bg-rose-500 transition-colors"
+                    >
+                      开始练习
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {vocabDrillQueue.length > 0 && vocabDrillIndex >= vocabDrillQueue.length && (
+                <>
+                  <h3 className={`text-lg font-bold text-center ${headingClass}`}>练习完成</h3>
+                  <div className={`mt-4 rounded-xl p-3 ${cardClass}`}>
+                    <div className="text-sm text-center">
+                      正确 {vocabDrillSummary?.correct || 0} 题 · 失误 {vocabDrillSummary?.wrong || 0} 题
+                    </div>
+                    <div className={`text-xs text-center mt-2 ${subTextClass}`}>总失误点击：{vocabDrillWrongCount} 次</div>
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    <button type="button" onClick={closeVocabDrillModal} className={`h-10 rounded-xl text-sm ${btnClass}`}>关闭</button>
+                    <button
+                      type="button"
+                      onClick={startVocabDrill}
+                      className="h-10 rounded-xl text-sm bg-rose-400 text-white hover:bg-rose-500 transition-colors"
+                    >
+                      再来一轮
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {vocabDrillQueue.length > 0 && currentVocabQuestion && vocabDrillIndex < vocabDrillQueue.length && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <h3 className={`text-base font-bold ${headingClass}`}>生词练习</h3>
+                    <span className={`text-xs ${subTextClass}`}>{vocabDrillIndex + 1}/{vocabDrillQueue.length}</span>
+                  </div>
+                  <div className={`mt-3 rounded-xl p-3 ${cardClass}`}>
+                    <div className={`text-sm font-medium ${headingClass}`}>{currentVocabQuestion.prompt}</div>
+                    {currentVocabQuestion.blankSentence && (
+                      <div className={`text-xs mt-2 leading-6 ${subTextClass}`}>{currentVocabQuestion.blankSentence}</div>
+                    )}
+                    {currentVocabQuestion.mode === 'listening' && currentVocabQuestion.audioText && (
+                      <button
+                        type="button"
+                        onClick={() => handlePronounceVocabulary(currentVocabQuestion.audioText || '')}
+                        className="mt-3 h-9 px-3 rounded-lg bg-rose-400 text-white text-xs font-medium hover:bg-rose-500 transition-colors"
+                      >
+                        播放发音
+                      </button>
+                    )}
+                    {currentVocabQuestion.mode === 'spelling' && (
+                      <div className="mt-3">
+                        <div className={`text-xs tracking-[0.3em] mb-2 ${subTextClass}`}>
+                          {Array.from({ length: Math.max(2, currentVocabQuestion.answerText.length) }).map((_, index) => '_').join(' ')}
+                        </div>
+                        <input
+                          value={vocabDrillInput}
+                          onChange={(event) => setVocabDrillInput(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') handleVocabSpellingSubmit();
+                          }}
+                          placeholder="输入英文拼写"
+                          className={`w-full h-10 rounded-xl px-3 text-sm outline-none ${inputClass}`}
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {Array.isArray(currentVocabQuestion.options) && currentVocabQuestion.options.length > 0 && (
+                    <div className="mt-3 space-y-2">
+                      {currentVocabQuestion.options.map((option, index) => {
+                        const isCorrect = index === currentVocabQuestion.correctOptionIndex;
+                        const revealCorrect = vocabDrillRevealAnswer && isCorrect;
+                        return (
+                          <button
+                            key={`${currentVocabQuestion.id}_${option}`}
+                            type="button"
+                            disabled={vocabDrillAnswered}
+                            onClick={() => handleVocabOptionAnswer(index)}
+                            className={`w-full text-left px-3 py-2 rounded-xl text-sm transition-colors ${
+                              revealCorrect
+                                ? 'bg-emerald-500 text-white'
+                                : `${btnClass} ${headingClass}`
+                            }`}
+                          >
+                            {String.fromCharCode(65 + index)}. {option}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {vocabDrillRevealAnswer && (
+                    <div className={`mt-3 rounded-xl p-3 text-xs ${isDarkMode ? 'bg-slate-700/70 text-slate-200' : 'bg-slate-100 text-slate-600'}`}>
+                      答案：{currentVocabQuestion.answerText}
+                    </div>
+                  )}
+
+                  <div className="mt-4 flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={handleRevealVocabAnswer}
+                      className={`h-10 w-10 rounded-xl flex items-center justify-center ${btnClass} text-rose-400`}
+                      title="显示答案"
+                    >
+                      <Frown size={14} />
+                    </button>
+                    {currentVocabQuestion.mode === 'spelling' && !vocabDrillAnswered && (
+                      <button
+                        type="button"
+                        onClick={handleVocabSpellingSubmit}
+                        className="h-10 px-4 rounded-xl text-sm bg-rose-400 text-white hover:bg-rose-500 transition-colors"
+                      >
+                        提交
+                      </button>
+                    )}
+                    {(vocabDrillAnswered || vocabDrillRevealAnswer) && (
+                      <button
+                        type="button"
+                        onClick={goNextVocabQuestion}
+                        className="h-10 px-4 rounded-xl text-sm bg-rose-400 text-white hover:bg-rose-500 transition-colors"
+                      >
+                        下一题
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={closeVocabDrillModal}
+                      className={`h-10 px-4 rounded-xl text-sm ${btnClass}`}
+                    >
+                      结束
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </ModalPortal>
       )}
 
       {/* Modals */}

@@ -57,6 +57,7 @@ import {
 } from '../utils/readerTextNormalize';
 import { PRESET_HIGHLIGHT_COLORS, resolveHighlightItems, buildPositionFromHighlight } from '../utils/highlightUtils';
 import type { ResolvedHighlightItem } from '../utils/highlightUtils';
+import { ensureLexiconEntryFromReaderTerm, enrichLexiconEntry } from '../utils/vocabularyLexiconStorage';
 
 interface ReaderProps {
   onBack: (snapshot?: ReaderSessionSnapshot) => void;
@@ -1756,6 +1757,21 @@ const Reader: React.FC<ReaderProps> = ({
         ...prev,
       ];
     });
+
+    void ensureLexiconEntryFromReaderTerm({
+      term,
+      bookId: activeBook.id,
+    }).catch(() => undefined);
+
+    if (!wasDuplicate) {
+      void enrichLexiconEntry({
+        term,
+        normalizedTerm,
+        apiConfig,
+        bookId: activeBook.id,
+      }).catch(() => undefined);
+    }
+
     showVocabularyToastMessage(wasDuplicate ? '生词已更新到列表顶部' : '已添加到生词本');
   };
 

@@ -48,8 +48,8 @@ export default defineConfig(({ mode }) => {
       build: {
         rollupOptions: {
           output: {
+            onlyExplicitManualChunks: true,
             manualChunks(id) {
-              if (id.includes('/utils/builtInTutorialBook.ts')) return 'app-tutorial';
               if (id.includes('node_modules/@xenova/transformers')) return 'vendor-transformers';
               if (id.includes('node_modules/onnxruntime-web')) return 'vendor-onnxruntime';
             },

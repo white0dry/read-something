@@ -167,6 +167,16 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
     );
   };
 
+  const toggleEntrySendToAi = (id: string) => {
+    setWorldBookEntries((prev) =>
+      prev.map((entry) => {
+        if (entry.id !== id) return entry;
+        const isSelected = entry.sendToAi !== false;
+        return { ...entry, sendToAi: !isSelected };
+      })
+    );
+  };
+
   const clearInsertPositionCommitTimer = (entryId: string) => {
     const timerId = insertPositionCommitTimersRef.current[entryId];
     if (!timerId) return;
@@ -208,6 +218,7 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
         category: viewingCategory,
         content: '',
         insertPosition: 'BEFORE',
+        sendToAi: true,
       },
     ]);
     setEditingWorldBookId(newId);
@@ -430,6 +441,7 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
             const isDragging = draggingEntryId === entry.id;
             const isDragOver = !isDragging && !!draggingEntryId && dragOverEntryId === entry.id;
             const visualInsertPosition = insertPositionVisualState[entry.id] || entry.insertPosition;
+            const isSendToAi = entry.sendToAi !== false;
 
             return (
               <div
@@ -441,18 +453,36 @@ const WorldBookSettings: React.FC<WorldBookSettingsProps> = ({
                 } ${isDragging ? 'opacity-70 scale-[0.99]' : ''} ${isDragOver ? 'ring-2 ring-rose-300/70' : ''}`}
               >
                 <div className="flex justify-between items-start mb-2">
-                  {!isEditing && (
+                  <div className="mr-3 mt-1 flex w-8 flex-col items-center gap-2 shrink-0">
+                    {!isEditing ? (
+                      <button
+                        type="button"
+                        onPointerDown={(event) => beginEntryDrag(entry, event)}
+                        onTouchStart={(event) => beginEntryTouchDrag(entry, event)}
+                        className={`w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-600 touch-none select-none cursor-grab active:cursor-grabbing ${btnClass}`}
+                        style={{ touchAction: 'none' }}
+                        aria-label={`拖动排序 ${entry.title}`}
+                      >
+                        <GripVertical size={18} />
+                      </button>
+                    ) : (
+                      <span className="w-8 h-8" aria-hidden="true" />
+                    )}
                     <button
                       type="button"
-                      onPointerDown={(event) => beginEntryDrag(entry, event)}
-                      onTouchStart={(event) => beginEntryTouchDrag(entry, event)}
-                      className={`mr-3 mt-1 w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-600 touch-none select-none cursor-grab active:cursor-grabbing ${btnClass}`}
-                      style={{ touchAction: 'none' }}
-                      aria-label={`拖动排序 ${entry.title}`}
+                      onClick={() => toggleEntrySendToAi(entry.id)}
+                      className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
+                        isSendToAi
+                          ? 'text-rose-500 dark:text-rose-300'
+                          : 'text-slate-400 hover:text-slate-600'
+                      } ${btnClass}`}
+                      aria-label={isSendToAi ? `已选中发送给 AI：${entry.title}` : `未选中发送给 AI：${entry.title}`}
+                      aria-pressed={isSendToAi}
+                      title={isSendToAi ? '已选中发送给 AI' : '未选中发送给 AI'}
                     >
-                      <GripVertical size={18} />
+                      {isSendToAi ? <span className="w-2.5 h-2.5 rounded-full bg-current" aria-hidden="true" /> : null}
                     </button>
-                  )}
+                  </div>
 
                   <div className="flex-1 mr-4">
                     {isEditing ? (

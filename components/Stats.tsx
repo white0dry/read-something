@@ -420,7 +420,9 @@ const Stats: React.FC<StatsProps> = ({
       return { before: [] as WorldBookEntry[], after: [] as WorldBookEntry[] };
     }
 
-    const scopedEntries = worldBookEntries.filter((entry) => boundCategories.has(entry.category));
+    const scopedEntries = worldBookEntries.filter(
+      (entry) => boundCategories.has(entry.category) && entry.sendToAi !== false
+    );
     return {
       before: sortWorldBookEntriesByCode(scopedEntries.filter((entry) => entry.insertPosition === 'BEFORE')),
       after: sortWorldBookEntriesByCode(scopedEntries.filter((entry) => entry.insertPosition === 'AFTER')),
@@ -1448,5 +1450,4 @@ const Stats: React.FC<StatsProps> = ({
 };
 
 export default Stats;
-
 

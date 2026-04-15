@@ -5,7 +5,6 @@ import { Persona, Character, WorldBookEntry } from './components/settings/types'
 import { deleteImageByRef, migrateDataUrlToImageRef } from './utils/imageStorage';
 import { compactBookForState, deleteBookContent, getBookContent, migrateInlineBookContent, saveBookContent } from './utils/bookContentStorage';
 import { buildConversationKey, readConversationBucket, persistConversationBucket } from './utils/readerChatRuntime';
-import { BUILT_IN_TUTORIAL_BOOK_ID, BUILT_IN_TUTORIAL_VERSION, createBuiltInTutorialBook, migrateTutorialImages, isBuiltInBook, markTutorialUnread, clearTutorialUnread } from './utils/builtInTutorialBook';
 import { buildCharacterWorldBookSections, buildReadingContextSnapshot, runConversationGeneration } from './utils/readerAiEngine';
 import { DEFAULT_TTS_CONFIG } from './utils/ttsEngine';
 import {
@@ -61,6 +60,9 @@ const RAG_LOCAL_WARMUP_MAX_RETRIES = 3;
 const RAG_PRESETS_STORAGE_KEY = 'app_rag_presets';
 const ACTIVE_RAG_PRESET_ID_STORAGE_KEY = 'app_active_rag_preset_id';
 const DEFAULT_RAG_PRESET_ID = '__default_rag_preset__';
+const BUILT_IN_TUTORIAL_BOOK_ID = '__built_in_tutorial__';
+const BUILT_IN_TUTORIAL_VERSION = 4.2;
+const TUTORIAL_UNREAD_KEY = '__built_in_tutorial_unread__';
 const DEFAULT_READER_MORE_SETTINGS = {
   appearance: {
     bubbleFontSizeScale: 1,
@@ -95,6 +97,7 @@ const DEFAULT_READER_MORE_SETTINGS = {
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   activeCommentsEnabled: false,
+  activeSignatureUpdateEnabled: false,
   aiProactiveUnderlineEnabled: false,
   aiProactiveUnderlineProbability: 35,
   commentInterval: 30,
@@ -111,6 +114,21 @@ const migrateLegacyDefaultBubbleCss = (css: string) =>
   normalizeBubbleCssSignature(css) === LEGACY_DEFAULT_NEUMORPHISM_BUBBLE_CSS_SIGNATURE
     ? DEFAULT_NEUMORPHISM_BUBBLE_CSS
     : css;
+const isBuiltInTutorialBook = (bookId: string) => bookId === BUILT_IN_TUTORIAL_BOOK_ID;
+const markTutorialUnreadFlag = () => {
+  try {
+    localStorage.setItem(TUTORIAL_UNREAD_KEY, '1');
+  } catch {
+    // no-op: localStorage may be unavailable
+  }
+};
+const clearTutorialUnreadFlag = () => {
+  try {
+    localStorage.removeItem(TUTORIAL_UNREAD_KEY);
+  } catch {
+    // no-op: localStorage may be unavailable
+  }
+};
 
 const normalizeAppSettings = (raw: unknown): AppSettings => {
   const source =
@@ -122,6 +140,10 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
     typeof source.activeCommentsEnabled === 'boolean'
       ? source.activeCommentsEnabled
       : DEFAULT_APP_SETTINGS.activeCommentsEnabled;
+  const activeSignatureUpdateEnabled =
+    typeof source.activeSignatureUpdateEnabled === 'boolean'
+      ? source.activeSignatureUpdateEnabled
+      : DEFAULT_APP_SETTINGS.activeSignatureUpdateEnabled;
   const aiProactiveUnderlineEnabled =
     typeof source.aiProactiveUnderlineEnabled === 'boolean'
       ? source.aiProactiveUnderlineEnabled
@@ -295,6 +317,7 @@ const normalizeAppSettings = (raw: unknown): AppSettings => {
   };
   return {
     activeCommentsEnabled,
+    activeSignatureUpdateEnabled,
     aiProactiveUnderlineEnabled,
     aiProactiveUnderlineProbability,
     commentInterval,
@@ -531,6 +554,16 @@ const IOS_KEYBOARD_OPEN_THRESHOLD_PX = 90;
 const IOS_KEYBOARD_RELEASE_THRESHOLD_PX = 36;
 const IOS_KEYBOARD_RELEASE_DELAY_MS = 180;
 
+const normalizeWorldBookEntries = (value: unknown): WorldBookEntry[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is Partial<WorldBookEntry> => !!entry && typeof entry === 'object')
+    .map((entry) => ({
+      ...entry,
+      sendToAi: entry.sendToAi !== false,
+    })) as WorldBookEntry[];
+};
+
 const App: React.FC = () => {
   const VIEW_TRANSITION_MS = 260;
   const [currentView, setCurrentView] = useState<AppView>(AppView.LIBRARY);
@@ -657,27 +690,63 @@ const App: React.FC = () => {
         initial = Array.isArray(parsed) ? stripBuiltInSampleBooks(parsed) : [];
       }
     } catch { /* no-op */ }
-    const versionKey = '__built_in_tutorial_version__';
-    const storedVersion = (() => { try { return Number(localStorage.getItem(versionKey)) || 0; } catch { return 0; } })();
-    const tutorialIdx = initial.findIndex(b => b.id === BUILT_IN_TUTORIAL_BOOK_ID);
-    if (tutorialIdx === -1 || storedVersion < BUILT_IN_TUTORIAL_VERSION) {
-      const tutorial = createBuiltInTutorialBook();
-      // 先用原始章节（含 data-URL）同步保存以确保书籍立即可用，
-      // 再异步将图片迁移为 idb:// Blob 引用并重新保存。
-      saveBookContent(tutorial.id, tutorial.fullText || '', tutorial.chapters || []);
-      migrateTutorialImages(tutorial.chapters || []).then((migratedChapters) => {
-        saveBookContent(tutorial.id, tutorial.fullText || '', migratedChapters);
-      }).catch(() => { /* 迁移失败则保留 data-URL 作为 fallback */ });
-      if (tutorialIdx === -1) {
-        initial.push(compactBookForState(tutorial));
-      } else {
-        initial[tutorialIdx] = compactBookForState(tutorial);
-      }
-      try { localStorage.setItem(versionKey, String(BUILT_IN_TUTORIAL_VERSION)); } catch { /* no-op */ }
-      if (storedVersion > 0) markTutorialUnread();
-    }
     return initial;
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    const versionKey = '__built_in_tutorial_version__';
+    const storedVersion = (() => {
+      try {
+        return Number(localStorage.getItem(versionKey)) || 0;
+      } catch {
+        return 0;
+      }
+    })();
+    const hasTutorial = books.some((book) => book.id === BUILT_IN_TUTORIAL_BOOK_ID);
+    if (hasTutorial && storedVersion >= BUILT_IN_TUTORIAL_VERSION) return;
+
+    const ensureBuiltInTutorial = async () => {
+      try {
+        const { createBuiltInTutorialBook, migrateTutorialImages } = await import('./utils/builtInTutorialBook');
+        if (cancelled) return;
+
+        const tutorial = createBuiltInTutorialBook();
+        saveBookContent(tutorial.id, tutorial.fullText || '', tutorial.chapters || []);
+        void migrateTutorialImages(tutorial.chapters || [])
+          .then((migratedChapters) => {
+            saveBookContent(tutorial.id, tutorial.fullText || '', migratedChapters);
+          })
+          .catch(() => {
+            // fallback to raw embedded images
+          });
+
+        setBooks((prev) => {
+          const tutorialIdx = prev.findIndex((book) => book.id === BUILT_IN_TUTORIAL_BOOK_ID);
+          if (tutorialIdx === -1) {
+            return [...prev, compactBookForState(tutorial)];
+          }
+          const next = [...prev];
+          next[tutorialIdx] = compactBookForState(tutorial);
+          return next;
+        });
+
+        try {
+          localStorage.setItem(versionKey, String(BUILT_IN_TUTORIAL_VERSION));
+        } catch {
+          // no-op: localStorage may be unavailable
+        }
+        if (storedVersion > 0) markTutorialUnreadFlag();
+      } catch (error) {
+        console.error('Failed to prepare built-in tutorial book:', error);
+      }
+    };
+
+    void ensureBuiltInTutorial();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // API Config
   const [apiConfig, setApiConfig] = useState<ApiConfig>(() => {
@@ -748,7 +817,7 @@ const App: React.FC = () => {
   const [worldBookEntries, setWorldBookEntries] = useState<WorldBookEntry[]>(() => {
     try {
       const saved = localStorage.getItem('app_worldbook');
-      return saved ? JSON.parse(saved) : [];
+      return saved ? normalizeWorldBookEntries(JSON.parse(saved)) : [];
     } catch { return []; }
   });
 
@@ -1669,7 +1738,7 @@ const App: React.FC = () => {
   };
 
   const handleOpenBook = (book: Book) => {
-    if (isBuiltInBook(book.id)) clearTutorialUnread();
+    if (isBuiltInTutorialBook(book.id)) clearTutorialUnreadFlag();
     const blockingWarmup = getRagBlockingBook(book.id);
     if (blockingWarmup) {
       showNotification(`《${blockingWarmup.title}》RAG索引构建中，暂时无法打开其他书籍`, 'error');
@@ -2112,7 +2181,7 @@ const App: React.FC = () => {
   };
 
   const handleDeleteBook = async (bookId: string) => {
-    if (isBuiltInBook(bookId)) return;
+    if (isBuiltInTutorialBook(bookId)) return;
     const targetBook = books.find(b => b.id === bookId);
     const storedContent = await getBookContent(bookId).catch(() => null);
     const imageRefs = new Set<string>();
@@ -2345,6 +2414,8 @@ const App: React.FC = () => {
               isDarkMode={isDarkMode} 
               userSignature={userSignature}
               onUpdateSignature={setUserSignature}
+              activeSignatureUpdateEnabled={appSettings.activeSignatureUpdateEnabled}
+              signatureUpdateProbability={appSettings.commentProbability}
               personas={personas}
               activePersonaId={activePersonaId}
               onSelectPersona={setActivePersonaId}
