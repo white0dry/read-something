@@ -1348,9 +1348,13 @@ const App: React.FC = () => {
              headers: { 'x-api-key': apiConfig.apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }
           });
         } else {
-          response = await fetch(`${endpoint}/models`, {
-             headers: { 'Authorization': `Bearer ${apiConfig.apiKey}`, 'Content-Type': 'application/json' }
-          });
+          const requestInit = {
+            headers: { 'Authorization': `Bearer ${apiConfig.apiKey}`, 'Content-Type': 'application/json' }
+          };
+          response = await fetch(`${endpoint}/models`, requestInit);
+          if (!response.ok && response.status === 404 && !endpoint.endsWith('/v1')) {
+            response = await fetch(`${endpoint}/v1/models`, requestInit);
+          }
         }
         if (response && response.ok) {
           showNotification('\u62c9\u53d6\u6a21\u578b\u6210\u529f', 'success');
