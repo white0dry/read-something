@@ -7,8 +7,7 @@ import ModalPortal from './ModalPortal';
 import ResolvedImage from './ResolvedImage';
 import { deleteImageByRef, saveImageFile } from '../utils/imageStorage';
 import { getBookContent, getBookTextLength } from '../utils/bookContentStorage';
-import { BOOK_IMPORT_ACCEPT, parseImportedBookFile, SUPPORTED_BOOK_IMPORT_SUFFIXES } from '../utils/bookImportParser';
-import { isBuiltInBook, isTutorialUnread } from '../utils/builtInTutorialBook';
+import type { ParsedBookImportResult } from '../utils/bookImportParser';
 
 interface LibraryProps {
   books: Book[];
@@ -17,9 +16,12 @@ interface LibraryProps {
   onRequestImportBook?: () => boolean;
   onUpdateBook: (book: Book) => void;
   onDeleteBook: (id: string) => void;
+  showNotification?: (message: string, type?: 'success' | 'error') => void;
   isDarkMode: boolean;
   userSignature: string;
   onUpdateSignature: (text: string) => void;
+  activeSignatureUpdateEnabled: boolean;
+  signatureUpdateProbability: number;
   personas: Persona[];
   activePersonaId: string | null;
   onSelectPersona: (id: string | null) => void;
@@ -48,7 +50,33 @@ const DefaultBookCover = () => (
 type SortField = 'title' | 'author' | 'progress' | 'id' | 'length';
 type SortDirection = 'asc' | 'desc';
 type ViewMode = 'grid' | 'list';
+const SUPPORTED_BOOK_IMPORT_SUFFIXES = ['txt', 'docx', 'docm', 'dotx', 'dotm', 'pdf', 'epub', 'mobi'] as const;
+const BOOK_IMPORT_ACCEPT = SUPPORTED_BOOK_IMPORT_SUFFIXES.map((suffix) => `.${suffix}`).join(',');
 const SUPPORTED_IMPORT_SUFFIX_SET = new Set(SUPPORTED_BOOK_IMPORT_SUFFIXES.map((suffix) => suffix.toLowerCase()));
+const BUILT_IN_TUTORIAL_BOOK_ID = '__built_in_tutorial__';
+const TUTORIAL_UNREAD_KEY = '__built_in_tutorial_unread__';
+const SIGNATURE_AI_LAST_SUCCESS_DATE_KEY = 'lib_signature_ai_last_success_date';
+const SIGNATURE_AI_DRAW_STATE_KEY = 'lib_signature_ai_draw_state_v1';
+const SIGNATURE_AI_UPDATE_PROMPT_KEY = 'app_signature_ai_update_prompt_v1';
+const SIGNATURE_AI_MAX_CHARS = 120;
+const SIGNATURE_AUTO_DRAW_SLOTS = [
+  { hour: 9, minute: 0 },
+  { hour: 14, minute: 0 },
+  { hour: 21, minute: 0 },
+] as const;
+
+interface SignatureAutoDrawState {
+  dateKey: string;
+  attemptedSlotIndexes: number[];
+}
+const isBuiltInTutorialBook = (bookId: string) => bookId === BUILT_IN_TUTORIAL_BOOK_ID;
+const isTutorialUnread = (): boolean => {
+  try {
+    return localStorage.getItem(TUTORIAL_UNREAD_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
 
 const getSupportedSuffixFromName = (name: string) => {
   const match = name.toLowerCase().match(/\.([a-z0-9]+)$/);
@@ -108,6 +136,11 @@ const ensureFileNameWithSuffix = (sourceName: string, suffix: string) => {
   return getSupportedSuffixFromName(baseName) ? baseName : `${baseName}.${suffix}`;
 };
 
+const getLocalDateKey = (now = new Date()) => {
+  const pad = (value: number) => value.toString().padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+};
+
 const Library: React.FC<LibraryProps> = ({ 
   books,
   onOpenBook, 
@@ -115,9 +148,12 @@ const Library: React.FC<LibraryProps> = ({
   onRequestImportBook,
   onUpdateBook,
   onDeleteBook,
+  showNotification,
   isDarkMode,
   userSignature,
   onUpdateSignature,
+  activeSignatureUpdateEnabled,
+  signatureUpdateProbability,
   personas,
   activePersonaId,
   onSelectPersona,
@@ -143,8 +179,10 @@ const Library: React.FC<LibraryProps> = ({
   }`;
 
   // State for signature editing
+  const [isSignatureNoteOpen, setIsSignatureNoteOpen] = useState(false);
   const [isEditingSig, setIsEditingSig] = useState(false);
   const [tempSig, setTempSig] = useState(userSignature);
+  const [isGeneratingAiSignature, setIsGeneratingAiSignature] = useState(false);
   
   // State for menus
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
@@ -221,7 +259,10 @@ const Library: React.FC<LibraryProps> = ({
 
   // State for AI Regex Generation
   const [isGeneratingRegex, setIsGeneratingRegex] = useState(false);
+  const [isAutoSplittingChapters, setIsAutoSplittingChapters] = useState(false);
   const [clockNow, setClockNow] = useState(() => Date.now());
+
+  const signatureAutoTriggerTimerRef = useRef<number | null>(null);
 
   const menuRef = useRef<HTMLDivElement>(null);
   const charMenuRef = useRef<HTMLDivElement>(null);
@@ -234,7 +275,105 @@ const Library: React.FC<LibraryProps> = ({
   const errorModalCloseTimerRef = useRef<number | null>(null);
 
   // Sync prop changes
-  useEffect(() => setTempSig(userSignature), [userSignature]);
+  useEffect(() => {
+    if (!isEditingSig) setTempSig(userSignature);
+  }, [userSignature, isEditingSig]);
+  const clearSignatureAutoTriggerTimer = () => {
+    if (signatureAutoTriggerTimerRef.current) {
+      window.clearTimeout(signatureAutoTriggerTimerRef.current);
+      signatureAutoTriggerTimerRef.current = null;
+    }
+  };
+
+  const normalizeSignatureDrawState = (raw: unknown, now = new Date()): SignatureAutoDrawState => {
+    const today = getLocalDateKey(now);
+    if (!raw || typeof raw !== 'object') {
+      return { dateKey: today, attemptedSlotIndexes: [] };
+    }
+    const source = raw as Partial<SignatureAutoDrawState>;
+    const dateKey = typeof source.dateKey === 'string' ? source.dateKey : '';
+    if (dateKey !== today) {
+      return { dateKey: today, attemptedSlotIndexes: [] };
+    }
+    const attemptedSlotIndexes = Array.isArray(source.attemptedSlotIndexes)
+      ? Array.from(
+          new Set(
+            source.attemptedSlotIndexes
+              .map((value) => Number(value))
+              .filter((value) => Number.isInteger(value) && value >= 0 && value < SIGNATURE_AUTO_DRAW_SLOTS.length)
+          )
+        )
+      : [];
+    return { dateKey: today, attemptedSlotIndexes };
+  };
+
+  const readSignatureDrawState = (now = new Date()): SignatureAutoDrawState => {
+    try {
+      const raw = localStorage.getItem(SIGNATURE_AI_DRAW_STATE_KEY);
+      return normalizeSignatureDrawState(raw ? JSON.parse(raw) : null, now);
+    } catch {
+      return normalizeSignatureDrawState(null, now);
+    }
+  };
+
+  const saveSignatureDrawState = (state: SignatureAutoDrawState) => {
+    try {
+      localStorage.setItem(SIGNATURE_AI_DRAW_STATE_KEY, JSON.stringify(state));
+    } catch {
+      // Ignore localStorage write failures.
+    }
+  };
+
+  const resolveDueSignatureDrawSlotIndex = (state: SignatureAutoDrawState, now = new Date()) => {
+    const attempted = new Set(state.attemptedSlotIndexes);
+    for (let index = 0; index < SIGNATURE_AUTO_DRAW_SLOTS.length; index += 1) {
+      if (attempted.has(index)) continue;
+      const slot = SIGNATURE_AUTO_DRAW_SLOTS[index];
+      const slotTime = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+        slot.hour,
+        slot.minute,
+        0,
+        0
+      );
+      if (now.getTime() >= slotTime.getTime()) {
+        return index;
+      }
+    }
+    return null;
+  };
+
+  const resolveNextSignatureDrawAt = (state: SignatureAutoDrawState, now = new Date()) => {
+    const attempted = new Set(state.attemptedSlotIndexes);
+    for (let index = 0; index < SIGNATURE_AUTO_DRAW_SLOTS.length; index += 1) {
+      if (attempted.has(index)) continue;
+      const slot = SIGNATURE_AUTO_DRAW_SLOTS[index];
+      const slotTime = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+        slot.hour,
+        slot.minute,
+        0,
+        0
+      );
+      if (now.getTime() < slotTime.getTime()) {
+        return slotTime.getTime();
+      }
+    }
+    const tomorrowFirstSlot = SIGNATURE_AUTO_DRAW_SLOTS[0];
+    return new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() + 1,
+      tomorrowFirstSlot.hour,
+      tomorrowFirstSlot.minute,
+      0,
+      0
+    ).getTime();
+  };
 
   // Sync RAG state when editingBook changes
   useEffect(() => {
@@ -271,6 +410,7 @@ const Library: React.FC<LibraryProps> = ({
       if (editModalCloseTimerRef.current) window.clearTimeout(editModalCloseTimerRef.current);
       if (importModalCloseTimerRef.current) window.clearTimeout(importModalCloseTimerRef.current);
       if (errorModalCloseTimerRef.current) window.clearTimeout(errorModalCloseTimerRef.current);
+      clearSignatureAutoTriggerTimer();
     };
   }, []);
 
@@ -419,6 +559,312 @@ const Library: React.FC<LibraryProps> = ({
     return chapters;
   };
 
+  const normalizeTocLine = (raw: string) => {
+    return raw
+      .replace(/^[\s\u3000]+|[\s\u3000]+$/g, '')
+      .replace(/[·•●⋯….\-_=]{2,}\s*\d+\s*$/g, '')
+      .replace(/\s+\d+\s*$/g, '')
+      .replace(/[ \t\u3000]+/g, ' ')
+      .trim();
+  };
+
+  const normalizeTitleForMatch = (line: string) =>
+    line.toLowerCase().replace(/[\s\u3000:：·•⋯….,，。!?！？'"“”‘’()（）\[\]【】\-—_]/g, '');
+
+  const isLikelyChapterTitle = (line: string) => {
+    if (!line) return false;
+    if (line.length < 2 || line.length > 120) return false;
+    if (/^(目录|contents?)$/i.test(line)) return false;
+    if (/^(第[\s　]*[0-9一二三四五六七八九十百千万零〇两]+[\s　]*[章节卷回部篇集幕].*)$/.test(line)) return true;
+    if (/^(chapter|chap\.?)\s*[0-9ivxlcdm]+[\s:：.\-_].*$/i.test(line)) return true;
+    if (/^(序章|前言|楔子|引子|后记|尾声|番外|附录|终章)$/.test(line)) return true;
+    return false;
+  };
+
+  const isLikelyNarrativeLine = (line: string) => {
+    const trimmed = (line || '').trim();
+    if (!trimmed || trimmed.length < 20) return false;
+    if (!/[。！？.!?]/.test(trimmed)) return false;
+    if (/^[\d\s\-.•·●_=]+$/.test(trimmed)) return false;
+    return true;
+  };
+
+  const sanitizeTocTitles = (titles: string[]) => {
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const raw of titles) {
+      const cleaned = normalizeTocLine(raw).replace(/^["'“”‘’]|["'“”‘’]$/g, '').trim();
+      if (!cleaned) continue;
+      const key = normalizeTitleForMatch(cleaned);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      normalized.push(cleaned);
+      if (normalized.length >= 400) break;
+    }
+    return normalized;
+  };
+
+  const extractTocTitlesFromText = (text: string): string[] => {
+    const normalizedText = (text || '').replace(/\r\n?/g, '\n');
+    const lines = normalizedText.split('\n');
+    if (lines.length === 0) return [];
+
+    const tocAnchor = lines.findIndex((line, idx) => idx < 1200 && /(目录|contents?)/i.test(line.trim()));
+    const start = tocAnchor >= 0 ? tocAnchor + 1 : 0;
+    const end = Math.min(lines.length, start + 700);
+
+    const titles: string[] = [];
+    let emptyRun = 0;
+    for (let i = start; i < end; i += 1) {
+      const cleaned = normalizeTocLine(lines[i] || '');
+      if (!cleaned) {
+        emptyRun += 1;
+        if (titles.length >= 3 && emptyRun >= 3) break;
+        continue;
+      }
+      emptyRun = 0;
+      if (!isLikelyChapterTitle(cleaned)) continue;
+      titles.push(cleaned);
+    }
+    return sanitizeTocTitles(titles);
+  };
+
+  const findTocBodyStartLine = (lines: string[], titleKeys: string[]) => {
+    const tocAnchor = lines.findIndex((line, idx) => idx < 1200 && /(目录|contents?)/i.test(line.trim()));
+    if (tocAnchor < 0) return 0;
+
+    const keySet = new Set(titleKeys.filter(Boolean));
+    const tocProbeEnd = Math.min(lines.length, tocAnchor + 2200);
+    let lastTocLine = tocAnchor;
+
+    for (let i = tocAnchor + 1; i < tocProbeEnd; i += 1) {
+      const key = normalizeTitleForMatch(normalizeTocLine(lines[i] || ''));
+      if (key && keySet.has(key)) {
+        lastTocLine = i;
+        continue;
+      }
+
+      if (i - lastTocLine > 120 && isLikelyNarrativeLine(lines[i] || '')) {
+        return Math.max(lastTocLine + 1, i - 2);
+      }
+    }
+
+    for (let i = lastTocLine + 1; i < Math.min(lines.length, lastTocLine + 900); i += 1) {
+      const current = lines[i] || '';
+      const next = lines[i + 1] || '';
+      const key = normalizeTitleForMatch(normalizeTocLine(current));
+      if (key && keySet.has(key) && isLikelyNarrativeLine(next)) {
+        return i;
+      }
+      if (isLikelyNarrativeLine(current)) {
+        return Math.max(lastTocLine + 1, i - 1);
+      }
+    }
+
+    return lastTocLine + 1;
+  };
+
+  const splitChaptersByTocTitles = (text: string, titles: string[]): Chapter[] => {
+    const normalizedTitles = sanitizeTocTitles(titles);
+    if (normalizedTitles.length < 2) return [];
+
+    const normalizedText = (text || '').replace(/\r\n?/g, '\n');
+    const lines = normalizedText.split('\n');
+    if (lines.length === 0) return [];
+
+    const lineOffsets: number[] = new Array(lines.length).fill(0);
+    let offsetCursor = 0;
+    for (let i = 0; i < lines.length; i += 1) {
+      lineOffsets[i] = offsetCursor;
+      offsetCursor += lines[i].length + (i < lines.length - 1 ? 1 : 0);
+    }
+
+    const titleKeys = normalizedTitles.map((title) => normalizeTitleForMatch(title));
+    const startLine = findTocBodyStartLine(lines, titleKeys);
+    const hits: Array<{ title: string; offset: number }> = [];
+    let scanLine = Math.max(0, startLine);
+
+    for (let t = 0; t < normalizedTitles.length; t += 1) {
+      const wanted = titleKeys[t];
+      if (!wanted) continue;
+      let foundLine = -1;
+      for (let i = scanLine; i < lines.length; i += 1) {
+        const lineKey = normalizeTitleForMatch(normalizeTocLine(lines[i] || ''));
+        if (!lineKey) continue;
+        if (lineKey === wanted || (lineKey.length > 8 && (lineKey.includes(wanted) || wanted.includes(lineKey)))) {
+          foundLine = i;
+          break;
+        }
+      }
+      if (foundLine < 0) continue;
+      hits.push({
+        title: normalizeTocLine(lines[foundLine] || normalizedTitles[t]),
+        offset: lineOffsets[foundLine],
+      });
+      scanLine = foundLine + 1;
+    }
+
+    if (hits.length < 2) return [];
+
+    const chapters: Chapter[] = [];
+    if (hits[0].offset > 0) {
+      const preface = normalizedText.slice(0, hits[0].offset).trim();
+      if (preface) chapters.push({ title: '序章 / 前言', content: preface });
+    }
+
+    for (let i = 0; i < hits.length; i += 1) {
+      const start = hits[i].offset;
+      const end = i < hits.length - 1 ? hits[i + 1].offset : normalizedText.length;
+      if (end <= start) continue;
+      const content = normalizedText.slice(start, end).trim();
+      if (!content) continue;
+      chapters.push({ title: hits[i].title || `第${i + 1}章`, content });
+    }
+
+    return chapters;
+  };
+
+  const parseAiTitleList = (raw: string): string[] => {
+    const cleaned = (raw || '')
+      .replace(/```(?:json|javascript|js|text)?\n?([\s\S]*?)```/gi, '$1')
+      .trim();
+    if (!cleaned) return [];
+
+    try {
+      const parsed = JSON.parse(cleaned);
+      const titleList = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray((parsed as { titles?: unknown[] }).titles)
+        ? (parsed as { titles: unknown[] }).titles
+        : [];
+      if (titleList.length > 0) {
+        return titleList.map((item) => String(item || '').trim()).filter(Boolean);
+      }
+    } catch {
+      // Fall through to line parsing.
+    }
+
+    return cleaned
+      .split('\n')
+      .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)、．])\s*/, '').trim())
+      .filter(Boolean);
+  };
+
+  const requestAiTocTitles = async (text: string): Promise<string[]> => {
+    if (!apiConfig.apiKey) return [];
+
+    const normalizedText = (text || '').replace(/\r\n?/g, '\n');
+    if (!normalizedText) return [];
+    const lines = normalizedText.split('\n');
+    const tocAnchor = lines.findIndex((line, idx) => idx < 1500 && /(目录|contents?)/i.test((line || '').trim()));
+    const sample =
+      tocAnchor >= 0
+        ? lines.slice(Math.max(0, tocAnchor - 10), Math.min(lines.length, tocAnchor + 1000)).join('\n').slice(0, 70000)
+        : normalizedText.slice(0, 70000);
+
+    const endpoint = apiConfig.endpoint.replace(/\/+$/, '');
+    const systemPrompt = `你是电子书目录提取助手。请从文本中提取章节标题，按顺序返回 JSON。
+输出要求：
+1. 只输出 JSON 数组，或 {"titles": [...]}；
+2. 每项是章节标题字符串；
+3. 不要输出解释、注释、markdown；
+4. 如果识别不到章节目录，返回 []。`;
+
+    let aiRaw = '';
+    if (apiConfig.provider === 'GEMINI') {
+      const ai = new GoogleGenAI({ apiKey: apiConfig.apiKey });
+      const response = await ai.models.generateContent({
+        model: apiConfig.model || 'gemini-3-pro-preview',
+        contents: `${systemPrompt}\n\n文本：\n${sample}`,
+      });
+      aiRaw = response.text || '';
+    } else if (apiConfig.provider === 'CLAUDE') {
+      const response = await fetch(`${endpoint}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiConfig.apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: apiConfig.model,
+          max_tokens: 1000,
+          messages: [{ role: 'user', content: `${systemPrompt}\n\n文本：\n${sample}` }],
+        }),
+      });
+      if (!response.ok) throw new Error(`Claude API Error: ${response.status}`);
+      const data = await response.json();
+      aiRaw = data.content?.[0]?.text || '';
+    } else {
+      const response = await fetch(`${endpoint}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiConfig.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: apiConfig.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `文本：\n${sample}` },
+          ],
+          temperature: 0.1,
+        }),
+      });
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      const data = await response.json();
+      aiRaw = data.choices?.[0]?.message?.content || '';
+    }
+
+    return sanitizeTocTitles(parseAiTitleList(aiRaw));
+  };
+
+  const parseImportedBookFileAsync = async (file: File): Promise<ParsedBookImportResult> => {
+    const parserModule = await import('../utils/bookImportParser');
+    return parserModule.parseImportedBookFile(file);
+  };
+
+  const resolveTocAssistedChapters = async (
+    fullText: string,
+    options?: { notifyMissingApi?: boolean }
+  ): Promise<Chapter[] | null> => {
+    const localTitles = extractTocTitlesFromText(fullText);
+    const localSplit = splitChaptersByTocTitles(fullText, localTitles);
+    if (localSplit.length >= 2) return localSplit;
+
+    if (!apiConfig.apiKey) {
+      if (options?.notifyMissingApi) {
+        showNotification?.('请设置api', 'error');
+      }
+      return null;
+    }
+
+    try {
+      const aiTitles = await requestAiTocTitles(fullText);
+      const aiSplit = splitChaptersByTocTitles(fullText, aiTitles);
+      if (aiSplit.length >= 2) return aiSplit;
+    } catch (error) {
+      console.warn('AI chapter assist failed, fallback to original chapters:', error);
+    }
+
+    return null;
+  };
+
+  const maybeAssistEpubSplit = async (
+    parsed: ParsedBookImportResult
+  ): Promise<ParsedBookImportResult> => {
+    if (parsed.format !== 'epub') return parsed;
+    if ((parsed.chapters?.length || 0) > 1) return parsed;
+    if (!parsed.fullText || parsed.fullText.length < 6000) return parsed;
+
+    showNotification?.('正在分析目录……');
+    const assistedChapters = await resolveTocAssistedChapters(parsed.fullText, { notifyMissingApi: true });
+    if (assistedChapters && assistedChapters.length >= 2) {
+      return { ...parsed, chapters: assistedChapters };
+    }
+    return parsed;
+  };
+
   const hasStructuredChapterBlocks = (chapters: Chapter[] | undefined) => {
     if (!Array.isArray(chapters) || chapters.length === 0) return false;
     const hasAnyBlocks = chapters.some((chapter) => Array.isArray(chapter.blocks) && chapter.blocks.length > 0);
@@ -527,17 +973,39 @@ const Library: React.FC<LibraryProps> = ({
     editCharCount,
   ]);
 
+  const openSignatureNote = () => {
+    setTempSig(userSignature);
+    setIsEditingSig(false);
+    setIsSignatureNoteOpen(true);
+  };
+
+  const closeSignatureNote = () => {
+    setIsSignatureNoteOpen(false);
+    setIsEditingSig(false);
+    setTempSig(userSignature);
+  };
 
   const handleSaveSig = () => {
-    onUpdateSignature(tempSig);
+    const next = Array.from(tempSig).slice(0, SIGNATURE_AI_MAX_CHARS).join('');
+    onUpdateSignature(next);
+    setTempSig(next);
     setIsEditingSig(false);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') handleSaveSig();
+  const handleCancelSigEdit = () => {
+    setTempSig(userSignature);
+    setIsEditingSig(false);
+  };
+
+  const handleSignatureEditKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      handleSaveSig();
+      return;
+    }
     if (e.key === 'Escape') {
-      setTempSig(userSignature);
-      setIsEditingSig(false);
+      e.preventDefault();
+      handleCancelSigEdit();
     }
   };
 
@@ -624,7 +1092,7 @@ const Library: React.FC<LibraryProps> = ({
   // Open Edit
   const openEditModal = (e: React.MouseEvent, book: Book) => {
     e.stopPropagation();
-    if (isBuiltInBook(book.id)) return;
+    if (isBuiltInTutorialBook(book.id)) return;
     clearSessionGeneratedImageRefs(true);
     if (editModalCloseTimerRef.current) {
       window.clearTimeout(editModalCloseTimerRef.current);
@@ -828,7 +1296,7 @@ const Library: React.FC<LibraryProps> = ({
   };
 
   const applyParsedBookImportResult = (
-    parsed: Awaited<ReturnType<typeof parseImportedBookFile>>,
+    parsed: ParsedBookImportResult,
     setTarget: typeof setEditingBook | typeof setImportingBook,
     isEdit: boolean
   ) => {
@@ -864,8 +1332,10 @@ const Library: React.FC<LibraryProps> = ({
     }
 
     try {
-      const parsed = await parseImportedBookFile(file);
-      applyParsedBookImportResult(parsed, setTarget, isEditModalOpen);
+      showNotification?.('导入中……');
+      const parsed = await parseImportedBookFileAsync(file);
+      const assistedParsed = await maybeAssistEpubSplit(parsed);
+      applyParsedBookImportResult(assistedParsed, setTarget, isEditModalOpen);
     } catch (error) {
       console.error('Failed to parse imported file:', error);
       const message = error instanceof Error ? error.message : 'Unable to parse the selected file.';
@@ -882,6 +1352,7 @@ const Library: React.FC<LibraryProps> = ({
     if (!targetBook || !sourceUrl) return;
 
     try {
+      showNotification?.('导入中……');
       const response = await fetch(sourceUrl);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -906,8 +1377,9 @@ const Library: React.FC<LibraryProps> = ({
         type: blob.type || contentType || 'application/octet-stream',
       });
 
-      const parsed = await parseImportedBookFile(remoteFile);
-      applyParsedBookImportResult(parsed, setTarget, isEditModalOpen);
+      const parsed = await parseImportedBookFileAsync(remoteFile);
+      const assistedParsed = await maybeAssistEpubSplit(parsed);
+      applyParsedBookImportResult(assistedParsed, setTarget, isEditModalOpen);
       setTxtFileUrlMode(false);
       setTempTxtUrl('');
     } catch (error) {
@@ -937,6 +1409,48 @@ const Library: React.FC<LibraryProps> = ({
       const currentTags = targetBook.tags || [];
       // @ts-ignore
       setTarget({ ...targetBook, tags: currentTags.filter(t => t !== tagToRemove) });
+    }
+  };
+
+  const handleManualAutoSplitChapters = async () => {
+    const targetBook = isEditModalOpen ? editingBook : importingBook;
+    const setTarget = isEditModalOpen ? setEditingBook : setImportingBook;
+    const fullText = targetBook?.fullText || '';
+
+    if (!fullText.trim()) {
+      openErrorModal('请先导入书籍正文内容');
+      return;
+    }
+    if (isAutoSplittingChapters) return;
+
+    setIsAutoSplittingChapters(true);
+    showNotification?.('正在分析目录……');
+    try {
+      const assistedChapters = await resolveTocAssistedChapters(fullText, { notifyMissingApi: true });
+      if (!assistedChapters || assistedChapters.length < 2) {
+        if (apiConfig.apiKey) {
+          showNotification?.('未识别到可用目录，保持原章节', 'error');
+        }
+        return;
+      }
+
+      // @ts-ignore
+      setTarget((prev) => ({
+        ...prev,
+        chapters: assistedChapters,
+        chapterRegex: '',
+      }));
+      if (isEditModalOpen) {
+        setIsEditStructuredChapterMode(true);
+      } else {
+        setIsImportStructuredChapterMode(true);
+      }
+      showNotification?.(`分章完成，共 ${assistedChapters.length} 章`, 'success');
+    } catch (error) {
+      console.error('Manual chapter split failed:', error);
+      showNotification?.('自动分章节失败，请稍后重试', 'error');
+    } finally {
+      setIsAutoSplittingChapters(false);
     }
   };
 
@@ -1078,6 +1592,203 @@ const Library: React.FC<LibraryProps> = ({
   const activeCharacter = characters.find(c => c.id === activeCharacterId);
   const defaultCharImg = 'https://i.postimg.cc/ZY3jJTK4/56163534-p0.jpg';
   const charDisplayName = activeCharacter ? (activeCharacter.nickname || activeCharacter.name) : 'Char';
+
+  const sanitizeAiSignatureText = (raw: string) => {
+    let cleaned = (raw || '').trim();
+    if (!cleaned) return '';
+
+    cleaned = cleaned.replace(/```(?:json|text|markdown)?\s*([\s\S]*?)```/gi, '$1').trim();
+
+    if (cleaned.startsWith('{') || cleaned.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(cleaned);
+        if (typeof parsed === 'string') cleaned = parsed;
+        else if (Array.isArray(parsed)) cleaned = String(parsed.find((item) => typeof item === 'string') || '');
+        else if (parsed && typeof parsed === 'object') {
+          const obj = parsed as Record<string, unknown>;
+          cleaned = String(
+            obj.signature ?? obj.text ?? obj.content ?? obj.message ?? obj.result ?? ''
+          );
+        }
+      } catch {
+        // Keep raw text fallback.
+      }
+    }
+
+    cleaned = cleaned
+      .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)[0] || '';
+
+    cleaned = cleaned.replace(/^(今日签名|签名|文案|留言|一句话|推荐语)\s*[:：\-]\s*/i, '').trim();
+
+    const chars = Array.from(cleaned);
+    if (chars.length > SIGNATURE_AI_MAX_CHARS) {
+      cleaned = chars.slice(0, SIGNATURE_AI_MAX_CHARS).join('');
+    }
+    return cleaned;
+  };
+
+  const requestAiSignatureSuggestion = async (systemPrompt: string, userPrompt: string): Promise<string> => {
+    const endpoint = apiConfig.endpoint.replace(/\/+$/, '');
+    if (apiConfig.provider === 'GEMINI') {
+      const ai = new GoogleGenAI({ apiKey: apiConfig.apiKey });
+      const response = await ai.models.generateContent({
+        model: apiConfig.model || 'gemini-3-pro-preview',
+        contents: `${systemPrompt}\n\n${userPrompt}`,
+      });
+      return response.text || '';
+    }
+
+    if (apiConfig.provider === 'CLAUDE') {
+      const response = await fetch(`${endpoint}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiConfig.apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: apiConfig.model,
+          max_tokens: 180,
+          messages: [{ role: 'user', content: `${systemPrompt}\n\n${userPrompt}` }],
+        }),
+      });
+      if (!response.ok) throw new Error(`Claude API Error: ${response.status}`);
+      const data = await response.json();
+      return data.content?.[0]?.text || '';
+    }
+
+    const response = await fetch(`${endpoint}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiConfig.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: apiConfig.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.9,
+      }),
+    });
+    if (!response.ok) throw new Error(`API Error: ${response.status}`);
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || '';
+  };
+
+  const updateSignatureByAi = async () => {
+    if (isGeneratingAiSignature) return false;
+    if (!apiConfig.apiKey) {
+      return false;
+    }
+
+    setIsGeneratingAiSignature(true);
+    try {
+      const systemPrompt = `你是阅读应用里的签名文案助手。
+请写一句中文短句，适合作为主页签名。
+要求：
+1. 只能输出一句话，不要解释，不要 markdown；
+2. 语气自然、温柔、真诚，不鸡汤、不说教；
+3. 长度控制在 ${SIGNATURE_AI_MAX_CHARS} 字以内；
+4. 内容可来自读书感悟、心情、内心话、感慨、摘抄风格。`;
+      const userPrompt = `请生成今日签名。可参考：
+- 当前签名：${userSignature || '（空）'}
+- 用户昵称：${userDisplayName}
+- 角色昵称：${charDisplayName}`;
+
+      const raw = await requestAiSignatureSuggestion(systemPrompt, userPrompt);
+      const nextSignature = sanitizeAiSignatureText(raw);
+      if (!nextSignature) throw new Error('empty_signature');
+
+      onUpdateSignature(nextSignature);
+      try {
+        localStorage.setItem(SIGNATURE_AI_LAST_SUCCESS_DATE_KEY, getLocalDateKey());
+        localStorage.setItem(
+          SIGNATURE_AI_UPDATE_PROMPT_KEY,
+          JSON.stringify({
+            updatedAt: Date.now(),
+            content: nextSignature,
+            characterName: charDisplayName,
+          })
+        );
+      } catch {
+        // Ignore localStorage write failures.
+      }
+      showNotification?.('AI 便签已更新', 'success');
+      return true;
+    } catch (error) {
+      console.error('AI signature update failed:', error);
+      return false;
+    } finally {
+      setIsGeneratingAiSignature(false);
+    }
+  };
+
+  useEffect(() => {
+    clearSignatureAutoTriggerTimer();
+    if (isEditingSig || !apiConfig.apiKey || isGeneratingAiSignature || !activeSignatureUpdateEnabled) {
+      return;
+    }
+
+    const normalizedProbability = Math.max(0, Math.min(100, Math.round(signatureUpdateProbability)));
+
+    const scheduleNextRun = (delayMs: number) => {
+      clearSignatureAutoTriggerTimer();
+      signatureAutoTriggerTimerRef.current = window.setTimeout(() => {
+        void runSignatureAutoDrawScheduler();
+      }, Math.max(1000, delayMs));
+    };
+
+    const runSignatureAutoDrawScheduler = async () => {
+      if (document.visibilityState !== 'visible') {
+        scheduleNextRun(60 * 1000);
+        return;
+      }
+
+      const now = new Date();
+      const state = readSignatureDrawState(now);
+      const dueSlotIndex = resolveDueSignatureDrawSlotIndex(state, now);
+
+      if (dueSlotIndex !== null) {
+        const nextState: SignatureAutoDrawState = {
+          dateKey: state.dateKey,
+          attemptedSlotIndexes: Array.from(new Set([...state.attemptedSlotIndexes, dueSlotIndex])),
+        };
+        saveSignatureDrawState(nextState);
+
+        if (Math.random() * 100 < normalizedProbability) {
+          await updateSignatureByAi();
+        }
+
+        scheduleNextRun(1500);
+        return;
+      }
+
+      const nextAt = resolveNextSignatureDrawAt(state, now);
+      scheduleNextRun(nextAt - now.getTime());
+    };
+
+    void runSignatureAutoDrawScheduler();
+
+    return () => {
+      clearSignatureAutoTriggerTimer();
+    };
+  }, [
+    isEditingSig,
+    activeSignatureUpdateEnabled,
+    signatureUpdateProbability,
+    apiConfig.apiKey,
+    apiConfig.provider,
+    apiConfig.endpoint,
+    apiConfig.model,
+    userDisplayName,
+    charDisplayName,
+    isGeneratingAiSignature,
+  ]);
 
   const renderAvatar = (imageUrl: string | undefined, isDefaultUser: boolean, isDefaultChar: boolean, type: 'USER' | 'CHAR') => {
     if (imageUrl) {
@@ -1272,6 +1983,27 @@ const Library: React.FC<LibraryProps> = ({
         </div>
 
         <div className="space-y-1">
+          <div className="flex justify-end items-center gap-2 mb-1">
+            <button
+              onClick={handleAutoGenerateRegex}
+              disabled={isGeneratingRegex || structuredChapterMode}
+              className={`px-4 py-2 rounded-xl flex items-center justify-center gap-1 text-xs font-bold text-rose-400 transition-all active:scale-95 whitespace-nowrap disabled:opacity-50 ${btnClass}`}
+              title={structuredChapterMode ? '已启用结构化章节模式' : '输入示例标题后点击自动生成'}
+            >
+              <Sparkles size={14} className={isGeneratingRegex ? 'animate-spin' : ''} />
+              {isGeneratingRegex ? '生成中...' : '自动生成'}
+            </button>
+            <button
+              onClick={handleManualAutoSplitChapters}
+              disabled={isAutoSplittingChapters || !(book.fullText || '').trim()}
+              className={`px-4 py-2 rounded-xl flex items-center justify-center gap-1 text-xs font-bold text-rose-400 transition-all active:scale-95 whitespace-nowrap disabled:opacity-50 ${btnClass}`}
+              title={(book.fullText || '').trim() ? '按目录标题尝试自动分章节' : '请先导入正文内容'}
+            >
+              <List size={14} className={isAutoSplittingChapters ? 'animate-spin' : ''} />
+              {isAutoSplittingChapters ? '分章中...' : '一键分章节'}
+            </button>
+          </div>
+
           <div className="flex justify-between items-center mb-1">
             <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1 flex items-center gap-1">
               章节匹配正则
@@ -1297,15 +2029,6 @@ const Library: React.FC<LibraryProps> = ({
               placeholder={structuredChapterMode ? '已启用内建章节结构' : '例如: ^第\\s*[0-9]+\\s*章'}
               className={`flex-1 px-4 py-3 text-sm rounded-xl outline-none ${inputClass} ${structuredChapterMode ? 'opacity-60 cursor-not-allowed' : ''}`}
             />
-            <button
-              onClick={handleAutoGenerateRegex}
-              disabled={isGeneratingRegex || structuredChapterMode}
-              className={`px-4 rounded-xl flex items-center justify-center gap-1 text-xs font-bold text-rose-400 transition-all active:scale-95 whitespace-nowrap disabled:opacity-50 ${btnClass}`}
-              title={structuredChapterMode ? '已启用结构化章节模式' : '输入示例标题后点击自动生成'}
-            >
-              <Sparkles size={14} className={isGeneratingRegex ? 'animate-spin' : ''} />
-              {isGeneratingRegex ? '生成中...' : '自动生成'}
-            </button>
           </div>
           <p className="text-[10px] text-slate-400 px-2 leading-tight mt-1">
             {structuredChapterMode
@@ -1459,29 +2182,16 @@ const Library: React.FC<LibraryProps> = ({
             <h1 className={`text-2xl font-bold ${headingClass}`}>书架</h1>
             
             {/* Editable Signature */}
-            <div className="mt-1 h-8 flex items-center">
-              {isEditingSig ? (
-                 <div className="flex items-center gap-2 w-full max-w-[240px]">
-                   <input 
-                     autoFocus
-                     type="text" 
-                     value={tempSig}
-                     onChange={(e) => setTempSig(e.target.value)}
-                     onBlur={handleSaveSig}
-                     onKeyDown={handleKeyDown}
-                     className={`w-full min-w-0 text-sm px-2 py-1 rounded-lg outline-none ${inputClass}`}
-                   />
-                   <button onMouseDown={handleSaveSig} className="text-emerald-500 flex-shrink-0"><Check size={16} /></button>
-                 </div>
-              ) : (
-                 <div 
-                   onClick={() => setIsEditingSig(true)}
-                   className={`group flex items-center justify-between gap-2 cursor-pointer py-1 -ml-1 px-1 rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 w-full max-w-[240px]`}
-                 >
-                   <p className={`text-sm ${subTextClass} truncate mr-2`}>{userSignature || <span className="opacity-50 italic">点击编辑签名...</span>}</p>
-                   <Edit2 size={12} className="opacity-0 group-hover:opacity-50 text-slate-400 flex-shrink-0" />
-                 </div>
-              )}
+            <div className="mt-1 min-h-8 flex items-center">
+              <div
+                onClick={openSignatureNote}
+                className={`group flex items-center justify-between gap-2 cursor-pointer py-1 -ml-1 px-1 rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 w-full max-w-[240px]`}
+              >
+                <p className={`flex-1 min-w-0 mr-2 text-sm ${subTextClass} truncate`}>
+                  {userSignature || <span className="opacity-50 italic">点击查看签名...</span>}
+                </p>
+                <Edit2 size={12} className="opacity-0 group-hover:opacity-50 text-slate-400 flex-shrink-0" />
+              </div>
             </div>
           </div>
 
@@ -1626,7 +2336,7 @@ const Library: React.FC<LibraryProps> = ({
                 ) : (
                     <DefaultBookCover />
                 )}
-                {isBuiltInBook(recentBook.id) && isTutorialUnread() && (
+                {isBuiltInTutorialBook(recentBook.id) && isTutorialUnread() && (
                   <span className="absolute top-1.5 right-1.5 w-3 h-3 rounded-full shadow-md animate-pulse z-10" style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }} />
                 )}
               </div>
@@ -1648,7 +2358,7 @@ const Library: React.FC<LibraryProps> = ({
               </div>
               
               {/* Edit Button for Recent Book */}
-              {!isBuiltInBook(recentBook.id) && (
+              {!isBuiltInTutorialBook(recentBook.id) && (
               <button
                 onClick={(e) => openEditModal(e, recentBook)}
                 className={`absolute top-4 right-4 ${compactEditButtonClass}`}
@@ -1796,11 +2506,11 @@ const Library: React.FC<LibraryProps> = ({
                        </div>
                      )}
 
-                     {isBuiltInBook(book.id) && isTutorialUnread() && (
+                     {isBuiltInTutorialBook(book.id) && isTutorialUnread() && (
                        <span className="absolute top-2.5 right-2.5 w-3 h-3 rounded-full shadow-md animate-pulse" style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }} />
                      )}
 
-                     {!isBuiltInBook(book.id) && (
+                     {!isBuiltInTutorialBook(book.id) && (
                      <button
                         onClick={(e) => openEditModal(e, book)}
                         className="absolute top-2 right-2 w-7 h-7 bg-black/40 hover:bg-rose-500 text-white rounded-full flex items-center justify-center backdrop-blur-sm transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
@@ -1841,7 +2551,7 @@ const Library: React.FC<LibraryProps> = ({
                        ) : (
                           <div className="absolute inset-0"><DefaultBookCover /></div>
                        )}
-                       {isBuiltInBook(book.id) && isTutorialUnread() && (
+                       {isBuiltInTutorialBook(book.id) && isTutorialUnread() && (
                          <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full shadow-md animate-pulse z-10" style={{ backgroundColor: 'rgb(var(--theme-500) / 1)' }} />
                        )}
                     </div>
@@ -1883,7 +2593,7 @@ const Library: React.FC<LibraryProps> = ({
                     </div>
 
                     {/* Actions */}
-                    {!isBuiltInBook(book.id) && (
+                    {!isBuiltInTutorialBook(book.id) && (
                     <div className="flex flex-col justify-center">
                         <button
                             onClick={(e) => openEditModal(e, book)}
@@ -1898,6 +2608,97 @@ const Library: React.FC<LibraryProps> = ({
            </div>
         )}
       </div>
+
+      {/* Signature Note Modal */}
+      {isSignatureNoteOpen && (
+        <ModalPortal>
+          <div
+            className="fixed inset-0 z-[105] flex items-center justify-center p-6 pb-28 bg-black/35 backdrop-blur-sm app-fade-enter"
+            onClick={closeSignatureNote}
+          >
+            <div
+              className={`relative w-full max-w-sm rounded-2xl border shadow-2xl p-5 ${
+                isDarkMode ? 'bg-[#3a3628] border-amber-200/20 text-amber-50' : 'bg-[#fff6d8] border-amber-200 text-slate-700'
+              }`}
+              style={{
+                backgroundImage: isDarkMode
+                  ? 'repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0px, rgba(255,255,255,0.04) 1px, transparent 1px, transparent 28px)'
+                  : 'repeating-linear-gradient(0deg, rgba(180,140,60,0.10) 0px, rgba(180,140,60,0.10) 1px, transparent 1px, transparent 28px)',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className={`absolute -top-2 left-6 w-12 h-3 rounded-sm rotate-[-8deg] ${isDarkMode ? 'bg-amber-300/50' : 'bg-amber-200/90'} shadow`} />
+              <div className={`absolute -top-1 right-10 w-10 h-3 rounded-sm rotate-[6deg] ${isDarkMode ? 'bg-amber-300/45' : 'bg-amber-200/85'} shadow`} />
+
+              <div className="flex items-center justify-between mb-3">
+                <span />
+                <div className="flex items-center gap-1">
+                  {isEditingSig ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleCancelSigEdit}
+                        className={`w-7 h-7 rounded-full flex items-center justify-center ${isDarkMode ? 'hover:bg-white/10 text-amber-100/80' : 'hover:bg-amber-100 text-amber-700'}`}
+                        title="取消编辑"
+                      >
+                        <X size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSaveSig}
+                        className={`w-7 h-7 rounded-full flex items-center justify-center ${isDarkMode ? 'hover:bg-emerald-400/20 text-emerald-300' : 'hover:bg-emerald-100 text-emerald-600'}`}
+                        title="保存签名"
+                      >
+                        <Check size={14} />
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => { setTempSig(userSignature); setIsEditingSig(true); }}
+                      className={`w-7 h-7 rounded-full flex items-center justify-center ${isDarkMode ? 'hover:bg-white/10 text-amber-100/85' : 'hover:bg-amber-100 text-amber-700'}`}
+                      title="编辑签名"
+                    >
+                      <Edit2 size={14} />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={closeSignatureNote}
+                    className={`w-7 h-7 rounded-full flex items-center justify-center ${isDarkMode ? 'hover:bg-white/10 text-amber-100/80' : 'hover:bg-amber-100 text-amber-700'}`}
+                    title="关闭便签"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+
+              {isEditingSig ? (
+                <div>
+                  <textarea
+                    autoFocus
+                    value={tempSig}
+                    maxLength={SIGNATURE_AI_MAX_CHARS}
+                    onChange={(e) => setTempSig(e.target.value)}
+                    onKeyDown={handleSignatureEditKeyDown}
+                    className={`w-full min-h-[160px] p-1 text-sm leading-relaxed outline-none resize-none bg-transparent ${
+                      isDarkMode ? 'text-amber-50 placeholder-amber-100/45' : 'text-slate-700 placeholder-slate-500'
+                    }`}
+                    placeholder="写下你的签名..."
+                  />
+                  <div className={`mt-2 text-[11px] text-right ${isDarkMode ? 'text-amber-100/70' : 'text-amber-700/70'}`}>
+                    {Array.from(tempSig).length}/{SIGNATURE_AI_MAX_CHARS}
+                  </div>
+                </div>
+              ) : (
+                <div className={`rounded-xl p-3 min-h-[160px] whitespace-pre-wrap break-words text-sm leading-relaxed bg-transparent ${isDarkMode ? 'text-amber-50' : 'text-slate-700'}`}>
+                  {userSignature || <span className="opacity-50 italic">还没有签名，点右上角铅笔写一句吧。</span>}
+                </div>
+              )}
+            </div>
+          </div>
+        </ModalPortal>
+      )}
 
       {/* Edit Book Modal */}
       {isEditModalOpen && editingBook && (
@@ -2118,9 +2919,3 @@ const Library: React.FC<LibraryProps> = ({
 };
 
 export default Library;
-
-
-
-
-
-

@@ -1,5 +1,5 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Check, ChevronDown, Trash2, AlertTriangle, Image as ImageIcon, Link as LinkIcon, Loader2, X, RefreshCw, Save, Edit2, Paintbrush, Wrench, MessageSquareText, Eraser, Volume2, Play, Square, Download, HelpCircle, Star, Copy, ChevronUp } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, Trash2, AlertTriangle, Image as ImageIcon, Link as LinkIcon, Loader2, X, RefreshCw, Save, Edit2, Paintbrush, Wrench, MessageSquareText, Eraser, Volume2, Play, Square, Download, HelpCircle, Star, Copy, ChevronUp, Type } from 'lucide-react';
 import { ApiPreset, AppSettings, FavoriteQuote, ReaderBookState, ReaderSummaryCard, TtsConfig, TtsPlaybackState } from '../types';
 import type { TtsPreset } from '../types';
 import { validateTtsConfig } from '../utils/ttsEngine';
@@ -93,6 +93,7 @@ interface Props {
   favoriteQuotes: FavoriteQuote[];
   onDeleteFavoriteQuote: (id: string) => void;
   onExportConversation: () => void;
+  onOpenReaderTypography?: () => void;
 }
 
 const TAB_ITEMS: Array<{ key: TabKey; label: string; icon: React.ComponentType<{ size?: number }> }> = [
@@ -476,6 +477,7 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
     favoriteQuotes,
     onDeleteFavoriteQuote,
     onExportConversation,
+    onOpenReaderTypography,
   } = props;
 
   const [tab, setTab] = useState<TabKey>('appearance');
@@ -1113,6 +1115,24 @@ const ReaderMoreSettingsPanel: React.FC<Props> = (props) => {
                           onChange={(e) => onUpdateAppearanceSettings({ bubbleFontSizeScale: clampInt(Number(e.target.value || '100'), 70, 250) / 100 })}
                           className="app-range absolute top-1/2 -translate-y-1/2 left-0 w-full h-5 bg-transparent appearance-none cursor-pointer z-10" />
                       </div>
+                    </div>
+
+                    <div className="w-full h-[1px] bg-slate-300/20 my-0" />
+
+                    {/* 阅读文字样式 */}
+                    <div className="py-5">
+                      <div className={`text-sm font-bold mb-3 ${headingClass}`}>阅读文字样式</div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onClose();
+                          window.setTimeout(() => onOpenReaderTypography?.(), 40);
+                        }}
+                        className={`w-full h-10 rounded-xl text-sm font-bold flex items-center justify-center gap-2 ${btnClass} ${activeBtnClass} transition-all`}
+                      >
+                        <Type size={15} />
+                        打开文字样式面板
+                      </button>
                     </div>
 
                     <div className="w-full h-[1px] bg-slate-300/20 my-0" />

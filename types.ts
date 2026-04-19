@@ -66,6 +66,33 @@ export interface ReaderBookmarkState {
   createdAt: number;
 }
 
+export interface ReaderVocabularyEntry {
+  id: string;
+  term: string;
+  normalizedTerm: string;
+}
+
+export interface VocabularyLexiconEntry {
+  id: string; // normalizedTerm
+  term: string;
+  normalizedTerm: string;
+  phonetic?: string;
+  posTags?: string[];
+  meanings?: string[];
+  examples?: string[];
+  source: 'book' | 'api' | 'manual' | 'mixed';
+  bookIds?: string[];
+  createdAt: number;
+  updatedAt: number;
+  dueAt: number;
+  sm2Ease: number;
+  sm2Repetitions: number;
+  sm2IntervalDays: number;
+  reviewCount: number;
+  failCount: number;
+  lastReviewedAt?: number;
+}
+
 export interface ReaderSessionSnapshot {
   bookId: string;
   progress: number;
@@ -78,6 +105,7 @@ export interface ReaderBookState {
   highlightsByChapter?: Record<string, ReaderHighlightRange[]>;
   aiUnderlinesByChapter?: Record<string, ReaderAiUnderlineRange[]>;
   bookmarks?: ReaderBookmarkState[];
+  vocabularyEntries?: ReaderVocabularyEntry[];
   typographyStyle?: ReaderTypographyState;
   fontOptions?: ReaderFontState[];
   selectedFontId?: string;
@@ -358,6 +386,7 @@ export interface ReaderMoreSettings {
 
 export interface AppSettings {
   activeCommentsEnabled: boolean;
+  activeSignatureUpdateEnabled: boolean;
   aiProactiveUnderlineEnabled: boolean;
   aiProactiveUnderlineProbability: number;
   commentInterval: number;

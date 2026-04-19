@@ -14,8 +14,9 @@ import {
   X,
   ImageIcon,
   Link as LinkIcon,
-  Volume2
-} from 'lucide-react';
+  Volume2,
+  AlertTriangle
+  } from 'lucide-react';
 import { SettingsView, Persona, Character, WorldBookEntry, ThemeClasses, ApiConfig, ApiPreset, AppSettings, TtsConfig, TtsPreset } from './settings/types';
 import { RagPreset } from '../types';
 import PersonaSettings from './settings/PersonaSettings';
@@ -27,12 +28,17 @@ import TtsSettings from './settings/TtsSettings';
 import ModalPortal from './ModalPortal';
 import { deleteImageByRef, saveImageFile } from '../utils/imageStorage';
 import {
+  StorageCategoryKey,
   StorageAnalysisResult,
   analyzeAppStorageUsage,
   createAppArchivePayload,
   formatBytes,
   restoreAppArchivePayload,
 } from '../utils/appArchive';
+import {
+  createVocabularyArchivePayload,
+  restoreVocabularyArchivePayloadMerge,
+} from '../utils/vocabularyArchive';
 
 interface SettingsProps {
   isDarkMode: boolean;
@@ -135,6 +141,11 @@ const Settings: React.FC<SettingsProps> = ({
   ttsPresets,
   setTtsPresets
 }) => {
+  const STORAGE_WARNING_TOTAL_USAGE_RATIO = 0.7;
+  const STORAGE_WARNING_TOTAL_FALLBACK_BYTES = 300 * 1024 * 1024;
+  const STORAGE_WARNING_CATEGORY_BYTES = 30 * 1024 * 1024;
+  const STORAGE_WARNING_CATEGORY_RATIO = 0.35;
+
   const SETTINGS_VIEW_TRANSITION_MS = 260;
   const [currentView, setCurrentView] = useState<SettingsView>('MAIN');
   const [transitionAnimationClass, setTransitionAnimationClass] = useState('app-view-enter-left');
@@ -150,6 +161,7 @@ const Settings: React.FC<SettingsProps> = ({
   const [tempUrl, setTempUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const archiveFileInputRef = useRef<HTMLInputElement>(null);
+  const vocabularyArchiveFileInputRef = useRef<HTMLInputElement>(null);
   const viewTransitionTimerRef = useRef<number | null>(null);
   const viewTransitionUnlockTimerRef = useRef<number | null>(null);
   const storageDonutAnimRef = useRef<number | null>(null);
@@ -159,6 +171,11 @@ const Settings: React.FC<SettingsProps> = ({
   const [storageDonutReveal, setStorageDonutReveal] = useState(0);
   const [archiveExporting, setArchiveExporting] = useState(false);
   const [archiveImporting, setArchiveImporting] = useState(false);
+  const [vocabularyArchiveExporting, setVocabularyArchiveExporting] = useState(false);
+  const [vocabularyArchiveImporting, setVocabularyArchiveImporting] = useState(false);
+  const [storageWarningKeys, setStorageWarningKeys] = useState<Set<StorageCategoryKey>>(new Set());
+  const [hasStorageWarning, setHasStorageWarning] = useState(false);
+  const [storageQuotaBytes, setStorageQuotaBytes] = useState<number | null>(null);
 
   // Theme Classes
   const theme: ThemeClasses = {
@@ -237,19 +254,70 @@ const Settings: React.FC<SettingsProps> = ({
     setAppSettings(prev => ({ ...prev, [field]: value }));
   };
 
-  const refreshStorageAnalysis = async () => {
-    setStorageAnalysisLoading(true);
-    setStorageAnalysisError('');
-    setStorageDonutReveal(0);
-    setStorageAnalysis(null);
+  const analyzeStorageWarnings = (
+    analysis: StorageAnalysisResult,
+    quotaBytes: number | null,
+  ): { hasWarning: boolean; keys: Set<StorageCategoryKey> } => {
+    const warningKeys = new Set<StorageCategoryKey>();
+    const totalBytes = Math.max(0, Number(analysis.totalBytes || 0));
+    const totalByRatio = Number.isFinite(Number(quotaBytes || 0)) && Number(quotaBytes) > 0
+      ? totalBytes / Number(quotaBytes)
+      : 0;
+    const hasTotalWarning = totalBytes >= STORAGE_WARNING_TOTAL_FALLBACK_BYTES
+      || totalByRatio >= STORAGE_WARNING_TOTAL_USAGE_RATIO;
+
+    analysis.items.forEach((item) => {
+      const ratio = totalBytes > 0 ? item.bytes / totalBytes : 0;
+      if (item.bytes >= STORAGE_WARNING_CATEGORY_BYTES && ratio >= STORAGE_WARNING_CATEGORY_RATIO) {
+        warningKeys.add(item.key);
+      }
+    });
+
+    return {
+      hasWarning: hasTotalWarning || warningKeys.size > 0,
+      keys: warningKeys,
+    };
+  };
+
+  const resolveStorageQuotaBytes = async (): Promise<number | null> => {
+    if (typeof navigator === 'undefined' || !navigator.storage?.estimate) return null;
     try {
-      const analysis = await analyzeAppStorageUsage();
+      const estimate = await navigator.storage.estimate();
+      const quota = Number(estimate?.quota || 0);
+      if (!Number.isFinite(quota) || quota <= 0) return null;
+      return quota;
+    } catch {
+      return null;
+    }
+  };
+
+  const refreshStorageAnalysis = async (options?: { silent?: boolean }) => {
+    const silent = Boolean(options?.silent);
+    if (!silent) {
+      setStorageAnalysisLoading(true);
+      setStorageAnalysisError('');
+      setStorageDonutReveal(0);
+      setStorageAnalysis(null);
+    }
+    try {
+      const [analysis, quota] = await Promise.all([
+        analyzeAppStorageUsage(),
+        resolveStorageQuotaBytes(),
+      ]);
       setStorageAnalysis(analysis);
+      setStorageQuotaBytes(quota);
+      const warning = analyzeStorageWarnings(analysis, quota);
+      setStorageWarningKeys(warning.keys);
+      setHasStorageWarning(warning.hasWarning);
     } catch (error) {
       console.error('Failed to analyze storage usage:', error);
-      setStorageAnalysisError('存储分析失败，请稍后重试');
+      if (!silent) {
+        setStorageAnalysisError('存储分析失败，请稍后重试');
+      }
     } finally {
-      setStorageAnalysisLoading(false);
+      if (!silent) {
+        setStorageAnalysisLoading(false);
+      }
     }
   };
 
@@ -257,6 +325,10 @@ const Settings: React.FC<SettingsProps> = ({
     if (currentView !== 'STORAGE') return;
     void refreshStorageAnalysis();
   }, [currentView]);
+
+  useEffect(() => {
+    void refreshStorageAnalysis({ silent: true });
+  }, []);
 
   useEffect(() => {
     if (storageDonutAnimRef.current) {
@@ -294,7 +366,7 @@ const Settings: React.FC<SettingsProps> = ({
   }, [currentView, storageAnalysisLoading, storageAnalysis?.generatedAt]);
 
   const handleExportArchive = async () => {
-    if (archiveExporting || archiveImporting) return;
+    if (archiveExporting || archiveImporting || vocabularyArchiveExporting || vocabularyArchiveImporting) return;
     setArchiveExporting(true);
     try {
       const EXPORT_TIMEOUT = 120_000;
@@ -336,7 +408,7 @@ const Settings: React.FC<SettingsProps> = ({
   };
 
   const handleImportArchive = () => {
-    if (archiveExporting || archiveImporting) return;
+    if (archiveExporting || archiveImporting || vocabularyArchiveExporting || vocabularyArchiveImporting) return;
     archiveFileInputRef.current?.click();
   };
 
@@ -361,6 +433,66 @@ const Settings: React.FC<SettingsProps> = ({
       alert(`导入失败：${message}`);
     } finally {
       setArchiveImporting(false);
+    }
+  };
+
+  const exportVocabularyArchiveAsFile = async (): Promise<void> => {
+    const payload = await createVocabularyArchivePayload();
+    const json = JSON.stringify(payload);
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const date = new Date();
+    const pad = (value: number) => `${value}`.padStart(2, '0');
+    const fileName = `读点书-词库-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}.json`;
+
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const handleExportVocabularyArchive = async () => {
+    if (archiveExporting || archiveImporting || vocabularyArchiveExporting || vocabularyArchiveImporting) return;
+    setVocabularyArchiveExporting(true);
+    try {
+      await exportVocabularyArchiveAsFile();
+    } catch (error) {
+      console.error('Failed to export vocabulary archive:', error);
+      alert(error instanceof Error ? `导出失败：${error.message}` : '导出失败，请稍后重试。');
+    } finally {
+      setVocabularyArchiveExporting(false);
+    }
+  };
+
+  const handleImportVocabularyArchive = () => {
+    if (archiveExporting || archiveImporting || vocabularyArchiveExporting || vocabularyArchiveImporting) return;
+    vocabularyArchiveFileInputRef.current?.click();
+  };
+
+  const handleImportVocabularyArchiveFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    const confirmed = window.confirm('导入将按“合并去重”写入生词本与词库，确定继续吗？');
+    if (!confirmed) return;
+
+    setVocabularyArchiveImporting(true);
+    try {
+      const rawText = await file.text();
+      const parsed = JSON.parse(rawText);
+      await restoreVocabularyArchivePayloadMerge(parsed);
+      alert('词库导入成功，页面将刷新以同步最新数据。');
+      window.location.reload();
+    } catch (error) {
+      console.error('Failed to import vocabulary archive:', error);
+      const message = error instanceof Error ? error.message : '未知错误';
+      alert(`导入失败：${message}`);
+    } finally {
+      setVocabularyArchiveImporting(false);
     }
   };
 
@@ -657,8 +789,19 @@ const Settings: React.FC<SettingsProps> = ({
               <div className={`absolute inset-[34px] rounded-full flex flex-col items-center justify-center ${pressedClass}`}>
                 <div className={`text-[11px] uppercase tracking-wider ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>总占用</div>
                 <div className={`text-lg font-black ${headingClass}`}>{formatBytes(storageTotalBytes)}</div>
+                {storageQuotaBytes && storageQuotaBytes > 0 && (
+                  <div className="text-[10px] text-slate-500 mt-0.5">
+                    {Math.min(100, Math.max(0, (storageTotalBytes / storageQuotaBytes) * 100)).toFixed(1)}%
+                  </div>
+                )}
               </div>
             </div>
+            {hasStorageWarning && (
+              <div className="mt-3 h-7 px-3 rounded-full text-[11px] font-semibold flex items-center gap-1.5 text-amber-500 bg-amber-100/30 dark:bg-amber-400/10">
+                <AlertTriangle size={12} />
+                存储偏高，建议备份
+              </div>
+            )}
           </div>
 
           <div className="mt-5 space-y-2">
@@ -667,6 +810,11 @@ const Settings: React.FC<SettingsProps> = ({
                 <div className="flex items-center gap-3 min-w-0">
                   <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: item.color }} />
                   <span className={`text-sm font-bold truncate ${headingClass}`}>{item.label}</span>
+                  {storageWarningKeys.has(item.key) && (
+                    <span className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] bg-amber-100/80 text-amber-600 dark:bg-amber-400/20 dark:text-amber-300">
+                      !
+                    </span>
+                  )}
                 </div>
                 <div className="text-right ml-3">
                   <div className={`text-xs font-semibold ${headingClass}`}>{formatBytes(item.bytes)}</div>
@@ -822,6 +970,17 @@ const Settings: React.FC<SettingsProps> = ({
                 </div>
                 {renderToggle(appSettings.activeCommentsEnabled, () => updateSetting('activeCommentsEnabled', !appSettings.activeCommentsEnabled))}
              </div>
+
+             <div className="flex items-center justify-between mt-3 mb-2 pl-2">
+                <div className="flex flex-col">
+                  <span className={`text-sm font-bold ${headingClass}`}>主动更新便签</span>
+                  <span className="text-[11px] text-slate-500">每天抽签 3 次，命中后由角色更新便签</span>
+                </div>
+                {renderToggle(
+                  appSettings.activeSignatureUpdateEnabled,
+                  () => updateSetting('activeSignatureUpdateEnabled', !appSettings.activeSignatureUpdateEnabled)
+                )}
+             </div>
              
              {/* Active Comment Settings Expansion */}
              <div className={`grid transition-[grid-template-rows] duration-300 ease-in-out ${appSettings.activeCommentsEnabled ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
@@ -940,7 +1099,14 @@ const Settings: React.FC<SettingsProps> = ({
                 <div className={`${sectionIconClass} text-slate-400`}>
                   <HardDrive size={22} />
                 </div>
-                <span className={`font-bold ${headingClass}`}>存储分析</span>
+                <span className={`font-bold ${headingClass} flex items-center gap-2`}>
+                  存储分析
+                  {hasStorageWarning && (
+                    <span className="w-5 h-5 rounded-full flex items-center justify-center text-[11px] bg-amber-100/80 text-amber-600 dark:bg-amber-400/20 dark:text-amber-300">
+                      !
+                    </span>
+                  )}
+                </span>
               </div>
               <div className={`w-8 h-8 rounded-full flex items-center justify-center text-slate-400 ${isDarkMode ? cardClass : 'neu-flat'}`}>
                 <ChevronRight size={16} />
@@ -972,7 +1138,7 @@ const Settings: React.FC<SettingsProps> = ({
         <button
           type="button"
           onClick={() => void handleExportArchive()}
-          disabled={archiveExporting || archiveImporting}
+          disabled={archiveExporting || archiveImporting || vocabularyArchiveExporting || vocabularyArchiveImporting}
           className={`${cardClass} py-4 rounded-2xl flex flex-col items-center justify-center gap-2 text-slate-500 hover:text-rose-400 transition-colors active:scale-[0.98] disabled:opacity-55 disabled:cursor-not-allowed`}
         >
             {archiveExporting ? <Loader2 size={24} className="animate-spin" /> : <Upload size={24} />}
@@ -981,7 +1147,7 @@ const Settings: React.FC<SettingsProps> = ({
         <button
           type="button"
           onClick={handleImportArchive}
-          disabled={archiveExporting || archiveImporting}
+          disabled={archiveExporting || archiveImporting || vocabularyArchiveExporting || vocabularyArchiveImporting}
           className={`${cardClass} py-4 rounded-2xl flex flex-col items-center justify-center gap-2 text-slate-500 hover:text-rose-400 transition-colors active:scale-[0.98] disabled:opacity-55 disabled:cursor-not-allowed`}
         >
             {archiveImporting ? <Loader2 size={24} className="animate-spin" /> : <Download size={24} />}
@@ -995,9 +1161,36 @@ const Settings: React.FC<SettingsProps> = ({
           onChange={(e) => { void handleImportArchiveFileSelected(e); }}
         />
       </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-4 px-1">
+        <button
+          type="button"
+          onClick={() => void handleExportVocabularyArchive()}
+          disabled={archiveExporting || archiveImporting || vocabularyArchiveExporting || vocabularyArchiveImporting}
+          className={`${cardClass} py-4 rounded-2xl flex flex-col items-center justify-center gap-2 text-slate-500 hover:text-rose-400 transition-colors active:scale-[0.98] disabled:opacity-55 disabled:cursor-not-allowed`}
+        >
+          {vocabularyArchiveExporting ? <Loader2 size={24} className="animate-spin" /> : <Upload size={24} />}
+          <span className="text-xs font-bold">{vocabularyArchiveExporting ? '导出中...' : '导出生词与词库'}</span>
+        </button>
+        <button
+          type="button"
+          onClick={handleImportVocabularyArchive}
+          disabled={archiveExporting || archiveImporting || vocabularyArchiveExporting || vocabularyArchiveImporting}
+          className={`${cardClass} py-4 rounded-2xl flex flex-col items-center justify-center gap-2 text-slate-500 hover:text-rose-400 transition-colors active:scale-[0.98] disabled:opacity-55 disabled:cursor-not-allowed`}
+        >
+          {vocabularyArchiveImporting ? <Loader2 size={24} className="animate-spin" /> : <Download size={24} />}
+          <span className="text-xs font-bold">{vocabularyArchiveImporting ? '导入中...' : '导入生词与词库'}</span>
+        </button>
+        <input
+          ref={vocabularyArchiveFileInputRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={(e) => { void handleImportVocabularyArchiveFileSelected(e); }}
+        />
+      </div>
     </div>
   );
 };
 
 export default Settings;
-

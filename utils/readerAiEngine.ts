@@ -138,6 +138,8 @@ const IMAGE_REF_REGEX = /idb:\/\/[a-zA-Z0-9._-]+/gi;
 const IMAGE_TAG_REGEX = /<img\b[^>]*>/gi;
 const MARKDOWN_IMAGE_REGEX = /!\[[^\]]*]\((data:image[^)]+|idb:\/\/[^)]+)\)/gi;
 const IMAGE_PLACEHOLDER_REGEX = /\[(?:image|img|media|图片|图像)[：:][^\]]*]/gi;
+const SIGNATURE_AI_UPDATE_PROMPT_KEY = 'app_signature_ai_update_prompt_v1';
+const SIGNATURE_AI_UPDATE_PROMPT_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 
 export const sanitizeTextForAiPrompt = (raw: string) => {
   if (!raw) return '';
@@ -151,6 +153,29 @@ export const sanitizeTextForAiPrompt = (raw: string) => {
     .replace(/\n\s+/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+};
+
+const readSignatureUpdatePromptNotice = () => {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return '';
+  try {
+    const raw = localStorage.getItem(SIGNATURE_AI_UPDATE_PROMPT_KEY);
+    if (!raw) return '';
+    const parsed = JSON.parse(raw) as {
+      updatedAt?: unknown;
+      content?: unknown;
+      characterName?: unknown;
+    };
+    const updatedAt = Number(parsed.updatedAt);
+    const content = typeof parsed.content === 'string' ? parsed.content.trim() : '';
+    if (!content) return '';
+    if (!Number.isFinite(updatedAt)) return '';
+    if (Date.now() - updatedAt > SIGNATURE_AI_UPDATE_PROMPT_MAX_AGE_MS) return '';
+    const normalizedContent = sanitizeTextForAiPrompt(content).replace(/\s+/g, ' ').trim();
+    if (!normalizedContent) return '';
+    return `【便签同步】你最近更新过主页便签，内容是：「${normalizedContent}」。这是你写下的一句话，请记得它。`;
+  } catch {
+    return '';
+  }
 };
 
 const normalizeReaderLayoutText = (raw: string) => {
@@ -834,6 +859,7 @@ const buildAiPromptLineItems = (params: BuildAiPromptParams): PromptLineItem[] =
   const safePendingRecordText = sanitizeTextForAiPrompt(pendingRecordText);
   const safeUserDescription = applyTemplatePlaceholders(sanitizeTextForAiPrompt(userDescription), characterRealName, userRealName);
   const safeCharacterDescription = applyTemplatePlaceholders(sanitizeTextForAiPrompt(characterDescription), characterRealName, userRealName);
+  const signatureUpdatePromptNotice = readSignatureUpdatePromptNotice();
 
   const proactiveUnderlineRule = allowAiUnderlineInThisReply
     ? '【划线规则】如果读到触动你的句子，可以额外输出 0 或 1 行 `[划线] 文本`，这句话必须是当前读到的书中原句，禁止编造。'
@@ -905,6 +931,7 @@ const buildAiPromptLineItems = (params: BuildAiPromptParams): PromptLineItem[] =
   pushPromptLine(lines, 'otherInstructions', '- 说话要自然、口语化、短句，可省略标点，像在手机上打字聊天。');
   pushPromptLine(lines, 'otherInstructions', `- ${userNickname}还没读到后面的内容，绝对不能剧透。`);
   pushPromptLine(lines, 'otherInstructions', '- 如果没有被标记的句子，不要提任何不存在的标记内容。');
+  pushPromptLine(lines, 'otherInstructions', signatureUpdatePromptNotice);
   pushPromptLine(lines, 'otherInstructions', proactiveUnderlineRule);
   pushPromptLine(lines, 'otherInstructions', '</tone_and_style>');
   pushPromptLine(lines, 'otherInstructions', '');
@@ -1019,7 +1046,9 @@ export const buildCharacterWorldBookSections = (
       after: [],
     };
   }
-  const scopedEntries = worldBookEntries.filter((entry) => boundCategories.has(entry.category));
+  const scopedEntries = worldBookEntries.filter(
+    (entry) => boundCategories.has(entry.category) && entry.sendToAi !== false
+  );
   return {
     before: sortWorldBookEntriesByCode(scopedEntries.filter((entry) => entry.insertPosition === 'BEFORE')),
     after: sortWorldBookEntriesByCode(scopedEntries.filter((entry) => entry.insertPosition === 'AFTER')),
@@ -1413,5 +1442,3 @@ export const runConversationGeneration = async (
     finishConversationGeneration(conversationKey, requestId, 'completed');
   }
 };
-
-

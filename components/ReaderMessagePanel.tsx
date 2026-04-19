@@ -87,6 +87,7 @@ interface ReaderMessagePanelProps {
   getLatestReadingPosition: () => ReaderPositionState | null;
   isMoreSettingsOpen: boolean;
   onCloseMoreSettings: () => void;
+  onOpenReaderTypography?: () => void;
   ragApiConfigResolver?: RagApiConfigResolver;
   ttsConfig: TtsConfig | null;
   ttsPresets: TtsPreset[];
@@ -490,6 +491,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
   getLatestReadingPosition,
   isMoreSettingsOpen,
   onCloseMoreSettings,
+  onOpenReaderTypography,
   ragApiConfigResolver,
   ttsConfig,
   ttsPresets,
@@ -1224,12 +1226,16 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
           models = data.data.map((item: { id?: string }) => (item.id || '').trim()).filter(Boolean);
         }
       } else {
-        const response = await fetch(`${endpoint}/models`, {
+        const requestInit = {
           headers: {
             Authorization: `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
-        });
+        };
+        let response = await fetch(`${endpoint}/models`, requestInit);
+        if (!response.ok && response.status === 404 && !endpoint.endsWith('/v1')) {
+          response = await fetch(`${endpoint}/v1/models`, requestInit);
+        }
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         if (Array.isArray(data?.data)) {
@@ -3540,6 +3546,7 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
         favoriteQuotes={currentConversationFavorites}
         onDeleteFavoriteQuote={handleDeleteFavoriteQuoteFromPanel}
         onExportConversation={handleExportConversation}
+        onOpenReaderTypography={onOpenReaderTypography}
       />
 
       {contextMenu && !isDeleteMode && (
@@ -3607,4 +3614,3 @@ const ReaderMessagePanel: React.FC<ReaderMessagePanelProps> = ({
 };
 
 export default ReaderMessagePanel;
-

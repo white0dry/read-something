@@ -358,12 +358,16 @@ const ApiSettings: React.FC<ApiSettingsProps> = ({
 
       } else {
         // OpenAI / DeepSeek Compatible
-        const response = await fetch(`${endpoint}/models`, {
-           headers: {
-             'Authorization': `Bearer ${config.apiKey}`,
-             'Content-Type': 'application/json'
-           }
-        });
+        const requestInit = {
+          headers: {
+            'Authorization': `Bearer ${config.apiKey}`,
+            'Content-Type': 'application/json'
+          }
+        };
+        let response = await fetch(`${endpoint}/models`, requestInit);
+        if (!response.ok && response.status === 404 && !endpoint.endsWith('/v1')) {
+          response = await fetch(`${endpoint}/v1/models`, requestInit);
+        }
         if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
         const data = await response.json();
         if (Array.isArray(data.data)) {
